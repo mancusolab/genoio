@@ -73,10 +73,74 @@ class Dataset:
                 raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
             raise UnsupportedRepresentation("haplo reads are not implemented until Phase 6")
 
+        return self._read_validated(
+            samples=samples,
+            missing=missing,
+            return_samples=return_samples,
+            return_variants=return_variants,
+            validated_options=validated_options,
+            variant_window=None,
+        )
+
+    def samples(self, **options: Any) -> Any:
+        _reject_options(options)
+        return samples_frame(self._metadata()["samples"])
+
+    def variants(self, *, stats: Any = None, **options: Any) -> Any:
+        _validate_variant_stats(stats)
+        _reject_options(options)
+        return variants_frame(self._metadata()["variants"])
+
+    def blocks(self, size: int, **read_options: Any) -> Any:
+        _validate_block_size(size)
+        normalized_options = _read_options_with_defaults(read_options)
+        validated_options = _validate_read_options(**normalized_options)
+        if normalized_options["kind"] != "geno":
+            capabilities = self._metadata()["capabilities"]
+            if not capabilities["supports_haplo"]:
+                raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
+            raise UnsupportedRepresentation("haplo reads are not implemented until Phase 6")
+        return self._block_iterator(size, normalized_options, validated_options)
+
+    def _block_iterator(
+        self,
+        size: int,
+        read_options: dict[str, Any],
+        validated_options: _ValidatedReadOptions,
+    ) -> Any:
+        start = 0
+        while True:
+            block = self._read_validated(
+                samples=read_options["samples"],
+                missing=read_options["missing"],
+                return_samples=read_options["return_samples"],
+                return_variants=read_options["return_variants"],
+                validated_options=validated_options,
+                variant_window={"start": start, "len": size},
+            )
+            genotype_matrix = block[0] if isinstance(block, tuple) else block
+            if genotype_matrix.shape[1] == 0:
+                break
+            yield block
+            if genotype_matrix.shape[1] < size:
+                break
+            start += size
+
+    def _read_validated(
+        self,
+        *,
+        samples: list[str] | tuple[str, ...] | set[str] | None,
+        missing: str,
+        return_samples: bool,
+        return_variants: bool,
+        validated_options: _ValidatedReadOptions,
+        variant_window: dict[str, int] | None,
+    ) -> Any:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
             "samples": None if samples is None else list(samples),
             "variants": validated_options.variant_filter_ir,
+            "variant_window": variant_window,
         }
         if validated_options.sparse_format is None:
             rust_result = self._read_dense_from_rust(members, options)
@@ -106,20 +170,6 @@ class Dataset:
             return_samples=return_samples,
             return_variants=return_variants,
         )
-
-    def samples(self, **options: Any) -> Any:
-        _reject_options(options)
-        return samples_frame(self._metadata()["samples"])
-
-    def variants(self, *, stats: Any = None, **options: Any) -> Any:
-        _validate_variant_stats(stats)
-        _reject_options(options)
-        return variants_frame(self._metadata()["variants"])
-
-    def blocks(self, size: int, **read_options: Any) -> Any:
-        _validate_block_size(size)
-        _validate_read_options_from_mapping(read_options)
-        raise NotImplementedError("block iteration is implemented in a later phase")
 
     def _read_dense_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -316,7 +366,7 @@ def _validate_block_size(size: int) -> None:
         raise InvalidOptionError("block size must be a positive integer")
 
 
-def _validate_read_options_from_mapping(read_options: dict[str, Any]) -> None:
+def _read_options_with_defaults(read_options: dict[str, Any]) -> dict[str, Any]:
     defaults = {
         "kind": "geno",
         "sparse": False,
@@ -331,4 +381,4 @@ def _validate_read_options_from_mapping(read_options: dict[str, Any]) -> None:
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
-    _validate_read_options(**(defaults | read_options))
+    return defaults | read_options

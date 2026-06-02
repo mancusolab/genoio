@@ -29,6 +29,18 @@ pub struct VariantStats {
     pub polymorphic: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantWindow {
+    pub start: usize,
+    pub len: usize,
+}
+
+impl VariantWindow {
+    pub fn contains(self, retained_index: usize) -> bool {
+        retained_index >= self.start && retained_index < self.start.saturating_add(self.len)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
     Predicate(Predicate),

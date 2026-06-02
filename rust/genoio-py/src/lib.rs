@@ -48,22 +48,29 @@ fn read_dense(
 ) -> PyResult<Py<PyDict>> {
     let requested_samples = samples_option(options)?;
     let variant_filter = variants_option(options)?;
+    let variant_window = variant_window_option(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
-            genoio_io::read_vcf_dense(&path, requested_samples.as_deref(), variant_filter.as_ref())
+            genoio_io::read_vcf_dense_windowed(
+                &path,
+                requested_samples.as_deref(),
+                variant_filter.as_ref(),
+                variant_window,
+            )
         }
         "plink1" => {
             let bed = member_path(members, "bed")?;
             let bim = member_path(members, "bim")?;
             let fam = member_path(members, "fam")?;
-            genoio_io::read_plink1_dense(
+            genoio_io::read_plink1_dense_windowed(
                 &bed,
                 &bim,
                 &fam,
                 requested_samples.as_deref(),
                 variant_filter.as_ref(),
+                variant_window,
             )
         }
         other => {
@@ -86,22 +93,29 @@ fn read_sparse(
 ) -> PyResult<Py<PyDict>> {
     let requested_samples = samples_option(options)?;
     let variant_filter = variants_option(options)?;
+    let variant_window = variant_window_option(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
-            genoio_io::read_vcf_sparse(&path, requested_samples.as_deref(), variant_filter.as_ref())
+            genoio_io::read_vcf_sparse_windowed(
+                &path,
+                requested_samples.as_deref(),
+                variant_filter.as_ref(),
+                variant_window,
+            )
         }
         "plink1" => {
             let bed = member_path(members, "bed")?;
             let bim = member_path(members, "bim")?;
             let fam = member_path(members, "fam")?;
-            genoio_io::read_plink1_sparse(
+            genoio_io::read_plink1_sparse_windowed(
                 &bed,
                 &bim,
                 &fam,
                 requested_samples.as_deref(),
                 variant_filter.as_ref(),
+                variant_window,
             )
         }
         other => {
@@ -152,6 +166,25 @@ fn variants_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::
     genoio_core::VariantFilter::from_json_value(json)
         .map(Some)
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
+fn variant_window_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::VariantWindow>> {
+    let Some(value) = options.get_item("variant_window")? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    let dict = value.downcast::<PyDict>()?;
+    let start = dict
+        .get_item("start")?
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing variant_window.start"))?
+        .extract::<usize>()?;
+    let len = dict
+        .get_item("len")?
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing variant_window.len"))?
+        .extract::<usize>()?;
+    Ok(Some(genoio_core::VariantWindow { start, len }))
 }
 
 fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResult<Py<PyDict>> {

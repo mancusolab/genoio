@@ -6,7 +6,7 @@ use genoio_core::{
     attach_variant_stats, compute_variant_stats, select_samples_source_order,
     sparse_from_dense_minor_flipped, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
     MetadataError, MetadataOutput, RegionPredicate, SampleRecord, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
 
@@ -47,16 +47,31 @@ pub fn read_vcf_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
+    read_vcf_dense_windowed(path, requested_samples, variant_filter, None)
+}
+
+pub fn read_vcf_dense_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<DenseGenotypeMatrix> {
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
-            return read_indexed_vcf_dense(path, requested_samples, variant_filter, &region);
+            return read_indexed_vcf_dense(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+            );
         }
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
-    read_vcf_dense_records(path, requested_samples, variant_filter, &mut reader)
+    read_vcf_dense_records(path, requested_samples, variant_filter, variant_window, &mut reader)
 }
 
 pub fn read_vcf_sparse(
@@ -64,7 +79,16 @@ pub fn read_vcf_sparse(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<SparseGenotypeMatrix> {
-    let dense = read_vcf_dense(path, requested_samples, variant_filter)?;
+    read_vcf_sparse_windowed(path, requested_samples, variant_filter, None)
+}
+
+pub fn read_vcf_sparse_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<SparseGenotypeMatrix> {
+    let dense = read_vcf_dense_windowed(path, requested_samples, variant_filter, variant_window)?;
     Ok(sparse_from_dense_minor_flipped(dense)?)
 }
 
@@ -72,6 +96,7 @@ fn read_indexed_vcf_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
 ) -> Result<DenseGenotypeMatrix> {
     let mut reader = IndexedReader::from_path(path).map_err(|error| {
@@ -90,13 +115,14 @@ fn read_indexed_vcf_dense(
         )
         .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
 
-    read_vcf_dense_records(path, requested_samples, variant_filter, &mut reader)
+    read_vcf_dense_records(path, requested_samples, variant_filter, variant_window, &mut reader)
 }
 
 fn read_vcf_dense_records<R: Read>(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
@@ -107,6 +133,7 @@ fn read_vcf_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
+    let mut retained_index = 0_usize;
     for record_result in reader.records() {
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
@@ -141,6 +168,11 @@ fn read_vcf_dense_records<R: Read>(
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
+        }
+        let include_in_window = variant_window.is_none_or(|window| window.contains(retained_index));
+        retained_index += 1;
+        if !include_in_window {
+            continue;
         }
         variants.push(variant);
         variant_major_values.extend(current_values);

@@ -7,7 +7,7 @@ use genoio_core::{
     attach_variant_stats, compute_variant_stats, select_samples_source_order,
     sparse_from_dense_minor_flipped, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
     MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord,
+    VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -33,6 +33,17 @@ pub fn read_plink1_dense(
     fam: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
+) -> Result<DenseGenotypeMatrix> {
+    read_plink1_dense_windowed(bed, bim, fam, requested_samples, variant_filter, None)
+}
+
+pub fn read_plink1_dense_windowed(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
     let bed_bytes = fs::read(bed).map_err(|source| MetadataError::Io {
         path: bed.to_path_buf(),
@@ -61,6 +72,7 @@ pub fn read_plink1_dense(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::with_capacity(selection.samples.len() * n_source_variants);
     let mut variant_major_missing = Vec::with_capacity(selection.samples.len() * n_source_variants);
+    let mut retained_index = 0_usize;
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
         if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
@@ -88,6 +100,11 @@ pub fn read_plink1_dense(
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
+        }
+        let include_in_window = variant_window.is_none_or(|window| window.contains(retained_index));
+        retained_index += 1;
+        if !include_in_window {
+            continue;
         }
         variants.push(variant);
         variant_major_values.extend(current_values);
@@ -120,7 +137,25 @@ pub fn read_plink1_sparse(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<SparseGenotypeMatrix> {
-    let dense = read_plink1_dense(bed, bim, fam, requested_samples, variant_filter)?;
+    read_plink1_sparse_windowed(bed, bim, fam, requested_samples, variant_filter, None)
+}
+
+pub fn read_plink1_sparse_windowed(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<SparseGenotypeMatrix> {
+    let dense = read_plink1_dense_windowed(
+        bed,
+        bim,
+        fam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+    )?;
     Ok(sparse_from_dense_minor_flipped(dense)?)
 }
 
