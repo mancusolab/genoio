@@ -87,7 +87,7 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
 #[test]
 fn plink1_sparse_reconstructs_dense_when_no_missing_calls() {
     let dir = unique_dir("plink1-sparse-parity");
-    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x0d]);
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c]);
 
     let dense =
         genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None).expect("dense plink should decode");

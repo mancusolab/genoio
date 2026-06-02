@@ -126,7 +126,7 @@ def test_dense_plink1_read_matches_fixture_matrix_and_return_tuple_shapes():
     G_variants = dataset.read(return_variants=True)
     G_both = dataset.read(return_samples=True, return_variants=True)
 
-    expected = np.array([[0.0, 1.0, 2.0], [1.0, 0.0, np.nan], [2.0, np.nan, 0.0]], dtype=np.float32)
+    expected = np.array([[0.0, np.nan, 2.0], [np.nan, 0.0, 1.0], [2.0, 1.0, 0.0]], dtype=np.float32)
     np.testing.assert_array_equal(G, expected)
     assert isinstance(G_samples, tuple)
     assert isinstance(G_variants, tuple)

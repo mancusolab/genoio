@@ -120,3 +120,17 @@ fn concrete_region_pushdown_is_extracted_only_from_safe_expression_shapes() {
     .expect("filter IR should deserialize");
     assert_eq!(not_filter.concrete_region_pushdown(), None);
 }
+
+#[test]
+fn genotype_stats_preserve_integer_mac_beyond_f32_exact_range() {
+    let n_called = 16_777_217_usize;
+    let values = vec![1.0_f32; n_called];
+    let missing = vec![false; n_called];
+
+    let stats = genoio_core::compute_variant_stats(&values, &missing).expect("stats should compute");
+
+    assert_eq!(stats.n_called, u32::try_from(n_called).unwrap());
+    assert_eq!(stats.mac, Some(u32::try_from(n_called).unwrap()));
+    assert_eq!(stats.af, Some(0.5));
+    assert_eq!(stats.maf, Some(0.5));
+}

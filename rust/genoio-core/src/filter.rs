@@ -21,10 +21,10 @@ pub struct RegionPredicate {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VariantStats {
-    pub af: Option<f32>,
-    pub maf: Option<f32>,
+    pub af: Option<f64>,
+    pub maf: Option<f64>,
     pub mac: Option<u32>,
-    pub missing_rate: f32,
+    pub missing_rate: f64,
     pub n_called: u32,
     pub polymorphic: bool,
 }
@@ -269,14 +269,14 @@ impl Predicate {
                 self.metadata_decision(variant) == Some(true)
             }
             Self::Maf { min, max } => stats.and_then(|stats| stats.maf).is_some_and(|maf| {
-                min.is_none_or(|threshold| maf >= threshold)
-                    && max.is_none_or(|threshold| maf <= threshold)
+                min.is_none_or(|threshold| maf >= f64::from(threshold))
+                    && max.is_none_or(|threshold| maf <= f64::from(threshold))
             }),
             Self::Mac { min, max } => stats.and_then(|stats| stats.mac).is_some_and(|mac| {
                 min.is_none_or(|threshold| mac >= threshold)
                     && max.is_none_or(|threshold| mac <= threshold)
             }),
-            Self::MissingRate { max } => stats.is_some_and(|stats| stats.missing_rate <= *max),
+            Self::MissingRate { max } => stats.is_some_and(|stats| stats.missing_rate <= f64::from(*max)),
             Self::Polymorphic => stats.is_some_and(|stats| stats.polymorphic),
         }
     }
@@ -300,22 +300,28 @@ pub fn compute_variant_stats(
         ));
     }
 
-    let mut allele_count = 0.0_f32;
-    let mut n_called = 0_u32;
+    let mut allele_count = 0_u64;
+    let mut n_called = 0_u64;
     for (value, missing) in values.iter().zip(missing_mask) {
         if *missing {
             continue;
         }
-        allele_count += *value;
+        allele_count += discrete_allele_count(*value)?;
         n_called += 1;
     }
+    let n_called = u32::try_from(n_called).map_err(|_| {
+        MetadataError::parse(
+            "<filter>",
+            "called genotype count exceeds supported metadata range",
+        )
+    })?;
 
     let total = values.len();
     let missing_count = total - usize::try_from(n_called).unwrap_or(usize::MAX);
     let missing_rate = if total == 0 {
         0.0
     } else {
-        missing_count as f32 / total as f32
+        missing_count as f64 / total as f64
     };
     if n_called == 0 {
         return Ok(VariantStats {
@@ -328,10 +334,16 @@ pub fn compute_variant_stats(
         });
     }
 
-    let called_alleles = 2.0 * n_called as f32;
-    let af = allele_count / called_alleles;
+    let called_alleles = 2_u64 * u64::from(n_called);
+    let af = allele_count as f64 / called_alleles as f64;
     let maf = af.min(1.0 - af);
-    let mac = allele_count.min(called_alleles - allele_count).round() as u32;
+    let mac = allele_count.min(called_alleles - allele_count);
+    let mac = u32::try_from(mac).map_err(|_| {
+        MetadataError::parse(
+            "<filter>",
+            "minor allele count exceeds supported metadata range",
+        )
+    })?;
     Ok(VariantStats {
         af: Some(af),
         maf: Some(maf),
@@ -343,11 +355,23 @@ pub fn compute_variant_stats(
 }
 
 pub fn attach_variant_stats(variant: &mut VariantRecord, stats: VariantStats) {
-    variant.af = stats.af;
-    variant.maf = stats.maf;
+    variant.af = stats.af.map(|value| value as f32);
+    variant.maf = stats.maf.map(|value| value as f32);
     variant.mac = stats.mac;
-    variant.missing_rate = Some(stats.missing_rate);
+    variant.missing_rate = Some(stats.missing_rate as f32);
     variant.n_called = Some(stats.n_called);
+}
+
+fn discrete_allele_count(value: f32) -> Result<u64, MetadataError> {
+    match value {
+        0.0 => Ok(0),
+        1.0 => Ok(1),
+        2.0 => Ok(2),
+        other => Err(MetadataError::parse(
+            "<filter>",
+            format!("genotype statistics require discrete 0/1/2 values; observed {other}"),
+        )),
+    }
 }
 
 fn is_snp(variant: &VariantRecord) -> bool {

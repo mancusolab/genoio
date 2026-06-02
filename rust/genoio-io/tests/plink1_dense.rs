@@ -40,6 +40,25 @@ F2 S3 0 0 0 2.0
     (bed, bim, fam)
 }
 
+fn write_plink_code_table_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let bed = dir.join("codes.bed");
+    let bim = dir.join("codes.bim");
+    let fam = dir.join("codes.fam");
+    // Low-order two-bit sample codes: 00, 01, 10, 11.
+    fs::write(&bed, [0x6c, 0x1b, 0x01, 0xe4]).expect("bed fixture should be written");
+    write_text(&bim, "1 rs_codes 0 10 G A\n");
+    write_text(
+        &fam,
+        "\
+F1 S1 0 0 1 -9
+F1 S2 0 0 1 -9
+F1 S3 0 0 1 -9
+F1 S4 0 0 1 -9
+",
+    );
+    (bed, bim, fam)
+}
+
 #[test]
 fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
     let dir = unique_dir("plink1-dense-values");
@@ -52,11 +71,11 @@ fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
     assert_eq!(dense.n_variants, 3);
     assert_eq!(
         dense.values,
-        vec![0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0]
+        vec![0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0]
     );
     assert_eq!(
         dense.missing_mask,
-        vec![false, false, false, false, false, true, false, true, false]
+        vec![false, true, false, true, false, false, false, false, false]
     );
     assert_eq!(
         dense
@@ -66,6 +85,18 @@ fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
             .collect::<Vec<_>>(),
         vec!["S1", "S2", "S3"]
     );
+}
+
+#[test]
+fn plink1_dense_decodes_official_two_bit_code_table() {
+    let dir = unique_dir("plink1-dense-code-table");
+    let (bed, bim, fam) = write_plink_code_table_fixture(&dir);
+
+    let dense =
+        genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None).expect("plink1 should decode");
+
+    assert_eq!(dense.values, vec![2.0, 0.0, 1.0, 0.0]);
+    assert_eq!(dense.missing_mask, vec![false, true, false, false]);
 }
 
 #[test]
@@ -107,7 +138,7 @@ fn plink1_dense_filters_samples_in_source_order() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 2.0, 0.0, 0.0]);
+    assert_eq!(dense.values, vec![0.0, 0.0, 2.0, 2.0, 1.0, 0.0]);
     assert_eq!(dense.diagnostics.requested_samples, 2);
     assert_eq!(dense.diagnostics.retained_samples, 2);
     assert_eq!(dense.diagnostics.missing_samples, 0);

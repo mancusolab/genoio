@@ -346,8 +346,8 @@ fn read_plink1_variant_values(
 fn decode_plink1_code(code: u8) -> (f32, bool) {
     match code {
         0b00 => (2.0, false),
-        0b01 => (1.0, false),
-        0b10 => (0.0, true),
+        0b01 => (0.0, true),
+        0b10 => (1.0, false),
         0b11 => (0.0, false),
         _ => unreachable!("two-bit PLINK1 code should be masked"),
     }
