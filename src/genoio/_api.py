@@ -290,6 +290,10 @@ def variants(path: str | Path, *, format: str | None = None, stats: Any = None, 
     return open(path, format=format).variants(stats=stats, **options)
 
 
+def blocks(path: str | Path, size: int, *, format: str | None = None, **read_options: Any) -> Any:
+    return open(path, format=format).blocks(size, **read_options)
+
+
 def _validate_read_options(
     *,
     kind: str,

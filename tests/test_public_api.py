@@ -2,9 +2,25 @@ import sys
 from inspect import signature
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+
+def write_blocks_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "blocks.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/1\t1/1
+"""
+    )
+    return path
 
 
 def test_import_exposes_public_names_without_reference_packages():
@@ -15,6 +31,7 @@ def test_import_exposes_public_names_without_reference_packages():
         "read",
         "samples",
         "variants",
+        "blocks",
         "chrom",
         "region",
         "snp",
@@ -91,6 +108,20 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
 
     with pytest.raises(genoio.InvalidOptionError, match="block size"):
         dataset.blocks(0, **read_options)
+
+
+def test_top_level_blocks_matches_dataset_blocks(tmp_path):
+    import genoio
+
+    path = write_blocks_vcf(tmp_path)
+
+    top_level_blocks = list(genoio.blocks(path, size=2, return_variants=True))
+    dataset_blocks = list(genoio.open(path).blocks(size=2, return_variants=True))
+
+    assert len(top_level_blocks) == len(dataset_blocks)
+    for top_level_block, dataset_block in zip(top_level_blocks, dataset_blocks, strict=True):
+        np.testing.assert_array_equal(top_level_block[0], dataset_block[0])
+        assert top_level_block[1].equals(dataset_block[1])
 
 
 def test_dataset_variants_accepts_documented_default_stats_keyword():

@@ -1,6 +1,6 @@
 # pattern: Functional Core
 
-from ._api import Dataset, open, read, samples, variants
+from ._api import Dataset, blocks, open, read, samples, variants
 from ._errors import (
     AmbiguousSourceError,
     GenoioError,
@@ -20,6 +20,7 @@ __all__ = [
     "read",
     "samples",
     "variants",
+    "blocks",
     "chrom",
     "region",
     "snp",
