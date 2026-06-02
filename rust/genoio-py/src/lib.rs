@@ -264,6 +264,8 @@ fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResu
         sample_dict.set_item("mother", sample.mother)?;
         sample_dict.set_item("sex", sample.sex)?;
         sample_dict.set_item("phenotype", sample.phenotype)?;
+        sample_dict.set_item("source_sample_index", sample.source_sample_index)?;
+        sample_dict.set_item("haplotype_index", sample.haplotype_index)?;
         samples.append(sample_dict)?;
     }
 
@@ -367,6 +369,8 @@ fn sample_records_to_py(
         sample_dict.set_item("mother", sample.mother)?;
         sample_dict.set_item("sex", sample.sex)?;
         sample_dict.set_item("phenotype", sample.phenotype)?;
+        sample_dict.set_item("source_sample_index", sample.source_sample_index)?;
+        sample_dict.set_item("haplotype_index", sample.haplotype_index)?;
         py_samples.append(sample_dict)?;
     }
     Ok(py_samples)

@@ -81,7 +81,7 @@ class Dataset:
         if kind != "geno":
             capabilities = self._metadata()["capabilities"]
             if not capabilities["supports_haplo"]:
-                raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
+                raise _unsupported_haplotype_source(self.source.format.value)
 
         return self._read_validated(
             kind=kind,
@@ -109,8 +109,7 @@ class Dataset:
         if normalized_options["kind"] != "geno":
             capabilities = self._metadata()["capabilities"]
             if not capabilities["supports_haplo"]:
-                raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
-            raise UnsupportedRepresentation("haplo reads are not implemented until Phase 6")
+                raise _unsupported_haplotype_source(self.source.format.value)
         return self._block_iterator(size, normalized_options, validated_options)
 
     def _block_iterator(
@@ -341,6 +340,14 @@ def _reject_deferred_plink2_decode(source_format: str) -> None:
         raise UnsupportedFormatError(
             "PLINK2 decode is deferred pending docs/plink2-parser-strategy.md"
         )
+
+
+def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:
+    if source_format == "vcf":
+        return UnsupportedRepresentation(
+            'VCF source has no phased GT evidence; kind="haplo" requires phased retained variants'
+        )
+    return UnsupportedRepresentation(f"{source_format} does not support haplo reads")
 
 
 def _validate_sparse(sparse: bool | str) -> str | None:

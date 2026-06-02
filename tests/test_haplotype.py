@@ -52,6 +52,21 @@ def write_mixed_phase_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_mixed_phase_stat_filter_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "mixed_phase_stat_filter.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs_phased\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|0
+1\t20\trs_unphased_monomorphic\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/0
+"""
+    )
+    return path
+
+
 def write_common_a1_vcf(tmp_path: Path) -> Path:
     path = tmp_path / "common_a1.vcf"
     path.write_text(
@@ -112,6 +127,8 @@ def test_phased_vcf_haplotype_dense_counts_a1_in_sample_haplotype_order(tmp_path
         ),
     )
     assert samples["iid"].to_list() == ["S1", "S1", "S2", "S2"]
+    assert samples["haplotype_index"].to_list() == [0, 1, 0, 1]
+    assert samples["source_sample_index"].to_list() == [0, 0, 1, 1]
     assert variants["id"].to_list() == ["rs1", "rs2"]
 
 
@@ -147,6 +164,63 @@ def test_haplotype_read_rejects_unphased_separator_in_retained_variant(tmp_path)
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="unphased"):
         dataset.read(kind="haplo", variants=["rs2"])
+
+
+def test_haplotype_stat_filter_drops_unphased_variant_before_separator_check(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_mixed_phase_stat_filter_vcf(tmp_path))
+
+    H, variants = dataset.read(kind="haplo", variants=genoio.maf(min=0.1), return_variants=True)
+
+    np.testing.assert_array_equal(
+        H,
+        np.array([[0.0], [1.0], [1.0], [0.0]], dtype=np.float32),
+    )
+    assert variants["id"].to_list() == ["rs_phased"]
+
+
+def test_sparse_haplotype_stat_filter_drops_unphased_variant_before_separator_check(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_mixed_phase_stat_filter_vcf(tmp_path))
+
+    H, variants = dataset.read(kind="haplo", sparse=True, variants=genoio.maf(min=0.1), return_variants=True)
+
+    assert scipy_sparse.isspmatrix_csc(H)
+    np.testing.assert_array_equal(
+        H.toarray(),
+        np.array([[0.0], [1.0], [1.0], [0.0]], dtype=np.float32),
+    )
+    assert variants["id"].to_list() == ["rs_phased"]
+
+
+def test_haplotype_blocks_stream_dense_haplotype_columns(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_phased_vcf(tmp_path))
+
+    full, full_samples, full_variants = dataset.read(kind="haplo", return_samples=True, return_variants=True)
+    blocks = list(dataset.blocks(size=1, kind="haplo", return_samples=True, return_variants=True))
+
+    assert len(blocks) == 2
+    np.testing.assert_array_equal(np.concatenate([block[0] for block in blocks], axis=1), full)
+    assert blocks[0][1].equals(full_samples)
+    assert [block[2]["id"].to_list() for block in blocks] == [["rs1"], ["rs2"]]
+    assert [variant_id for block in blocks for variant_id in block[2]["id"].to_list()] == full_variants["id"].to_list()
+
+
+def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_phased_vcf(tmp_path))
+
+    full = dataset.read(kind="haplo", sparse=True)
+    blocks = list(dataset.blocks(size=1, kind="haplo", sparse=True))
+
+    assert len(blocks) == 2
+    assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)
+    np.testing.assert_array_equal(scipy_sparse.hstack(blocks, format="csc").toarray(), full.toarray())
 
 
 def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):

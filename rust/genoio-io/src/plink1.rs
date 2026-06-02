@@ -382,6 +382,8 @@ fn parse_fam_line(path: &Path, line_number: usize, line: &str) -> Result<SampleR
         mother: optional_plink_value(fields[3]),
         sex: Some(fields[4].to_string()),
         phenotype: Some(fields[5].to_string()),
+        source_sample_index: None,
+        haplotype_index: None,
     })
 }
 

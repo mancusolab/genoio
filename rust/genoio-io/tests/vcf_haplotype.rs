@@ -37,6 +37,18 @@ fn mixed_phase_vcf() -> String {
     .to_string()
 }
 
+fn mixed_phase_stat_filter_vcf() -> String {
+    "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs_phased\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|0
+1\t20\trs_unphased_monomorphic\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/0
+"
+    .to_string()
+}
+
 fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
     let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
     for col in 0..sparse.n_cols {
@@ -100,4 +112,30 @@ fn haplotype_decode_rejects_unphased_retained_genotype() {
         .expect_err("unphased retained genotype should fail");
 
     assert!(error.to_string().contains("unphased"));
+}
+
+#[test]
+fn haplotype_stat_filter_drops_unphased_genotype_before_separator_check() {
+    let dir = unique_dir("vcf-haplo-filter-unphased");
+    let path = dir.join("mixed-stat.vcf");
+    fs::write(&path, mixed_phase_stat_filter_vcf()).expect("fixture should be written");
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let haplotypes = genoio_io::read_vcf_haplotypes_dense(&path, None, Some(&filter))
+        .expect("unphased dropped genotype should not fail haplotype decode");
+
+    assert_eq!(
+        haplotypes
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs_phased"]
+    );
+    assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
 }

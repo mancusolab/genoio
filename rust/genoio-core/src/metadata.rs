@@ -10,6 +10,8 @@ pub struct SampleRecord {
     pub mother: Option<String>,
     pub sex: Option<String>,
     pub phenotype: Option<String>,
+    pub source_sample_index: Option<usize>,
+    pub haplotype_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

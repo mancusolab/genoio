@@ -8,6 +8,8 @@ fn sample(id: &str) -> SampleRecord {
         mother: None,
         sex: None,
         phenotype: None,
+        source_sample_index: None,
+        haplotype_index: None,
     }
 }
 

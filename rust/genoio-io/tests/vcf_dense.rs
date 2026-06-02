@@ -86,6 +86,8 @@ fn vcf_dense_contract_validates_shape_and_metadata_lengths() {
         mother: None,
         sex: None,
         phenotype: None,
+        source_sample_index: None,
+        haplotype_index: None,
     };
     let variant = genoio_core::VariantRecord {
         chrom: "1".to_string(),

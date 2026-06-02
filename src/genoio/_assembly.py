@@ -31,10 +31,16 @@ _VARIANT_COLUMNS = [
 
 
 def samples_frame(records: list[dict[str, Any]]) -> pl.DataFrame:
-    return pl.DataFrame(
+    frame = pl.DataFrame(
         {column: [record.get(column) for record in records] for column in _SAMPLE_COLUMNS},
         schema=_SAMPLE_COLUMNS,
     )
+    if records and all(record.get("haplotype_index") is not None for record in records):
+        return frame.with_columns(
+            pl.Series("source_sample_index", [record["source_sample_index"] for record in records]),
+            pl.Series("haplotype_index", [record["haplotype_index"] for record in records]),
+        )
+    return frame
 
 
 def variants_frame(records: list[dict[str, Any]]) -> pl.DataFrame:

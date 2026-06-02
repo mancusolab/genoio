@@ -373,12 +373,9 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
         }
 
         validate_dense_biallelic_record(path, &record)?;
-        let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         let stats = if requires_stats {
-            Some(compute_variant_stats(
-                &decoded.genotype_values,
-                &decoded.genotype_missing,
-            )?)
+            let decoded = decode_diploid_genotype_record(path, &record, &selection.source_indices)?;
+            Some(compute_variant_stats(&decoded.values, &decoded.missing)?)
         } else {
             None
         };
@@ -397,6 +394,7 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
                 continue;
             }
         }
+        let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         variants.push(variant);
         variant_major_values.extend(decoded.haplotype_values);
         variant_major_missing.extend(decoded.haplotype_missing);
@@ -466,12 +464,9 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
         }
 
         validate_dense_biallelic_record(path, &record)?;
-        let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         let stats = if requires_stats {
-            Some(compute_variant_stats(
-                &decoded.genotype_values,
-                &decoded.genotype_missing,
-            )?)
+            let decoded = decode_diploid_genotype_record(path, &record, &selection.source_indices)?;
+            Some(compute_variant_stats(&decoded.values, &decoded.missing)?)
         } else {
             None
         };
@@ -490,6 +485,7 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
                 continue;
             }
         }
+        let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         reject_sparse_missing_values(&decoded.haplotype_missing)?;
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoded.haplotype_values);
         variants.push(variant);
@@ -676,6 +672,8 @@ fn sample_records_from_header(header: &rust_htslib::bcf::header::HeaderView) -> 
             mother: None,
             sex: None,
             phenotype: None,
+            source_sample_index: None,
+            haplotype_index: None,
         })
         .collect()
 }
@@ -806,11 +804,34 @@ fn decode_diploid_gt(
     Ok((dosage, false))
 }
 
+struct DecodedDiploidGenotypeRecord {
+    values: Vec<f32>,
+    missing: Vec<bool>,
+}
+
+fn decode_diploid_genotype_record(
+    path: &Path,
+    record: &rust_htslib::bcf::Record,
+    source_indices: &[usize],
+) -> Result<DecodedDiploidGenotypeRecord> {
+    let genotypes = record
+        .genotypes()
+        .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+    let mut values = Vec::with_capacity(source_indices.len());
+    let mut missing = Vec::with_capacity(source_indices.len());
+
+    for source_index in source_indices {
+        let (value, is_missing) = decode_diploid_gt(path, record, &genotypes.get(*source_index))?;
+        values.push(value);
+        missing.push(is_missing);
+    }
+
+    Ok(DecodedDiploidGenotypeRecord { values, missing })
+}
+
 struct PhasedHaplotypeRecord {
     haplotype_values: Vec<f32>,
     haplotype_missing: Vec<bool>,
-    genotype_values: Vec<f32>,
-    genotype_missing: Vec<bool>,
 }
 
 fn decode_phased_haplotype_record(
@@ -823,23 +844,17 @@ fn decode_phased_haplotype_record(
         .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
     let mut haplotype_values = Vec::with_capacity(source_indices.len() * 2);
     let mut haplotype_missing = Vec::with_capacity(source_indices.len() * 2);
-    let mut genotype_values = Vec::with_capacity(source_indices.len());
-    let mut genotype_missing = Vec::with_capacity(source_indices.len());
 
     for source_index in source_indices {
         let genotype = genotypes.get(*source_index);
         let (values, missing) = decode_phased_diploid_gt(path, record, &genotype)?;
         haplotype_values.extend(values);
         haplotype_missing.extend(missing);
-        genotype_values.push(values[0] + values[1]);
-        genotype_missing.push(missing[0] || missing[1]);
     }
 
     Ok(PhasedHaplotypeRecord {
         haplotype_values,
         haplotype_missing,
-        genotype_values,
-        genotype_missing,
     })
 }
 
@@ -901,9 +916,13 @@ fn decode_phased_diploid_gt(
 
 fn haplotype_sample_records(samples: &[SampleRecord]) -> Vec<SampleRecord> {
     let mut haplotype_samples = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        haplotype_samples.push(sample.clone());
-        haplotype_samples.push(sample.clone());
+    for (sample_index, sample) in samples.iter().enumerate() {
+        for haplotype_index in 0..2 {
+            let mut haplotype_sample = sample.clone();
+            haplotype_sample.source_sample_index = Some(sample_index);
+            haplotype_sample.haplotype_index = Some(haplotype_index);
+            haplotype_samples.push(haplotype_sample);
+        }
     }
     haplotype_samples
 }
