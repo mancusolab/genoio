@@ -45,7 +45,8 @@ fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
     let dir = unique_dir("plink1-dense-values");
     let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
 
-    let dense = genoio_io::read_plink1_dense(&bed, &bim, &fam, None).expect("plink1 should decode");
+    let dense =
+        genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None).expect("plink1 should decode");
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 3);
@@ -72,8 +73,8 @@ fn plink1_dense_rejects_invalid_magic_bytes() {
     let dir = unique_dir("plink1-dense-bad-magic");
     let (bed, bim, fam) = write_plink_fixture(&dir, &[0x00, 0x1b, 0x01, 0x00, 0x00, 0x00]);
 
-    let error =
-        genoio_io::read_plink1_dense(&bed, &bim, &fam, None).expect_err("bad magic should fail");
+    let error = genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None)
+        .expect_err("bad magic should fail");
 
     assert!(error.to_string().contains("magic"));
 }
@@ -83,8 +84,8 @@ fn plink1_dense_rejects_sample_major_mode() {
     let dir = unique_dir("plink1-dense-sample-major");
     let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x00, 0x00, 0x00, 0x00]);
 
-    let error =
-        genoio_io::read_plink1_dense(&bed, &bim, &fam, None).expect_err("sample-major should fail");
+    let error = genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None)
+        .expect_err("sample-major should fail");
 
     assert!(error.to_string().contains("sample-major"));
 }
@@ -95,8 +96,8 @@ fn plink1_dense_filters_samples_in_source_order() {
     let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
 
     let keep = vec!["S3".to_string(), "S1".to_string()];
-    let dense =
-        genoio_io::read_plink1_dense(&bed, &bim, &fam, Some(&keep)).expect("plink1 should filter");
+    let dense = genoio_io::read_plink1_dense(&bed, &bim, &fam, Some(&keep), None)
+        .expect("plink1 should filter");
 
     assert_eq!(
         dense

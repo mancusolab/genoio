@@ -3,8 +3,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
-    MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, VariantRecord,
+    attach_variant_stats, compute_variant_stats, select_samples_source_order,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
+    SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
 };
 use rust_htslib::bcf::{record::GenotypeAllele, Read, Reader};
 
@@ -43,12 +44,15 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
 pub fn read_vcf_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
+    reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
 
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
@@ -56,21 +60,46 @@ pub fn read_vcf_dense(
     for record_result in reader.records() {
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let mut variant = variant_record_from_record(path, &header, &record)?;
+        diagnostics.candidate_variants += 1;
+        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
+            diagnostics.dropped_metadata_variants += 1;
+            continue;
+        }
+
         validate_dense_biallelic_record(path, &record)?;
-        variants.push(variant_record_from_record(path, &header, &record)?);
         let genotypes = record
             .genotypes()
             .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+        let mut current_values = Vec::with_capacity(selection.source_indices.len());
+        let mut current_missing = Vec::with_capacity(selection.source_indices.len());
         for source_index in &selection.source_indices {
             let (value, is_missing) =
                 decode_diploid_gt(path, &record, &genotypes.get(*source_index))?;
-            variant_major_values.push(value);
-            variant_major_missing.push(is_missing);
+            current_values.push(value);
+            current_missing.push(is_missing);
         }
+
+        let stats = if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
+            Some(compute_variant_stats(&current_values, &current_missing)?)
+        } else {
+            None
+        };
+        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+            diagnostics.dropped_genotype_variants += 1;
+            continue;
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
+        }
+        variants.push(variant);
+        variant_major_values.extend(current_values);
+        variant_major_missing.extend(current_missing);
     }
 
     let n_samples = selection.samples.len();
     let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
     let values =
         transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
     let missing_mask =
@@ -83,7 +112,7 @@ pub fn read_vcf_dense(
         missing_mask,
         selection.samples,
         variants,
-        selection.diagnostics,
+        diagnostics,
     )
 }
 
@@ -165,7 +194,47 @@ fn variant_record_from_record(
         source_a0: ref_allele,
         source_a1: first_alt,
         flipped: false,
+        af: None,
+        maf: None,
+        mac: None,
+        missing_rate: None,
+        n_called: None,
     })
+}
+
+fn reject_unindexed_compressed_region(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<()> {
+    if !variant_filter.is_some_and(VariantFilter::has_region_predicate) || !is_compressed_vcf(path)
+    {
+        return Ok(());
+    }
+    let tbi = path.with_extension(format!(
+        "{}.tbi",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+    ));
+    let csi = path.with_extension(format!(
+        "{}.csi",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+    ));
+    if tbi.exists() || csi.exists() {
+        return Ok(());
+    }
+    Err(MetadataError::parse(
+        path,
+        "region filter on compressed VCF requires an index",
+    ))
+}
+
+fn is_compressed_vcf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "gz" | "bgz"))
 }
 
 fn decode_diploid_gt(

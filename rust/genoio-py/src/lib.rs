@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 #[pyfunction]
 fn backend_name() -> &'static str {
@@ -47,17 +47,24 @@ fn read_dense(
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
     let requested_samples = samples_option(options)?;
+    let variant_filter = variants_option(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
-            genoio_io::read_vcf_dense(&path, requested_samples.as_deref())
+            genoio_io::read_vcf_dense(&path, requested_samples.as_deref(), variant_filter.as_ref())
         }
         "plink1" => {
             let bed = member_path(members, "bed")?;
             let bim = member_path(members, "bim")?;
             let fam = member_path(members, "fam")?;
-            genoio_io::read_plink1_dense(&bed, &bim, &fam, requested_samples.as_deref())
+            genoio_io::read_plink1_dense(
+                &bed,
+                &bim,
+                &fam,
+                requested_samples.as_deref(),
+                variant_filter.as_ref(),
+            )
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -95,6 +102,19 @@ fn samples_option(options: &Bound<'_, PyDict>) -> PyResult<Option<Vec<String>>> 
     value.extract::<Vec<String>>().map(Some)
 }
 
+fn variants_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::VariantFilter>> {
+    let Some(value) = options.get_item("variants")? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    let json = py_to_json_value(&value)?;
+    genoio_core::VariantFilter::from_json_value(json)
+        .map(Some)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
 fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     let samples = PyList::empty(py);
@@ -122,6 +142,11 @@ fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResu
         variant_dict.set_item("source_a0", variant.source_a0)?;
         variant_dict.set_item("source_a1", variant.source_a1)?;
         variant_dict.set_item("flipped", variant.flipped)?;
+        variant_dict.set_item("af", variant.af)?;
+        variant_dict.set_item("maf", variant.maf)?;
+        variant_dict.set_item("mac", variant.mac)?;
+        variant_dict.set_item("missing_rate", variant.missing_rate)?;
+        variant_dict.set_item("n_called", variant.n_called)?;
         variants.append(variant_dict)?;
     }
 
@@ -148,6 +173,16 @@ fn dense_to_py(py: Python<'_>, output: genoio_core::DenseGenotypeMatrix) -> PyRe
     diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
     diagnostics.set_item("retained_samples", output.diagnostics.retained_samples)?;
     diagnostics.set_item("missing_samples", output.diagnostics.missing_samples)?;
+    diagnostics.set_item("candidate_variants", output.diagnostics.candidate_variants)?;
+    diagnostics.set_item("retained_variants", output.diagnostics.retained_variants)?;
+    diagnostics.set_item(
+        "dropped_metadata_variants",
+        output.diagnostics.dropped_metadata_variants,
+    )?;
+    diagnostics.set_item(
+        "dropped_genotype_variants",
+        output.diagnostics.dropped_genotype_variants,
+    )?;
     dict.set_item("diagnostics", diagnostics)?;
 
     Ok(dict.unbind())
@@ -188,7 +223,57 @@ fn variant_records_to_py(
         variant_dict.set_item("source_a0", variant.source_a0)?;
         variant_dict.set_item("source_a1", variant.source_a1)?;
         variant_dict.set_item("flipped", variant.flipped)?;
+        variant_dict.set_item("af", variant.af)?;
+        variant_dict.set_item("maf", variant.maf)?;
+        variant_dict.set_item("mac", variant.mac)?;
+        variant_dict.set_item("missing_rate", variant.missing_rate)?;
+        variant_dict.set_item("n_called", variant.n_called)?;
         py_variants.append(variant_dict)?;
     }
     Ok(py_variants)
+}
+
+fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    if value.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    if value.downcast::<PyBool>().is_ok() {
+        return Ok(serde_json::Value::Bool(value.extract::<bool>()?));
+    }
+    if value.downcast::<PyString>().is_ok() {
+        return Ok(serde_json::Value::String(value.extract::<String>()?));
+    }
+    if value.downcast::<PyInt>().is_ok() {
+        return Ok(serde_json::Value::Number(value.extract::<i64>()?.into()));
+    }
+    if value.downcast::<PyFloat>().is_ok() {
+        let number = serde_json::Number::from_f64(value.extract::<f64>()?).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("filter IR contains a non-finite float")
+        })?;
+        return Ok(serde_json::Value::Number(number));
+    }
+    if let Ok(dict) = value.downcast::<PyDict>() {
+        let mut object = serde_json::Map::new();
+        for (key, item) in dict.iter() {
+            object.insert(key.extract::<String>()?, py_to_json_value(&item)?);
+        }
+        return Ok(serde_json::Value::Object(object));
+    }
+    if let Ok(list) = value.downcast::<PyList>() {
+        return list
+            .iter()
+            .map(|item| py_to_json_value(&item))
+            .collect::<PyResult<Vec<_>>>()
+            .map(serde_json::Value::Array);
+    }
+    if let Ok(tuple) = value.downcast::<PyTuple>() {
+        return tuple
+            .iter()
+            .map(|item| py_to_json_value(&item))
+            .collect::<PyResult<Vec<_>>>()
+            .map(serde_json::Value::Array);
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "filter IR must contain only JSON-compatible values",
+    ))
 }

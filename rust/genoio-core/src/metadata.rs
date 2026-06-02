@@ -12,7 +12,7 @@ pub struct SampleRecord {
     pub phenotype: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariantRecord {
     pub chrom: String,
     pub pos: u32,
@@ -24,9 +24,14 @@ pub struct VariantRecord {
     pub source_a0: String,
     pub source_a1: String,
     pub flipped: bool,
+    pub af: Option<f32>,
+    pub maf: Option<f32>,
+    pub mac: Option<u32>,
+    pub missing_rate: Option<f32>,
+    pub n_called: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetadataOutput {
     pub samples: Vec<SampleRecord>,
     pub variants: Vec<VariantRecord>,

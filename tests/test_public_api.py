@@ -49,7 +49,7 @@ def test_open_returns_lightweight_dataset_for_vcf(tmp_path):
     assert dataset.source.format.value == "vcf"
 
 
-def test_dataset_read_rejects_later_phase_filters_and_sparse_options(tmp_path):
+def test_dataset_read_rejects_later_phase_sparse_options(tmp_path):
     import genoio
 
     source_path = tmp_path / "cohort.vcf.gz"
@@ -58,9 +58,6 @@ def test_dataset_read_rejects_later_phase_filters_and_sparse_options(tmp_path):
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="sparse"):
         dataset.read(sparse="csc")
-
-    with pytest.raises(genoio.InvalidOptionError, match="variants"):
-        dataset.read(variants=genoio.snp() & genoio.id_in(["rs1", "rs2"]))
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
@@ -138,16 +135,15 @@ def test_filter_helpers_build_serializable_expressions():
 
     assert expression.to_ir() == {
         "op": "and",
-        "args": [
-            {
-                "op": "and",
-                "args": [
-                    {"op": "chrom", "value": "1"},
-                    {"op": "region", "value": "1:10-20"},
-                ],
-            },
-            {"op": "not", "arg": {"op": "missing_rate", "max": 0.05}},
-        ],
+        "left": {
+            "op": "and",
+            "left": {"op": "predicate", "name": "chrom", "params": {"value": "1"}},
+            "right": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}},
+        },
+        "right": {
+            "op": "not",
+            "expr": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.05}},
+        },
     }
 
 
@@ -161,10 +157,14 @@ def test_region_rejects_malformed_region_syntax():
 def test_snp_helper_is_zero_argument_snp_only_predicate():
     import genoio
 
-    assert genoio.snp().to_ir() == {"op": "snp", "value": None}
+    assert genoio.snp().to_ir() == {"op": "predicate", "name": "snp", "params": {}}
 
 
 def test_id_in_helper_is_variant_id_matching_predicate():
     import genoio
 
-    assert genoio.id_in(["rs2", "rs1"]).to_ir() == {"op": "id_in", "value": ("rs2", "rs1")}
+    assert genoio.id_in(["rs2", "rs1"]).to_ir() == {
+        "op": "predicate",
+        "name": "id_in",
+        "params": {"values": ["rs2", "rs1"]},
+    }

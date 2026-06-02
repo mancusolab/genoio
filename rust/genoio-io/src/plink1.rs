@@ -4,8 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
-    MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, VariantRecord,
+    attach_variant_stats, compute_variant_stats, select_samples_source_order,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
+    SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
 };
 
 use crate::error::Result;
@@ -30,6 +31,7 @@ pub fn read_plink1_dense(
     bim: &Path,
     fam: &Path,
     requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
     let bed_bytes = fs::read(bed).map_err(|source| MetadataError::Io {
         path: bed.to_path_buf(),
@@ -38,36 +40,62 @@ pub fn read_plink1_dense(
     validate_bed_header(bed, &bed_bytes)?;
 
     let all_samples = parse_fam(fam)?;
-    let variants = parse_bim(bim)?;
+    let source_variants = parse_bim(bim)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
+    let mut diagnostics = selection.diagnostics;
     let n_source_samples = all_samples.len();
-    let n_variants = variants.len();
+    let n_source_variants = source_variants.len();
     let bytes_per_variant = n_source_samples.div_ceil(4);
-    let expected_len = 3 + n_variants * bytes_per_variant;
+    let expected_len = 3 + n_source_variants * bytes_per_variant;
     if bed_bytes.len() != expected_len {
         return Err(MetadataError::parse(
             bed,
             format!(
-                "bed payload length {} does not match {n_source_samples} samples and {n_variants} variants",
+                "bed payload length {} does not match {n_source_samples} samples and {n_source_variants} variants",
                 bed_bytes.len()
             ),
         ));
     }
 
-    let mut variant_major_values = Vec::with_capacity(selection.samples.len() * n_variants);
-    let mut variant_major_missing = Vec::with_capacity(selection.samples.len() * n_variants);
-    for variant_index in 0..n_variants {
+    let mut variants = Vec::new();
+    let mut variant_major_values = Vec::with_capacity(selection.samples.len() * n_source_variants);
+    let mut variant_major_missing = Vec::with_capacity(selection.samples.len() * n_source_variants);
+    for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
+        diagnostics.candidate_variants += 1;
+        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
+            diagnostics.dropped_metadata_variants += 1;
+            continue;
+        }
         let variant_offset = 3 + variant_index * bytes_per_variant;
+        let mut current_values = Vec::with_capacity(selection.source_indices.len());
+        let mut current_missing = Vec::with_capacity(selection.source_indices.len());
         for source_index in &selection.source_indices {
             let byte = bed_bytes[variant_offset + source_index / 4];
             let code = (byte >> ((source_index % 4) * 2)) & 0b11;
             let (value, missing) = decode_plink1_code(code);
-            variant_major_values.push(value);
-            variant_major_missing.push(missing);
+            current_values.push(value);
+            current_missing.push(missing);
         }
+        let stats = if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
+            Some(compute_variant_stats(&current_values, &current_missing)?)
+        } else {
+            None
+        };
+        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+            diagnostics.dropped_genotype_variants += 1;
+            continue;
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
+        }
+        variants.push(variant);
+        variant_major_values.extend(current_values);
+        variant_major_missing.extend(current_missing);
     }
 
     let n_samples = selection.samples.len();
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
     let values =
         transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
     let missing_mask =
@@ -80,7 +108,7 @@ pub fn read_plink1_dense(
         missing_mask,
         selection.samples,
         variants,
-        selection.diagnostics,
+        diagnostics,
     )
 }
 
@@ -189,6 +217,11 @@ fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<Variant
         source_a0: a0,
         source_a1: a1,
         flipped: false,
+        af: None,
+        maf: None,
+        mac: None,
+        missing_rate: None,
+        n_called: None,
     })
 }
 

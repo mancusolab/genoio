@@ -3,6 +3,7 @@
 pub mod capabilities;
 pub mod dense;
 pub mod error;
+pub mod filter;
 pub mod metadata;
 
 pub use capabilities::SourceCapabilities;
@@ -11,6 +12,7 @@ pub use dense::{
     DenseGenotypeMatrix, DenseSampleSelection,
 };
 pub use error::MetadataError;
+pub use filter::{attach_variant_stats, compute_variant_stats, VariantFilter, VariantStats};
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 
 pub const PACKAGE_NAME: &str = "genoio";

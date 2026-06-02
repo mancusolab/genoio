@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import numpy as np
 from . import _rust
 from ._assembly import dense_array_from_rust, read_result_tuple, samples_frame, variants_frame
 from ._errors import InvalidOptionError, InvalidSourceError, SampleFilterError, UnsupportedRepresentation
+from ._filters import FilterExpr, id_in
 from ._source import ResolvedSource, resolve_source
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
@@ -53,7 +55,10 @@ class Dataset:
             raise UnsupportedRepresentation("haplo reads are not implemented until Phase 6")
 
         members = {key: str(path) for key, path in self.source.members.items()}
-        options = {"samples": None if samples is None else list(samples)}
+        options = {
+            "samples": None if samples is None else list(samples),
+            "variants": _variant_filter_ir(variants),
+        }
         try:
             dense = _rust.read_dense(self.source.format.value, members, options)
         except ValueError as error:
@@ -190,7 +195,24 @@ def _validate_sparse(sparse: bool | str) -> None:
 def _validate_variant_filter(variants: Any) -> None:
     if variants is None:
         return
-    raise InvalidOptionError("variants filters are not implemented until Phase 4")
+    _variant_filter_ir(variants)
+
+
+def _variant_filter_ir(variants: Any) -> dict[str, Any] | None:
+    if variants is None:
+        return None
+    if isinstance(variants, FilterExpr):
+        return variants.to_ir()
+    if callable(variants):
+        raise InvalidOptionError("variants must be a serializable filter expression or variant ID iterable")
+    if isinstance(variants, str) or not isinstance(variants, Iterable):
+        raise InvalidOptionError("variants must be a serializable filter expression or variant ID iterable")
+    try:
+        return id_in(list(variants)).to_ir()
+    except InvalidOptionError:
+        raise
+    except TypeError as error:
+        raise InvalidOptionError("variants must be a serializable filter expression or variant ID iterable") from error
 
 
 def _validate_sample_filter(samples: list[str] | tuple[str, ...] | set[str] | None) -> None:

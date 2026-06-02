@@ -32,7 +32,7 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
 ",
     );
 
-    let dense = genoio_io::read_vcf_dense(&path, None).expect("dense vcf should decode");
+    let dense = genoio_io::read_vcf_dense(&path, None, None).expect("dense vcf should decode");
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
@@ -71,7 +71,7 @@ fn vcf_dense_marks_missing_gt_calls() {
 ",
     );
 
-    let dense = genoio_io::read_vcf_dense(&path, None).expect("dense vcf should decode");
+    let dense = genoio_io::read_vcf_dense(&path, None, None).expect("dense vcf should decode");
 
     assert_eq!(dense.values, vec![1.0, 0.0]);
     assert_eq!(dense.missing_mask, vec![false, true]);
@@ -98,6 +98,11 @@ fn vcf_dense_contract_validates_shape_and_metadata_lengths() {
         source_a0: "A".to_string(),
         source_a1: "G".to_string(),
         flipped: false,
+        af: None,
+        maf: None,
+        mac: None,
+        missing_rate: None,
+        n_called: None,
     };
 
     let result = genoio_core::DenseGenotypeMatrix::new(
@@ -128,7 +133,8 @@ fn vcf_dense_rejects_multiallelic_genotype_states() {
 ",
     );
 
-    let error = genoio_io::read_vcf_dense(&path, None).expect_err("multiallelic GT should fail");
+    let error =
+        genoio_io::read_vcf_dense(&path, None, None).expect_err("multiallelic GT should fail");
 
     assert!(error.to_string().contains("multiallelic"));
 }
@@ -148,7 +154,8 @@ fn vcf_dense_rejects_multi_alt_records_even_when_gt_uses_first_alt() {
 ",
     );
 
-    let error = genoio_io::read_vcf_dense(&path, None).expect_err("multi-ALT records should fail");
+    let error =
+        genoio_io::read_vcf_dense(&path, None, None).expect_err("multi-ALT records should fail");
 
     assert!(error.to_string().contains("multi-ALT"));
 }

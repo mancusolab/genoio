@@ -10,6 +10,10 @@ pub struct DenseDiagnostics {
     pub requested_samples: usize,
     pub retained_samples: usize,
     pub missing_samples: usize,
+    pub candidate_variants: usize,
+    pub retained_variants: usize,
+    pub dropped_metadata_variants: usize,
+    pub dropped_genotype_variants: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +110,7 @@ pub fn select_samples_source_order(
                 requested_samples: source_samples.len(),
                 retained_samples: source_samples.len(),
                 missing_samples: 0,
+                ..DenseDiagnostics::default()
             },
         });
     };
@@ -146,6 +151,7 @@ pub fn select_samples_source_order(
             requested_samples: requested.len(),
             retained_samples: requested.len(),
             missing_samples: 0,
+            ..DenseDiagnostics::default()
         },
     })
 }
