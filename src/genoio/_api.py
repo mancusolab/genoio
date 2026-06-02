@@ -31,7 +31,14 @@ from ._source import ResolvedSource, resolve_source
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
-_DEFAULT_MISSING = object()
+
+
+class _DefaultMissing:
+    def __repr__(self) -> str:
+        return "DEFAULT_MISSING"
+
+
+_DEFAULT_MISSING = _DefaultMissing()
 
 
 @dataclass(frozen=True)
@@ -299,7 +306,7 @@ def _validate_sparse(sparse: bool | str) -> str | None:
         return None
     if sparse is True:
         return "csc"
-    if sparse in {"csc", "csr"}:
+    if isinstance(sparse, str) and sparse in {"csc", "csr"}:
         return sparse
     raise InvalidOptionError(f"unsupported sparse option: {sparse!r}")
 

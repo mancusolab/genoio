@@ -84,6 +84,9 @@ def test_blocks_validate_size(tmp_path):
     with pytest.raises(genoio.InvalidOptionError, match="positive integer"):
         list(dataset.blocks(size=0))
 
+    with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
+        list(dataset.blocks(size=2, sparse=[]))
+
 
 def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monkeypatch):
     import genoio

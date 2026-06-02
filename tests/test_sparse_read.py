@@ -105,6 +105,9 @@ def test_sparse_rejects_unknown_options_before_calling_rust(tmp_path):
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
         dataset.read(sparse="coo", missing="raise")
 
+    with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
+        dataset.read(sparse=[], missing="raise")
+
 
 def test_sparse_invalid_missing_policy_raises_structured_error(tmp_path):
     import genoio

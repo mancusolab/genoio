@@ -189,6 +189,20 @@ pub fn read_plink1_sparse_windowed(
             continue;
         }
 
+        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
+        if !requires_stats {
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+
         let (mut current_values, current_missing) = read_plink1_variant_values(
             bed,
             &mut bed_file,
@@ -196,7 +210,7 @@ pub fn read_plink1_sparse_windowed(
             bytes_per_variant,
             &selection.source_indices,
         )?;
-        let stats = if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
+        let stats = if requires_stats {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
@@ -208,10 +222,13 @@ pub fn read_plink1_sparse_windowed(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        let include_in_window = variant_window.is_none_or(|window| window.contains(retained_index));
-        retained_index += 1;
-        if !include_in_window {
-            continue;
+        if requires_stats {
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
         }
         reject_sparse_missing_values(&current_missing)?;
         flip_values_to_minor_allele(&mut current_values, &mut variant);

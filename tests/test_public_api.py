@@ -1,4 +1,5 @@
 import sys
+from inspect import signature
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,12 @@ def test_dataset_read_recognizes_sparse_options_and_validates_missing_policy(tmp
 
     with pytest.raises(genoio.InvalidOptionError, match="sparse missing values"):
         dataset.read(sparse="csc", missing="nan")
+
+
+def test_sparse_default_missing_signature_is_readable():
+    import genoio
+
+    assert "missing: 'Any' = DEFAULT_MISSING" in str(signature(genoio.read))
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):

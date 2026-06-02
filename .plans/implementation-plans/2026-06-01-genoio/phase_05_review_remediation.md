@@ -4,9 +4,11 @@
 
 - Sparse reads now build CSC directly in VCF and PLINK1 readers instead of converting through a dense matrix.
 - PLINK1 block reads now seek/read per-variant BED payloads instead of loading the full `.bed` file.
-- VCF and PLINK1 block reads apply variant-window gating before genotype decode when filters do not require genotype statistics.
+- VCF and PLINK1 dense/sparse block reads apply variant-window gating before genotype decode when filters do not require genotype statistics.
 - Omitted sparse `missing` now defaults to `raise`, while explicit `missing="nan"` and `missing="impute"` remain rejected.
 - Invalid sparse missing options now raise `InvalidOptionError` instead of leaking raw `TypeError`.
+- Invalid sparse mode options such as `sparse=[]` now raise `InvalidOptionError`.
+- Public signatures use a stable named missing sentinel representation.
 
 ## Red Evidence
 
@@ -36,6 +38,10 @@ rg "sparse_from_dense_minor_flipped|fs::read\(bed\)|let dense = read_.*dense" ru
 
 Result before fix showed sparse I/O paths calling dense readers and PLINK1 using `fs::read(bed)`.
 
+### Second Re-Review Findings
+
+Architecture re-review found PLINK1 sparse block reads still decoded out-of-window variants before window gating. CLI/API re-review found `sparse=[]` leaked raw `TypeError` and the missing sentinel repr polluted public signatures.
+
 ## Green Evidence
 
 Commands:
@@ -57,8 +63,8 @@ Results after fix:
 ```text
 Rust workspace tests passed.
 Editable extension rebuilt.
-43 passed in targeted Phase 5 Python suite.
-73 passed in full Python suite.
+56 passed in targeted Phase 5 Python suite.
+74 passed in full Python suite.
 ruff reported no diagnostics.
 Smoke import printed genoio.
 ```
