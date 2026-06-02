@@ -82,3 +82,38 @@ def test_blocks_validate_size(tmp_path):
 
     with pytest.raises(genoio.InvalidOptionError, match="positive integer"):
         list(dataset.blocks(size=0))
+
+
+def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monkeypatch):
+    import genoio
+
+    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    calls = []
+    original = genoio.Dataset._read_block_from_rust
+
+    def recording_read_block(self, *, variant_window, **kwargs):
+        calls.append(dict(variant_window))
+        return original(self, variant_window=variant_window, **kwargs)
+
+    monkeypatch.setattr(genoio.Dataset, "_read_block_from_rust", recording_read_block)
+
+    list(dataset.blocks(size=2))
+
+    assert calls
+    assert all(call["len"] <= 2 for call in calls)
+    assert [call["start"] for call in calls] == [0, 2, 4]
+
+
+def test_blocks_do_not_call_public_read_internally(tmp_path, monkeypatch):
+    import genoio
+
+    dataset = genoio.open(write_blocks_vcf(tmp_path))
+
+    def fail_read(*args, **kwargs):
+        raise AssertionError("blocks must use the bounded Rust call boundary, not public read()")
+
+    monkeypatch.setattr(genoio.Dataset, "read", fail_read)
+
+    blocks = list(dataset.blocks(size=2))
+
+    assert [block.shape for block in blocks] == [(3, 2), (3, 2), (3, 1)]

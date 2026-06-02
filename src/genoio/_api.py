@@ -110,7 +110,7 @@ class Dataset:
     ) -> Any:
         start = 0
         while True:
-            block = self._read_validated(
+            block = self._read_block_from_rust(
                 samples=read_options["samples"],
                 missing=read_options["missing"],
                 return_samples=read_options["return_samples"],
@@ -125,6 +125,25 @@ class Dataset:
             if genotype_matrix.shape[1] < size:
                 break
             start += size
+
+    def _read_block_from_rust(
+        self,
+        *,
+        samples: list[str] | tuple[str, ...] | set[str] | None,
+        missing: str,
+        return_samples: bool,
+        return_variants: bool,
+        validated_options: _ValidatedReadOptions,
+        variant_window: dict[str, int],
+    ) -> Any:
+        return self._read_validated(
+            samples=samples,
+            missing=missing,
+            return_samples=return_samples,
+            return_variants=return_variants,
+            validated_options=validated_options,
+            variant_window=variant_window,
+        )
 
     def _read_validated(
         self,
