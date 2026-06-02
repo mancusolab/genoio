@@ -104,6 +104,30 @@ def test_resolves_complete_plink2_member_path(tmp_path):
     assert dataset.source.prefix == tmp_path / "cohort"
 
 
+def test_resolves_complete_plink2_prefix(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    dataset = genoio.open(tmp_path / "cohort")
+
+    assert dataset.source.format.value == "plink2"
+    assert set(dataset.source.members) == {"pgen", "pvar", "psam"}
+
+
+def test_plink2_read_raises_deferred_decode_error(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    dataset = genoio.open(tmp_path / "cohort")
+
+    with pytest.raises(genoio.UnsupportedFormatError, match="PLINK2 decode is deferred"):
+        dataset.read()
+
+
 def test_explicit_plink1_format_on_non_plink_source_raises_unsupported_format_error(tmp_path):
     import genoio
 
