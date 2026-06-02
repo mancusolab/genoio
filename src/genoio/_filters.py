@@ -46,8 +46,8 @@ def region(value: str) -> Expression:
     return Expression("region", value=value)
 
 
-def snp(value: str) -> Expression:
-    return Expression("snp", value=value)
+def snp() -> Expression:
+    return Expression("snp")
 
 
 def biallelic() -> Expression:

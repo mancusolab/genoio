@@ -46,7 +46,54 @@ def test_open_returns_lightweight_dataset_for_vcf(tmp_path):
     assert dataset.source.format.value == "vcf"
 
 
-def test_dataset_methods_validate_representation_before_later_implementation(tmp_path):
+def test_dataset_read_accepts_approved_options_before_later_implementation(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf.gz"
+    source_path.touch()
+    dataset = genoio.open(source_path)
+
+    read_options = {
+        "kind": "geno",
+        "sparse": "csc",
+        "variants": genoio.snp() & genoio.id_in(["rs1", "rs2"]),
+        "samples": ["s2", "s1"],
+        "missing": "nan",
+        "dtype": "float32",
+        "return_samples": True,
+        "return_variants": True,
+    }
+
+    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
+        dataset.read(**read_options)
+
+
+def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf.gz"
+    source_path.touch()
+    dataset = genoio.open(source_path)
+
+    read_options = {
+        "kind": "geno",
+        "sparse": False,
+        "variants": genoio.chrom("1"),
+        "samples": ("s2", "s1"),
+        "missing": "raise",
+        "dtype": "uint8",
+        "return_samples": False,
+        "return_variants": True,
+    }
+
+    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
+        dataset.blocks(8192, **read_options)
+
+    with pytest.raises(genoio.InvalidOptionError, match="block size"):
+        dataset.blocks(0, **read_options)
+
+
+def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
     import genoio
 
     source_path = tmp_path / "cohort.vcf.gz"
@@ -54,10 +101,10 @@ def test_dataset_methods_validate_representation_before_later_implementation(tmp
     dataset = genoio.open(source_path)
 
     with pytest.raises(genoio.UnsupportedRepresentation):
-        dataset.read(representation="unsupported")
+        dataset.read(kind="unsupported")
 
-    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
-        dataset.read()
+    with pytest.raises(genoio.UnsupportedRepresentation):
+        dataset.read(sparse="unsupported")
 
 
 def test_filter_helpers_build_serializable_expressions():
@@ -85,3 +132,15 @@ def test_region_rejects_malformed_region_syntax():
 
     with pytest.raises(genoio.InvalidOptionError):
         genoio.region("not-a-region")
+
+
+def test_snp_helper_is_zero_argument_snp_only_predicate():
+    import genoio
+
+    assert genoio.snp().to_ir() == {"op": "snp", "value": None}
+
+
+def test_id_in_helper_is_variant_id_matching_predicate():
+    import genoio
+
+    assert genoio.id_in(["rs2", "rs1"]).to_ir() == {"op": "id_in", "value": ("rs2", "rs1")}
