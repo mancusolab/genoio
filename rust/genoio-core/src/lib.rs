@@ -18,7 +18,10 @@ pub use filter::{
     VariantWindow,
 };
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
-pub use sparse::{sparse_from_dense_minor_flipped, SparseGenotypeMatrix};
+pub use sparse::{
+    append_sparse_column, flip_values_to_minor_allele, reject_sparse_missing_values,
+    SparseGenotypeMatrix,
+};
 
 pub const PACKAGE_NAME: &str = "genoio";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

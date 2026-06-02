@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy import sparse as scipy_sparse
 
 
 def write_blocks_vcf(tmp_path: Path) -> Path:
@@ -117,3 +118,14 @@ def test_blocks_do_not_call_public_read_internally(tmp_path, monkeypatch):
     blocks = list(dataset.blocks(size=2))
 
     assert [block.shape for block in blocks] == [(3, 2), (3, 2), (3, 1)]
+
+
+def test_sparse_blocks_work_with_default_missing_policy(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_blocks_vcf(tmp_path))
+
+    blocks = list(dataset.blocks(size=2, sparse=True))
+
+    assert [block.shape for block in blocks] == [(3, 2), (3, 2), (3, 1)]
+    assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)

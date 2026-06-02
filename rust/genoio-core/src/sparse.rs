@@ -1,6 +1,6 @@
 // pattern: Functional Core
 
-use crate::{DenseDiagnostics, DenseGenotypeMatrix, MetadataError, SampleRecord, VariantRecord};
+use crate::{DenseDiagnostics, MetadataError, SampleRecord, VariantRecord};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparseGenotypeMatrix {
@@ -29,7 +29,10 @@ impl SparseGenotypeMatrix {
         if samples.len() != n_rows {
             return Err(MetadataError::parse(
                 "<sparse>",
-                format!("sample metadata length {} does not match n_rows {n_rows}", samples.len()),
+                format!(
+                    "sample metadata length {} does not match n_rows {n_rows}",
+                    samples.len()
+                ),
             ));
         }
         if variants.len() != n_cols {
@@ -55,51 +58,41 @@ impl SparseGenotypeMatrix {
     }
 }
 
-pub fn sparse_from_dense_minor_flipped(
-    dense: DenseGenotypeMatrix,
-) -> Result<SparseGenotypeMatrix, MetadataError> {
-    reject_sparse_missing(&dense)?;
-
-    let n_rows = dense.n_samples;
-    let n_cols = dense.n_variants;
-    let mut indptr = Vec::with_capacity(n_cols + 1);
-    let mut indices = Vec::new();
-    let mut data = Vec::new();
-    let mut variants = dense.variants;
-    indptr.push(0);
-
-    for col in 0..n_cols {
-        let mut a1_count = 0.0_f32;
-        for row in 0..n_rows {
-            a1_count += dense.values[row * n_cols + col];
-        }
-        let a0_count = 2.0 * n_rows as f32 - a1_count;
-        let flip = a1_count > a0_count;
-        if flip {
-            flip_variant(&mut variants[col]);
-        }
-
-        for row in 0..n_rows {
-            let source_value = dense.values[row * n_cols + col];
-            let value = if flip { 2.0 - source_value } else { source_value };
-            if value != 0.0 {
-                indices.push(row);
-                data.push(value);
-            }
-        }
-        indptr.push(indices.len());
+pub fn reject_sparse_missing_values(missing: &[bool]) -> Result<(), MetadataError> {
+    if missing.iter().any(|value| *value) {
+        return Err(MetadataError::parse(
+            "<sparse>",
+            "sparse missing values are not stored in this release",
+        ));
     }
+    Ok(())
+}
 
-    SparseGenotypeMatrix::new(
-        n_rows,
-        n_cols,
-        indptr,
-        indices,
-        data,
-        dense.samples,
-        variants,
-        dense.diagnostics,
-    )
+pub fn flip_values_to_minor_allele(values: &mut [f32], variant: &mut VariantRecord) {
+    let a1_count = values.iter().sum::<f32>();
+    let a0_count = 2.0 * values.len() as f32 - a1_count;
+    if a1_count <= a0_count {
+        return;
+    }
+    for value in values {
+        *value = 2.0 - *value;
+    }
+    mark_variant_flipped(variant);
+}
+
+pub fn append_sparse_column(
+    indptr: &mut Vec<usize>,
+    indices: &mut Vec<usize>,
+    data: &mut Vec<f32>,
+    values: &[f32],
+) {
+    for (row, value) in values.iter().enumerate() {
+        if *value != 0.0 {
+            indices.push(row);
+            data.push(*value);
+        }
+    }
+    indptr.push(indices.len());
 }
 
 fn validate_csc_contract(
@@ -110,7 +103,10 @@ fn validate_csc_contract(
     data: &[f32],
 ) -> Result<(), MetadataError> {
     if indptr.is_empty() {
-        return Err(MetadataError::parse("<sparse>", "sparse indptr must be nonempty"));
+        return Err(MetadataError::parse(
+            "<sparse>",
+            "sparse indptr must be nonempty",
+        ));
     }
     if indptr.len() != n_cols + 1 {
         return Err(MetadataError::parse(
@@ -156,17 +152,7 @@ fn validate_csc_contract(
     Ok(())
 }
 
-fn reject_sparse_missing(dense: &DenseGenotypeMatrix) -> Result<(), MetadataError> {
-    if dense.missing_mask.iter().any(|missing| *missing) {
-        return Err(MetadataError::parse(
-            "<sparse>",
-            "sparse missing values are not stored in this release",
-        ));
-    }
-    Ok(())
-}
-
-fn flip_variant(variant: &mut VariantRecord) {
+fn mark_variant_flipped(variant: &mut VariantRecord) {
     std::mem::swap(&mut variant.a0, &mut variant.a1);
     variant.flipped = true;
     if let Some(af) = variant.af {

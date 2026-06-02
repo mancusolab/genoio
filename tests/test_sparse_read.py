@@ -47,7 +47,7 @@ def test_sparse_true_returns_csc_and_preserves_tuple_metadata(tmp_path):
 
     dataset = genoio.open(write_sparse_vcf(tmp_path))
 
-    G, samples, variants = dataset.read(sparse=True, missing="raise", return_samples=True, return_variants=True)
+    G, samples, variants = dataset.read(sparse=True, return_samples=True, return_variants=True)
 
     assert scipy_sparse.isspmatrix_csc(G)
     assert G.shape == (3, 2)
@@ -104,3 +104,12 @@ def test_sparse_rejects_unknown_options_before_calling_rust(tmp_path):
 
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
         dataset.read(sparse="coo", missing="raise")
+
+
+def test_sparse_invalid_missing_policy_raises_structured_error(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_sparse_vcf(tmp_path))
+
+    with pytest.raises(genoio.InvalidOptionError, match="unsupported missing-data policy"):
+        dataset.read(sparse=True, missing=[])

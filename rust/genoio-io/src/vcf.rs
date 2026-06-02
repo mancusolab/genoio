@@ -3,10 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use genoio_core::{
-    attach_variant_stats, compute_variant_stats, select_samples_source_order,
-    sparse_from_dense_minor_flipped, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
-    MetadataError, MetadataOutput, RegionPredicate, SampleRecord, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
+    append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
+    reject_sparse_missing_values, select_samples_source_order,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
+    RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantRecord, VariantWindow,
 };
 use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
 
@@ -71,7 +72,13 @@ pub fn read_vcf_dense_windowed(
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
-    read_vcf_dense_records(path, requested_samples, variant_filter, variant_window, &mut reader)
+    read_vcf_dense_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
 }
 
 pub fn read_vcf_sparse(
@@ -88,8 +95,28 @@ pub fn read_vcf_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
-    let dense = read_vcf_dense_windowed(path, requested_samples, variant_filter, variant_window)?;
-    Ok(sparse_from_dense_minor_flipped(dense)?)
+    if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
+        if has_vcf_index(path) {
+            return read_indexed_vcf_sparse(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+            );
+        }
+    }
+
+    reject_unindexed_compressed_region(path, variant_filter)?;
+    let mut reader = Reader::from_path(path)
+        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+    read_vcf_sparse_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
 }
 
 fn read_indexed_vcf_dense(
@@ -115,7 +142,45 @@ fn read_indexed_vcf_dense(
         )
         .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
 
-    read_vcf_dense_records(path, requested_samples, variant_filter, variant_window, &mut reader)
+    read_vcf_dense_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
+fn read_indexed_vcf_sparse(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    region: &RegionPredicate,
+) -> Result<SparseGenotypeMatrix> {
+    let mut reader = IndexedReader::from_path(path).map_err(|error| {
+        MetadataError::parse(path, format!("indexed vcf reader error: {error}"))
+    })?;
+    let header = reader.header().clone();
+    let rid = match header.name2rid(region.chrom.as_bytes()) {
+        Ok(rid) => rid,
+        Err(_) => return empty_vcf_sparse(path, &header, requested_samples),
+    };
+    reader
+        .fetch(
+            rid,
+            u64::from(region.start - 1),
+            Some(u64::from(region.end - 1)),
+        )
+        .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
+
+    read_vcf_sparse_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
 }
 
 fn read_vcf_dense_records<R: Read>(
@@ -144,6 +209,20 @@ fn read_vcf_dense_records<R: Read>(
             continue;
         }
 
+        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
+        if !requires_stats {
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+
         validate_dense_biallelic_record(path, &record)?;
         let genotypes = record
             .genotypes()
@@ -157,7 +236,7 @@ fn read_vcf_dense_records<R: Read>(
             current_missing.push(is_missing);
         }
 
-        let stats = if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
+        let stats = if requires_stats {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
@@ -169,10 +248,13 @@ fn read_vcf_dense_records<R: Read>(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        let include_in_window = variant_window.is_none_or(|window| window.contains(retained_index));
-        retained_index += 1;
-        if !include_in_window {
-            continue;
+        if requires_stats {
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
         }
         variants.push(variant);
         variant_major_values.extend(current_values);
@@ -198,6 +280,101 @@ fn read_vcf_dense_records<R: Read>(
     )
 }
 
+fn read_vcf_sparse_records<R: Read>(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    reader: &mut R,
+) -> Result<SparseGenotypeMatrix> {
+    let header = reader.header().clone();
+    let all_samples = sample_records_from_header(&header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
+
+    let n_samples = selection.samples.len();
+    let mut indptr = vec![0];
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    let mut variants = Vec::new();
+    let mut retained_index = 0_usize;
+    for record_result in reader.records() {
+        let record = record_result
+            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let mut variant = variant_record_from_record(path, &header, &record)?;
+        diagnostics.candidate_variants += 1;
+        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
+            diagnostics.dropped_metadata_variants += 1;
+            continue;
+        }
+
+        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
+        if !requires_stats {
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+
+        validate_dense_biallelic_record(path, &record)?;
+        let genotypes = record
+            .genotypes()
+            .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+        let mut current_values = Vec::with_capacity(selection.source_indices.len());
+        let mut current_missing = Vec::with_capacity(selection.source_indices.len());
+        for source_index in &selection.source_indices {
+            let (value, is_missing) =
+                decode_diploid_gt(path, &record, &genotypes.get(*source_index))?;
+            current_values.push(value);
+            current_missing.push(is_missing);
+        }
+
+        let stats = if requires_stats {
+            Some(compute_variant_stats(&current_values, &current_missing)?)
+        } else {
+            None
+        };
+        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+            diagnostics.dropped_genotype_variants += 1;
+            continue;
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
+        }
+        if requires_stats {
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+        reject_sparse_missing_values(&current_missing)?;
+        flip_values_to_minor_allele(&mut current_values, &mut variant);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+        variants.push(variant);
+    }
+
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    SparseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        indptr,
+        indices,
+        data,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
 fn empty_vcf_dense(
     path: &Path,
     header: &rust_htslib::bcf::header::HeaderView,
@@ -210,6 +387,27 @@ fn empty_vcf_dense(
     DenseGenotypeMatrix::new(
         selection.samples.len(),
         0,
+        Vec::new(),
+        Vec::new(),
+        selection.samples,
+        Vec::new(),
+        diagnostics,
+    )
+}
+
+fn empty_vcf_sparse(
+    path: &Path,
+    header: &rust_htslib::bcf::header::HeaderView,
+    requested_samples: Option<&[String]>,
+) -> Result<SparseGenotypeMatrix> {
+    let all_samples = sample_records_from_header(header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    SparseGenotypeMatrix::new(
+        selection.samples.len(),
+        0,
+        vec![0],
         Vec::new(),
         Vec::new(),
         selection.samples,

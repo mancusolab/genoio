@@ -57,7 +57,7 @@ def test_dataset_read_recognizes_sparse_options_and_validates_missing_policy(tmp
     dataset = genoio.open(source_path)
 
     with pytest.raises(genoio.InvalidOptionError, match="sparse missing values"):
-        dataset.read(sparse="csc")
+        dataset.read(sparse="csc", missing="nan")
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):

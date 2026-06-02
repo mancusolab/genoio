@@ -31,11 +31,13 @@ from ._source import ResolvedSource, resolve_source
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
+_DEFAULT_MISSING = object()
 
 
 @dataclass(frozen=True)
 class _ValidatedReadOptions:
     dtype: np.dtype[Any]
+    missing: str
     sparse_format: str | None
     variant_filter_ir: dict[str, Any] | None
 
@@ -52,7 +54,7 @@ class Dataset:
         sparse: bool | str = False,
         variants: Any = None,
         samples: list[str] | tuple[str, ...] | set[str] | None = None,
-        missing: str = "nan",
+        missing: Any = _DEFAULT_MISSING,
         dtype: Any = "float32",
         return_samples: bool = False,
         return_variants: bool = False,
@@ -75,7 +77,6 @@ class Dataset:
 
         return self._read_validated(
             samples=samples,
-            missing=missing,
             return_samples=return_samples,
             return_variants=return_variants,
             validated_options=validated_options,
@@ -112,7 +113,6 @@ class Dataset:
         while True:
             block = self._read_block_from_rust(
                 samples=read_options["samples"],
-                missing=read_options["missing"],
                 return_samples=read_options["return_samples"],
                 return_variants=read_options["return_variants"],
                 validated_options=validated_options,
@@ -130,7 +130,6 @@ class Dataset:
         self,
         *,
         samples: list[str] | tuple[str, ...] | set[str] | None,
-        missing: str,
         return_samples: bool,
         return_variants: bool,
         validated_options: _ValidatedReadOptions,
@@ -138,7 +137,6 @@ class Dataset:
     ) -> Any:
         return self._read_validated(
             samples=samples,
-            missing=missing,
             return_samples=return_samples,
             return_variants=return_variants,
             validated_options=validated_options,
@@ -149,7 +147,6 @@ class Dataset:
         self,
         *,
         samples: list[str] | tuple[str, ...] | set[str] | None,
-        missing: str,
         return_samples: bool,
         return_variants: bool,
         validated_options: _ValidatedReadOptions,
@@ -167,7 +164,7 @@ class Dataset:
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
                 missing_mask=rust_result["missing_mask"],
-                missing=missing,
+                missing=validated_options.missing,
                 dtype=validated_options.dtype,
             )
         else:
@@ -227,7 +224,7 @@ def read(
     sparse: bool | str = False,
     variants: Any = None,
     samples: list[str] | tuple[str, ...] | set[str] | None = None,
-    missing: str = "nan",
+    missing: Any = _DEFAULT_MISSING,
     dtype: Any = "float32",
     return_samples: bool = False,
     return_variants: bool = False,
@@ -258,23 +255,24 @@ def _validate_read_options(
     sparse: bool | str,
     variants: Any,
     samples: list[str] | tuple[str, ...] | set[str] | None,
-    missing: str,
+    missing: Any,
     dtype: Any,
     return_samples: bool,
     return_variants: bool,
 ) -> _ValidatedReadOptions:
     _validate_kind(kind)
     sparse_format = _validate_sparse(sparse)
+    normalized_missing = _normalize_missing(missing, sparse_format=sparse_format)
     variant_filter_ir = _validate_variant_filter(variants)
     normalized_dtype = _normalize_dtype(dtype)
-    _validate_sparse_missing_compatibility(sparse_format, missing)
-    _validate_missing_dtype_compatibility(missing, normalized_dtype)
-    _validate_missing(missing)
+    _validate_sparse_missing_compatibility(sparse_format, normalized_missing)
+    _validate_missing_dtype_compatibility(normalized_missing, normalized_dtype)
     _validate_sample_filter(samples)
     _validate_bool_option("return_samples", return_samples)
     _validate_bool_option("return_variants", return_variants)
     return _ValidatedReadOptions(
         dtype=normalized_dtype,
+        missing=normalized_missing,
         sparse_format=sparse_format,
         variant_filter_ir=variant_filter_ir,
     )
@@ -345,6 +343,13 @@ def _validate_missing(missing: str) -> None:
         raise InvalidOptionError(f"unsupported missing-data policy: {missing}")
 
 
+def _normalize_missing(missing: Any, *, sparse_format: str | None) -> str:
+    if missing is _DEFAULT_MISSING:
+        return "raise" if sparse_format is not None else "nan"
+    _validate_missing(missing)
+    return missing
+
+
 def _normalize_dtype(dtype: Any) -> np.dtype[Any]:
     try:
         return np.dtype(dtype)
@@ -391,7 +396,7 @@ def _read_options_with_defaults(read_options: dict[str, Any]) -> dict[str, Any]:
         "sparse": False,
         "variants": None,
         "samples": None,
-        "missing": "nan",
+        "missing": _DEFAULT_MISSING,
         "dtype": "float32",
         "return_samples": False,
         "return_variants": False,
