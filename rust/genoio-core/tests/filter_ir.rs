@@ -86,3 +86,37 @@ fn genotype_predicates_are_not_used_as_metadata_drop_decisions() {
         Some(false)
     );
 }
+
+#[test]
+fn concrete_region_pushdown_is_extracted_only_from_safe_expression_shapes() {
+    let and_filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}},
+        "right": {"op": "predicate", "name": "snp", "params": {}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert_eq!(
+        and_filter.concrete_region_pushdown(),
+        Some(genoio_core::RegionPredicate {
+            chrom: "1".to_string(),
+            start: 10,
+            end: 20,
+        })
+    );
+
+    let or_filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "or",
+        "left": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}},
+        "right": {"op": "predicate", "name": "chrom", "params": {"value": "2"}}
+    }))
+    .expect("filter IR should deserialize");
+    assert_eq!(or_filter.concrete_region_pushdown(), None);
+
+    let not_filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "not",
+        "expr": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}}
+    }))
+    .expect("filter IR should deserialize");
+    assert_eq!(not_filter.concrete_region_pushdown(), None);
+}

@@ -12,6 +12,13 @@ pub struct VariantFilter {
     expr: Expr,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionPredicate {
+    pub chrom: String,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VariantStats {
     pub af: Option<f32>,
@@ -89,6 +96,10 @@ impl VariantFilter {
     pub fn has_region_predicate(&self) -> bool {
         self.expr.has_region_predicate()
     }
+
+    pub fn concrete_region_pushdown(&self) -> Option<RegionPredicate> {
+        self.expr.concrete_region_pushdown()
+    }
 }
 
 impl Expr {
@@ -163,6 +174,20 @@ impl Expr {
                 left.has_region_predicate() || right.has_region_predicate()
             }
             Self::Not(expr) => expr.has_region_predicate(),
+        }
+    }
+
+    fn concrete_region_pushdown(&self) -> Option<RegionPredicate> {
+        match self {
+            Self::Predicate(Predicate::Region { chrom, start, end }) => Some(RegionPredicate {
+                chrom: chrom.clone(),
+                start: *start,
+                end: *end,
+            }),
+            Self::And(left, right) => left
+                .concrete_region_pushdown()
+                .or_else(|| right.concrete_region_pushdown()),
+            Self::Predicate(_) | Self::Or(_, _) | Self::Not(_) => None,
         }
     }
 }

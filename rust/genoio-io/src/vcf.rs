@@ -1,13 +1,13 @@
 // pattern: Imperative Shell
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use genoio_core::{
     attach_variant_stats, compute_variant_stats, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
+    RegionPredicate, SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
 };
-use rust_htslib::bcf::{record::GenotypeAllele, Read, Reader};
+use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
 
 use crate::error::Result;
 
@@ -46,9 +46,49 @@ pub fn read_vcf_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
+    if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
+        if has_vcf_index(path) {
+            return read_indexed_vcf_dense(path, requested_samples, variant_filter, &region);
+        }
+    }
+
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+    read_vcf_dense_records(path, requested_samples, variant_filter, &mut reader)
+}
+
+fn read_indexed_vcf_dense(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    region: &RegionPredicate,
+) -> Result<DenseGenotypeMatrix> {
+    let mut reader = IndexedReader::from_path(path).map_err(|error| {
+        MetadataError::parse(path, format!("indexed vcf reader error: {error}"))
+    })?;
+    let header = reader.header().clone();
+    let rid = match header.name2rid(region.chrom.as_bytes()) {
+        Ok(rid) => rid,
+        Err(_) => return empty_vcf_dense(path, &header, requested_samples),
+    };
+    reader
+        .fetch(
+            rid,
+            u64::from(region.start - 1),
+            Some(u64::from(region.end - 1)),
+        )
+        .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
+
+    read_vcf_dense_records(path, requested_samples, variant_filter, &mut reader)
+}
+
+fn read_vcf_dense_records<R: Read>(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    reader: &mut R,
+) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
@@ -112,6 +152,26 @@ pub fn read_vcf_dense(
         missing_mask,
         selection.samples,
         variants,
+        diagnostics,
+    )
+}
+
+fn empty_vcf_dense(
+    path: &Path,
+    header: &rust_htslib::bcf::header::HeaderView,
+    requested_samples: Option<&[String]>,
+) -> Result<DenseGenotypeMatrix> {
+    let all_samples = sample_records_from_header(header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    DenseGenotypeMatrix::new(
+        selection.samples.len(),
+        0,
+        Vec::new(),
+        Vec::new(),
+        selection.samples,
+        Vec::new(),
         diagnostics,
     )
 }
@@ -210,25 +270,21 @@ fn reject_unindexed_compressed_region(
     {
         return Ok(());
     }
-    let tbi = path.with_extension(format!(
-        "{}.tbi",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("")
-    ));
-    let csi = path.with_extension(format!(
-        "{}.csi",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("")
-    ));
-    if tbi.exists() || csi.exists() {
+    if has_vcf_index(path) {
         return Ok(());
     }
     Err(MetadataError::parse(
         path,
         "region filter on compressed VCF requires an index",
     ))
+}
+
+fn has_vcf_index(path: &Path) -> bool {
+    companion_index_path(path, "tbi").exists() || companion_index_path(path, "csi").exists()
+}
+
+fn companion_index_path(path: &Path, index_extension: &str) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.to_string_lossy(), index_extension))
 }
 
 fn is_compressed_vcf(path: &Path) -> bool {

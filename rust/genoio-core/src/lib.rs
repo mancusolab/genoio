@@ -12,7 +12,9 @@ pub use dense::{
     DenseGenotypeMatrix, DenseSampleSelection,
 };
 pub use error::MetadataError;
-pub use filter::{attach_variant_stats, compute_variant_stats, VariantFilter, VariantStats};
+pub use filter::{
+    attach_variant_stats, compute_variant_stats, RegionPredicate, VariantFilter, VariantStats,
+};
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 
 pub const PACKAGE_NAME: &str = "genoio";

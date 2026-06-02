@@ -22,6 +22,12 @@ _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
 
 
 @dataclass(frozen=True)
+class _ValidatedReadOptions:
+    dtype: np.dtype[Any]
+    variant_filter_ir: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class Dataset:
     source: ResolvedSource
     _metadata_cache: dict[str, Any] | None = field(default=None, init=False, compare=False, repr=False)
@@ -38,7 +44,7 @@ class Dataset:
         return_samples: bool = False,
         return_variants: bool = False,
     ) -> Any:
-        normalized_dtype = _validate_read_options(
+        validated_options = _validate_read_options(
             kind=kind,
             sparse=sparse,
             variants=variants,
@@ -57,7 +63,7 @@ class Dataset:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
             "samples": None if samples is None else list(samples),
-            "variants": _variant_filter_ir(variants),
+            "variants": validated_options.variant_filter_ir,
         }
         try:
             dense = _rust.read_dense(self.source.format.value, members, options)
@@ -72,7 +78,7 @@ class Dataset:
             shape=tuple(dense["shape"]),
             missing_mask=dense["missing_mask"],
             missing=missing,
-            dtype=normalized_dtype,
+            dtype=validated_options.dtype,
         )
         sample_metadata = samples_frame(dense["samples"])
         variant_metadata = variants_frame(dense["variants"])
@@ -158,17 +164,17 @@ def _validate_read_options(
     dtype: Any,
     return_samples: bool,
     return_variants: bool,
-) -> np.dtype[Any]:
+) -> _ValidatedReadOptions:
     _validate_kind(kind)
     _validate_sparse(sparse)
-    _validate_variant_filter(variants)
+    variant_filter_ir = _validate_variant_filter(variants)
     normalized_dtype = _normalize_dtype(dtype)
     _validate_missing_dtype_compatibility(missing, normalized_dtype)
     _validate_missing(missing)
     _validate_sample_filter(samples)
     _validate_bool_option("return_samples", return_samples)
     _validate_bool_option("return_variants", return_variants)
-    return normalized_dtype
+    return _ValidatedReadOptions(dtype=normalized_dtype, variant_filter_ir=variant_filter_ir)
 
 
 def _reject_options(options: dict[str, Any]) -> None:
@@ -192,10 +198,10 @@ def _validate_sparse(sparse: bool | str) -> None:
         raise UnsupportedRepresentation("sparse reads are not implemented until a later phase")
 
 
-def _validate_variant_filter(variants: Any) -> None:
+def _validate_variant_filter(variants: Any) -> dict[str, Any] | None:
     if variants is None:
-        return
-    _variant_filter_ir(variants)
+        return None
+    return _variant_filter_ir(variants)
 
 
 def _variant_filter_ir(variants: Any) -> dict[str, Any] | None:

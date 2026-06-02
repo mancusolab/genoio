@@ -127,6 +127,23 @@ def test_iterable_variant_id_selection_preserves_source_variant_order(tmp_path):
     )
 
 
+def test_generator_variant_id_selection_is_consumed_once(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_filter_vcf(tmp_path))
+
+    G, variants = dataset.read(
+        variants=(variant_id for variant_id in ["rs2", "rs1"]),
+        return_variants=True,
+    )
+
+    assert variants["id"].to_list() == ["rs1", "rs2"]
+    np.testing.assert_array_equal(
+        G,
+        np.array([[0.0, 0.0], [1.0, np.nan], [2.0, 0.0]], dtype=np.float32),
+    )
+
+
 def test_variants_rejects_python_callbacks(tmp_path):
     import genoio
 
