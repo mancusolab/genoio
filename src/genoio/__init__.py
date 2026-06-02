@@ -4,6 +4,7 @@ from ._api import Dataset, open, read, samples, variants
 from ._errors import (
     AmbiguousSourceError,
     GenoioError,
+    InvalidOptionError,
     InvalidSourceError,
     MissingCompanionFileError,
     UnsupportedFormatError,
@@ -32,4 +33,5 @@ __all__ = [
     "UnsupportedFormatError",
     "InvalidSourceError",
     "UnsupportedRepresentation",
+    "InvalidOptionError",
 ]

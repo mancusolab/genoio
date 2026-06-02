@@ -18,6 +18,18 @@ def test_unsupported_extension_raises_unsupported_format_error(tmp_path):
         genoio.open(source_path)
 
 
+def test_unsupported_extension_does_not_resolve_as_same_stem_plink_prefix(tmp_path):
+    import genoio
+
+    for suffix in (".bed", ".bim", ".fam"):
+        (tmp_path / f"cohort{suffix}").touch()
+    source_path = tmp_path / "cohort.txt"
+    source_path.touch()
+
+    with pytest.raises(genoio.UnsupportedFormatError):
+        genoio.open(source_path)
+
+
 def test_plink1_missing_companion_raises_missing_companion_error(tmp_path):
     import genoio
 

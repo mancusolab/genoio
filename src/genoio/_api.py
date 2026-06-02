@@ -1,4 +1,6 @@
-# pattern: Functional Core
+# pattern: Mixed (needs refactoring)
+# Reason: Public entrypoints call resolve_source(), which performs filesystem checks;
+# Dataset validation helpers remain pure.
 
 from __future__ import annotations
 

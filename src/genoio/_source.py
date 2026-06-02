@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Mapping
 
 from ._errors import (
     AmbiguousSourceError,
@@ -56,6 +56,9 @@ def resolve_source(path: str | Path, format: str | SourceFormat | None = None) -
     member_format = _MEMBER_SUFFIX_TO_FORMAT.get(source_path.suffix)
     if member_format is not None:
         return _resolve_plink(source_path, member_format)
+
+    if source_path.suffix:
+        raise UnsupportedFormatError(f"unsupported source extension: {source_path}")
 
     return _resolve_prefix(source_path)
 

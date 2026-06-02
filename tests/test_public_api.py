@@ -26,6 +26,7 @@ def test_import_exposes_public_names_without_reference_packages():
         "UnsupportedFormatError",
         "InvalidSourceError",
         "UnsupportedRepresentation",
+        "InvalidOptionError",
     }
 
     assert expected_names <= set(dir(genoio))
@@ -77,3 +78,10 @@ def test_filter_helpers_build_serializable_expressions():
             {"op": "not", "arg": {"op": "missing_rate", "max": 0.05}},
         ],
     }
+
+
+def test_region_rejects_malformed_region_syntax():
+    import genoio
+
+    with pytest.raises(genoio.InvalidOptionError):
+        genoio.region("not-a-region")
