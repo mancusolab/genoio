@@ -50,7 +50,8 @@ class Dataset:
         _reject_options(options)
         raise NotImplementedError("sample metadata reading is implemented in a later phase")
 
-    def variants(self, **options: Any) -> Any:
+    def variants(self, *, stats: Any = None, **options: Any) -> Any:
+        _validate_variant_stats(stats)
         _reject_options(options)
         raise NotImplementedError("variant metadata reading is implemented in a later phase")
 
@@ -93,8 +94,8 @@ def samples(path: str | Path, *, format: str | None = None, **options: Any) -> A
     return open(path, format=format).samples(**options)
 
 
-def variants(path: str | Path, *, format: str | None = None, **options: Any) -> Any:
-    return open(path, format=format).variants(**options)
+def variants(path: str | Path, *, format: str | None = None, stats: Any = None, **options: Any) -> Any:
+    return open(path, format=format).variants(stats=stats, **options)
 
 
 def _validate_read_options(
@@ -123,6 +124,11 @@ def _reject_options(options: dict[str, Any]) -> None:
     if options:
         keys = ", ".join(sorted(options))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
+
+
+def _validate_variant_stats(stats: Any) -> None:
+    if stats is not None:
+        raise InvalidOptionError("variant stats are not implemented until a later phase")
 
 
 def _validate_kind(kind: str) -> None:

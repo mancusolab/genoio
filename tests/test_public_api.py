@@ -93,6 +93,38 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
         dataset.blocks(0, **read_options)
 
 
+def test_dataset_variants_accepts_documented_default_stats_keyword(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf.gz"
+    source_path.touch()
+    dataset = genoio.open(source_path)
+
+    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
+        dataset.variants(stats=None)
+
+
+def test_top_level_variants_accepts_documented_default_stats_keyword(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf.gz"
+    source_path.touch()
+
+    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
+        genoio.variants(source_path, stats=None)
+
+
+def test_dataset_variants_rejects_stats_until_stat_metadata_is_implemented(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf.gz"
+    source_path.touch()
+    dataset = genoio.open(source_path)
+
+    with pytest.raises(genoio.InvalidOptionError, match="variant stats"):
+        dataset.variants(stats=["maf"])
+
+
 def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
     import genoio
 
