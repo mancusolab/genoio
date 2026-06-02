@@ -1,10 +1,15 @@
 // pattern: Functional Core
 
 pub mod capabilities;
+pub mod dense;
 pub mod error;
 pub mod metadata;
 
 pub use capabilities::SourceCapabilities;
+pub use dense::{
+    select_samples_source_order, transpose_variant_major_to_sample_major, DenseDiagnostics,
+    DenseGenotypeMatrix, DenseSampleSelection,
+};
 pub use error::MetadataError;
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 

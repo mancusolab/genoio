@@ -11,12 +11,11 @@ from typing import Any
 import numpy as np
 
 from . import _rust
-from ._assembly import samples_frame, variants_frame
-from ._errors import InvalidOptionError, UnsupportedRepresentation
+from ._assembly import dense_array_from_rust, read_result_tuple, samples_frame, variants_frame
+from ._errors import InvalidOptionError, InvalidSourceError, SampleFilterError, UnsupportedRepresentation
 from ._source import ResolvedSource, resolve_source
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
-_SUPPORTED_SPARSE = {False, True, "csc", "csr"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
 
 
@@ -37,7 +36,7 @@ class Dataset:
         return_samples: bool = False,
         return_variants: bool = False,
     ) -> Any:
-        _validate_read_options(
+        normalized_dtype = _validate_read_options(
             kind=kind,
             sparse=sparse,
             variants=variants,
@@ -47,11 +46,38 @@ class Dataset:
             return_samples=return_samples,
             return_variants=return_variants,
         )
-        if kind == "haplo":
+        if kind != "geno":
             capabilities = self._metadata()["capabilities"]
             if not capabilities["supports_haplo"]:
                 raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
-        raise NotImplementedError("genotype reading is implemented in a later phase")
+            raise UnsupportedRepresentation("haplo reads are not implemented until Phase 6")
+
+        members = {key: str(path) for key, path in self.source.members.items()}
+        options = {"samples": None if samples is None else list(samples)}
+        try:
+            dense = _rust.read_dense(self.source.format.value, members, options)
+        except ValueError as error:
+            message = str(error)
+            if "missing requested sample" in message:
+                raise SampleFilterError(message) from error
+            raise InvalidSourceError(message) from error
+
+        genotype_matrix = dense_array_from_rust(
+            values=dense["values"],
+            shape=tuple(dense["shape"]),
+            missing_mask=dense["missing_mask"],
+            missing=missing,
+            dtype=normalized_dtype,
+        )
+        sample_metadata = samples_frame(dense["samples"])
+        variant_metadata = variants_frame(dense["variants"])
+        return read_result_tuple(
+            genotype_matrix,
+            sample_metadata,
+            variant_metadata,
+            return_samples=return_samples,
+            return_variants=return_variants,
+        )
 
     def samples(self, **options: Any) -> Any:
         _reject_options(options)
@@ -127,16 +153,17 @@ def _validate_read_options(
     dtype: Any,
     return_samples: bool,
     return_variants: bool,
-) -> None:
+) -> np.dtype[Any]:
     _validate_kind(kind)
     _validate_sparse(sparse)
     _validate_variant_filter(variants)
     _validate_sample_filter(samples)
-    _validate_missing(missing)
     normalized_dtype = _normalize_dtype(dtype)
+    _validate_missing(missing)
     _validate_missing_dtype_compatibility(missing, normalized_dtype)
     _validate_bool_option("return_samples", return_samples)
     _validate_bool_option("return_variants", return_variants)
+    return normalized_dtype
 
 
 def _reject_options(options: dict[str, Any]) -> None:
@@ -156,19 +183,14 @@ def _validate_kind(kind: str) -> None:
 
 
 def _validate_sparse(sparse: bool | str) -> None:
-    if not isinstance(sparse, bool | str) or sparse not in _SUPPORTED_SPARSE:
-        raise UnsupportedRepresentation(f"unsupported sparse representation: {sparse}")
+    if sparse is not False:
+        raise UnsupportedRepresentation("sparse reads are not implemented until a later phase")
 
 
 def _validate_variant_filter(variants: Any) -> None:
     if variants is None:
         return
-    to_ir = getattr(variants, "to_ir", None)
-    if to_ir is None:
-        return
-    ir = to_ir()
-    if not isinstance(ir, dict):
-        raise InvalidOptionError("variant filter must serialize to a dictionary IR")
+    raise InvalidOptionError("variants filters are not implemented until Phase 4")
 
 
 def _validate_sample_filter(samples: list[str] | tuple[str, ...] | set[str] | None) -> None:

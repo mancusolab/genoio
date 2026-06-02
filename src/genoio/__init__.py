@@ -7,6 +7,8 @@ from ._errors import (
     InvalidOptionError,
     InvalidSourceError,
     MissingCompanionFileError,
+    MissingDataError,
+    SampleFilterError,
     UnsupportedFormatError,
     UnsupportedRepresentation,
 )
@@ -34,4 +36,6 @@ __all__ = [
     "InvalidSourceError",
     "UnsupportedRepresentation",
     "InvalidOptionError",
+    "MissingDataError",
+    "SampleFilterError",
 ]

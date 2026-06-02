@@ -35,3 +35,7 @@ class InvalidOptionError(GenoioError):
 
 class MissingDataError(GenoioError):
     """Raised when requested data is unavailable."""
+
+
+class SampleFilterError(GenoioError):
+    """Raised when a sample keep list cannot be satisfied."""

@@ -49,26 +49,18 @@ def test_open_returns_lightweight_dataset_for_vcf(tmp_path):
     assert dataset.source.format.value == "vcf"
 
 
-def test_dataset_read_accepts_approved_options_before_later_implementation(tmp_path):
+def test_dataset_read_rejects_later_phase_filters_and_sparse_options(tmp_path):
     import genoio
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
     dataset = genoio.open(source_path)
 
-    read_options = {
-        "kind": "geno",
-        "sparse": "csc",
-        "variants": genoio.snp() & genoio.id_in(["rs1", "rs2"]),
-        "samples": ["s2", "s1"],
-        "missing": "nan",
-        "dtype": "float32",
-        "return_samples": True,
-        "return_variants": True,
-    }
+    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse"):
+        dataset.read(sparse="csc")
 
-    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
-        dataset.read(**read_options)
+    with pytest.raises(genoio.InvalidOptionError, match="variants"):
+        dataset.read(variants=genoio.snp() & genoio.id_in(["rs1", "rs2"]))
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
@@ -81,7 +73,7 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
     read_options = {
         "kind": "geno",
         "sparse": False,
-        "variants": genoio.chrom("1"),
+        "variants": None,
         "samples": ("s2", "s1"),
         "missing": "raise",
         "dtype": "uint8",
