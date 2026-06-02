@@ -132,6 +132,28 @@ def test_phased_vcf_haplotype_dense_counts_a1_in_sample_haplotype_order(tmp_path
     assert variants["id"].to_list() == ["rs1", "rs2"]
 
 
+def test_filtered_haplotype_read_preserves_source_sample_index(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_phased_vcf(tmp_path))
+
+    H, samples = dataset.read(kind="haplo", samples=["S2"], return_samples=True)
+
+    np.testing.assert_array_equal(
+        H,
+        np.array(
+            [
+                [1.0, 0.0],
+                [0.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert samples["iid"].to_list() == ["S2", "S2"]
+    assert samples["source_sample_index"].to_list() == [1, 1]
+    assert samples["haplotype_index"].to_list() == [0, 1]
+
+
 def test_phased_vcf_haplotype_sparse_uses_requested_sparse_format(tmp_path):
     import genoio
 
@@ -208,6 +230,24 @@ def test_haplotype_blocks_stream_dense_haplotype_columns(tmp_path):
     assert blocks[0][1].equals(full_samples)
     assert [block[2]["id"].to_list() for block in blocks] == [["rs1"], ["rs2"]]
     assert [variant_id for block in blocks for variant_id in block[2]["id"].to_list()] == full_variants["id"].to_list()
+
+
+def test_filtered_haplotype_blocks_preserve_source_sample_index(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_phased_vcf(tmp_path))
+
+    blocks = list(dataset.blocks(size=1, kind="haplo", samples=["S2"], return_samples=True))
+
+    assert len(blocks) == 2
+    first_block_samples = blocks[0][1]
+    np.testing.assert_array_equal(
+        np.concatenate([block[0] for block in blocks], axis=1),
+        np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+    )
+    assert first_block_samples["iid"].to_list() == ["S2", "S2"]
+    assert first_block_samples["source_sample_index"].to_list() == [1, 1]
+    assert first_block_samples["haplotype_index"].to_list() == [0, 1]
 
 
 def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):

@@ -400,7 +400,7 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
         variant_major_missing.extend(decoded.haplotype_missing);
     }
 
-    let samples = haplotype_sample_records(&selection.samples);
+    let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
     let n_samples = samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
@@ -432,7 +432,7 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
     let mut diagnostics = selection.diagnostics;
 
-    let samples = haplotype_sample_records(&selection.samples);
+    let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
     let n_samples = samples.len();
     let mut indptr = vec![0];
     let mut indices = Vec::new();
@@ -914,12 +914,12 @@ fn decode_phased_diploid_gt(
     Ok((values, missing))
 }
 
-fn haplotype_sample_records(samples: &[SampleRecord]) -> Vec<SampleRecord> {
+fn haplotype_sample_records(samples: &[SampleRecord], source_indices: &[usize]) -> Vec<SampleRecord> {
     let mut haplotype_samples = Vec::with_capacity(samples.len() * 2);
-    for (sample_index, sample) in samples.iter().enumerate() {
+    for (sample, source_index) in samples.iter().zip(source_indices) {
         for haplotype_index in 0..2 {
             let mut haplotype_sample = sample.clone();
-            haplotype_sample.source_sample_index = Some(sample_index);
+            haplotype_sample.source_sample_index = Some(*source_index);
             haplotype_sample.haplotype_index = Some(haplotype_index);
             haplotype_samples.push(haplotype_sample);
         }

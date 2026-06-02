@@ -86,6 +86,43 @@ fn phased_vcf_haplotype_dense_counts_a1_by_sample_haplotype_rows() {
 }
 
 #[test]
+fn filtered_haplotype_samples_preserve_source_sample_index() {
+    let dir = unique_dir("vcf-haplo-filtered-samples");
+    let path = dir.join("phased.vcf");
+    fs::write(&path, phased_vcf()).expect("fixture should be written");
+    let samples = vec!["S2".to_string()];
+
+    let haplotypes =
+        genoio_io::read_vcf_haplotypes_dense(&path, Some(&samples), None).expect("haplotypes should decode");
+
+    assert_eq!(haplotypes.n_samples, 2);
+    assert_eq!(
+        haplotypes
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S2", "S2"]
+    );
+    assert_eq!(
+        haplotypes
+            .samples
+            .iter()
+            .map(|sample| sample.source_sample_index)
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(1)]
+    );
+    assert_eq!(
+        haplotypes
+            .samples
+            .iter()
+            .map(|sample| sample.haplotype_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1)]
+    );
+}
+
+#[test]
 fn phased_vcf_haplotype_sparse_reconstructs_dense_values() {
     let dir = unique_dir("vcf-haplo-sparse");
     let path = dir.join("phased.vcf");
