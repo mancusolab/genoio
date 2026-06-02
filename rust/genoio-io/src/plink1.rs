@@ -5,8 +5,9 @@ use std::path::Path;
 
 use genoio_core::{
     attach_variant_stats, compute_variant_stats, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
+    sparse_from_dense_minor_flipped, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
+    MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantRecord,
 };
 
 use crate::error::Result;
@@ -110,6 +111,17 @@ pub fn read_plink1_dense(
         variants,
         diagnostics,
     )
+}
+
+pub fn read_plink1_sparse(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<SparseGenotypeMatrix> {
+    let dense = read_plink1_dense(bed, bim, fam, requested_samples, variant_filter)?;
+    Ok(sparse_from_dense_minor_flipped(dense)?)
 }
 
 fn validate_bed_header(path: &Path, bed_bytes: &[u8]) -> Result<()> {

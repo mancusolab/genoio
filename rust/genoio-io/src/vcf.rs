@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use genoio_core::{
     attach_variant_stats, compute_variant_stats, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    RegionPredicate, SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
+    sparse_from_dense_minor_flipped, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
+    MetadataError, MetadataOutput, RegionPredicate, SampleRecord, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantRecord,
 };
 use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
 
@@ -56,6 +57,15 @@ pub fn read_vcf_dense(
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
     read_vcf_dense_records(path, requested_samples, variant_filter, &mut reader)
+}
+
+pub fn read_vcf_sparse(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<SparseGenotypeMatrix> {
+    let dense = read_vcf_dense(path, requested_samples, variant_filter)?;
+    Ok(sparse_from_dense_minor_flipped(dense)?)
 }
 
 fn read_indexed_vcf_dense(
