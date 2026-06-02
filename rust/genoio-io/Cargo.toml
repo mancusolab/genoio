@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 genoio-core = { path = "../genoio-core" }
+rust-htslib = { version = "1.0.0", default-features = false }
 
 [lib]
 path = "src/lib.rs"

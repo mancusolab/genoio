@@ -40,6 +40,26 @@ def test_plink1_missing_companion_raises_missing_companion_error(tmp_path):
         genoio.open(tmp_path / "cohort")
 
 
+def test_plink1_missing_bim_raises_missing_companion_error(tmp_path):
+    import genoio
+
+    (tmp_path / "cohort.bed").touch()
+    (tmp_path / "cohort.fam").touch()
+
+    with pytest.raises(genoio.MissingCompanionFileError, match="cohort.bim"):
+        genoio.open(tmp_path / "cohort")
+
+
+def test_plink1_missing_fam_raises_missing_companion_error(tmp_path):
+    import genoio
+
+    (tmp_path / "cohort.bed").touch()
+    (tmp_path / "cohort.bim").touch()
+
+    with pytest.raises(genoio.MissingCompanionFileError, match="cohort.fam"):
+        genoio.open(tmp_path / "cohort")
+
+
 def test_plink2_missing_companion_raises_missing_companion_error(tmp_path):
     import genoio
 
@@ -82,3 +102,13 @@ def test_resolves_complete_plink2_member_path(tmp_path):
 
     assert dataset.source.format.value == "plink2"
     assert dataset.source.prefix == tmp_path / "cohort"
+
+
+def test_explicit_plink1_format_on_non_plink_source_raises_unsupported_format_error(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf"
+    source_path.touch()
+
+    with pytest.raises(genoio.UnsupportedFormatError):
+        genoio.open(source_path, format="plink1")

@@ -123,6 +123,9 @@ def _resolve_prefix(path: Path) -> ResolvedSource:
 
 
 def _resolve_plink(path: Path, format: SourceFormat) -> ResolvedSource:
+    suffixes = _PLINK1_SUFFIXES if format is SourceFormat.PLINK1 else _PLINK2_SUFFIXES
+    if path.suffix and path.suffix not in suffixes.values() and path.exists():
+        raise UnsupportedFormatError(f"source path {path} is not {format.value}")
     prefix = _prefix_for_plink_path(path, format)
     return _resolve_plink_prefix(prefix, format)
 

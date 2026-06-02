@@ -1,6 +1,9 @@
 import sys
+from pathlib import Path
 
 import pytest
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
 
 def test_import_exposes_public_names_without_reference_packages():
@@ -93,25 +96,22 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
         dataset.blocks(0, **read_options)
 
 
-def test_dataset_variants_accepts_documented_default_stats_keyword(tmp_path):
+def test_dataset_variants_accepts_documented_default_stats_keyword():
     import genoio
 
-    source_path = tmp_path / "cohort.vcf.gz"
-    source_path.touch()
-    dataset = genoio.open(source_path)
+    dataset = genoio.open(FIXTURE_ROOT / "vcf" / "tiny.vcf")
 
-    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
-        dataset.variants(stats=None)
+    variants = dataset.variants(stats=None)
+
+    assert variants["id"].to_list() == ["rs1", "rs2", "indel1"]
 
 
-def test_top_level_variants_accepts_documented_default_stats_keyword(tmp_path):
+def test_top_level_variants_accepts_documented_default_stats_keyword():
     import genoio
 
-    source_path = tmp_path / "cohort.vcf.gz"
-    source_path.touch()
+    variants = genoio.variants(FIXTURE_ROOT / "vcf" / "tiny.vcf", stats=None)
 
-    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
-        genoio.variants(source_path, stats=None)
+    assert variants["id"].to_list() == ["rs1", "rs2", "indel1"]
 
 
 def test_dataset_variants_rejects_stats_until_stat_metadata_is_implemented(tmp_path):

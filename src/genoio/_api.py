@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from . import _rust
+from ._assembly import samples_frame, variants_frame
 from ._errors import InvalidOptionError, UnsupportedRepresentation
 from ._source import ResolvedSource, resolve_source
 
@@ -21,6 +23,7 @@ _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
 @dataclass(frozen=True)
 class Dataset:
     source: ResolvedSource
+    _metadata_cache: dict[str, Any] | None = field(default=None, init=False, compare=False, repr=False)
 
     def read(
         self,
@@ -44,21 +47,37 @@ class Dataset:
             return_samples=return_samples,
             return_variants=return_variants,
         )
+        if kind == "haplo":
+            capabilities = self._metadata()["capabilities"]
+            if not capabilities["supports_haplo"]:
+                raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
         raise NotImplementedError("genotype reading is implemented in a later phase")
 
     def samples(self, **options: Any) -> Any:
         _reject_options(options)
-        raise NotImplementedError("sample metadata reading is implemented in a later phase")
+        return samples_frame(self._metadata()["samples"])
 
     def variants(self, *, stats: Any = None, **options: Any) -> Any:
         _validate_variant_stats(stats)
         _reject_options(options)
-        raise NotImplementedError("variant metadata reading is implemented in a later phase")
+        return variants_frame(self._metadata()["variants"])
 
     def blocks(self, size: int, **read_options: Any) -> Any:
         _validate_block_size(size)
         _validate_read_options_from_mapping(read_options)
         raise NotImplementedError("block iteration is implemented in a later phase")
+
+    def _metadata(self) -> dict[str, Any]:
+        if self._metadata_cache is None:
+            members = {key: str(path) for key, path in self.source.members.items()}
+            try:
+                metadata = _rust.read_metadata(self.source.format.value, members)
+            except ValueError as error:
+                from ._errors import InvalidSourceError
+
+                raise InvalidSourceError(str(error)) from error
+            object.__setattr__(self, "_metadata_cache", metadata)
+        return self._metadata_cache
 
 
 def open(path: str | Path, format: str | None = None) -> Dataset:

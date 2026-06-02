@@ -10,5 +10,6 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+genoio-core = { path = "../genoio-core" }
 genoio-io = { path = "../genoio-io" }
 pyo3 = { version = "0.25", features = ["extension-module"] }
