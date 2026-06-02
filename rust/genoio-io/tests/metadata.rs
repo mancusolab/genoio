@@ -83,6 +83,28 @@ fn vcf_haplotype_capability_requires_phased_genotype_evidence() {
 }
 
 #[test]
+fn vcf_haplotype_capability_is_detected_from_records_not_extension() {
+    let dir = unique_dir("vcf-phased-extension");
+    let path = dir.join("phased.not-vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0|1
+",
+    );
+
+    let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
+
+    assert!(metadata.capabilities.supports_geno);
+    assert!(metadata.capabilities.supports_haplo);
+    assert!(metadata.capabilities.phased);
+}
+
+#[test]
 fn plink1_metadata_normalizes_fam_and_bim_records_without_reading_bed_payload() {
     let dir = unique_dir("plink1-metadata");
     let bed = dir.join("tiny.bed");

@@ -1,12 +1,11 @@
 // pattern: Imperative Shell
 
-use std::fs;
 use std::path::Path;
 
 use genoio_core::{
     MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, VariantRecord,
 };
-use rust_htslib::bcf::{Read, Reader};
+use rust_htslib::bcf::{record::GenotypeAllele, Read, Reader};
 
 use crate::error::Result;
 
@@ -28,9 +27,13 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
         .collect::<Vec<_>>();
 
     let mut variants = Vec::new();
+    let mut has_phased_genotype_evidence = false;
     for record_result in reader.records() {
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        if !has_phased_genotype_evidence && record_has_phased_genotype(&record, samples.len())? {
+            has_phased_genotype_evidence = true;
+        }
         let rid = record
             .rid()
             .ok_or_else(|| MetadataError::parse(path, "vcf record is missing a chromosome id"))?;
@@ -72,7 +75,7 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
         });
     }
 
-    let capabilities = if has_phased_vcf_genotype_evidence(path)? {
+    let capabilities = if has_phased_genotype_evidence {
         SourceCapabilities::phased_genotypes()
     } else {
         SourceCapabilities::genotype_only()
@@ -85,20 +88,20 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     })
 }
 
-fn has_phased_vcf_genotype_evidence(path: &Path) -> Result<bool> {
-    if path.extension().and_then(|extension| extension.to_str()) != Some("vcf") {
-        return Ok(false);
-    }
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(contents
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .any(|line| {
-            let mut fields = line.split('\t').skip(8);
-            matches!(fields.next(), Some(format) if format.split(':').next() == Some("GT"))
-                && fields.any(|sample| sample.split(':').next().is_some_and(|gt| gt.contains('|')))
-        }))
+fn record_has_phased_genotype(
+    record: &rust_htslib::bcf::Record,
+    sample_count: usize,
+) -> Result<bool> {
+    let genotypes = match record.genotypes() {
+        Ok(genotypes) => genotypes,
+        Err(_) => return Ok(false),
+    };
+    Ok((0..sample_count).any(|sample_index| {
+        genotypes.get(sample_index).iter().any(|allele| {
+            matches!(
+                allele,
+                GenotypeAllele::Phased(_) | GenotypeAllele::PhasedMissing
+            )
+        })
+    }))
 }
