@@ -50,6 +50,20 @@ def write_all_missing_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_common_a1_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "common_a1.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t1/1\t1/1\t0/1
+"""
+    )
+    return path
+
+
 def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_path):
     import genoio
 
@@ -64,6 +78,42 @@ def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_p
     assert samples["iid"].to_list() == ["S1", "S2", "S3"]
     assert isinstance(variants, pl.DataFrame)
     assert variants["id"].to_list() == ["rs1", "rs2"]
+
+
+def test_default_read_equals_explicit_genotype_read(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+
+    np.testing.assert_array_equal(dataset.read(), dataset.read(kind="geno"))
+
+
+def test_dense_genotype_reads_do_not_minor_allele_flip_by_default(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_common_a1_vcf(tmp_path))
+
+    G, variants = dataset.read(return_variants=True)
+
+    np.testing.assert_array_equal(G, np.array([[2.0], [2.0], [1.0]], dtype=np.float32))
+    assert variants["a0"].to_list() == ["A"]
+    assert variants["a1"].to_list() == ["G"]
+    assert variants["flipped"].to_list() == [False]
+
+
+def test_return_samples_and_variants_tuple_order_is_matrix_samples_variants(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+
+    result = dataset.read(return_samples=True, return_variants=True)
+
+    assert len(result) == 3
+    assert isinstance(result[0], np.ndarray)
+    assert isinstance(result[1], pl.DataFrame)
+    assert isinstance(result[2], pl.DataFrame)
+    assert result[1]["iid"].to_list() == ["S1", "S2", "S3"]
+    assert result[2]["id"].to_list() == ["rs1", "rs2"]
 
 
 def test_dense_plink1_read_matches_fixture_matrix_and_return_tuple_shapes():

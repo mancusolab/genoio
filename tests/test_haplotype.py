@@ -52,6 +52,20 @@ def write_mixed_phase_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_common_a1_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "common_a1.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t1/1\t1/1\t0/1
+"""
+    )
+    return path
+
+
 def test_plink1_haplotype_reads_raise_unsupported_representation():
     import genoio
 
@@ -133,3 +147,17 @@ def test_haplotype_read_rejects_unphased_separator_in_retained_variant(tmp_path)
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="unphased"):
         dataset.read(kind="haplo", variants=["rs2"])
+
+
+def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_common_a1_vcf(tmp_path))
+
+    G, variants = dataset.read(kind="geno", sparse=True, return_variants=True)
+
+    assert scipy_sparse.isspmatrix_csc(G)
+    np.testing.assert_array_equal(G.toarray(), np.array([[0.0], [0.0], [1.0]], dtype=np.float32))
+    assert variants["a0"].to_list() == ["G"]
+    assert variants["a1"].to_list() == ["A"]
+    assert variants["flipped"].to_list() == [True]
