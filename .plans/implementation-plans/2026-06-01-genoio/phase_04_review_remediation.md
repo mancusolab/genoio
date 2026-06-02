@@ -5,6 +5,8 @@
 - `variants=` generator inputs were consumed during validation and then passed to Rust as an empty `id_in([])` filter.
 - Indexed VCF region pushdown was missing; region reads used a full scan even when a tabix-indexed VCF was available.
 - Phase 4 behavior changes now have red/green regression evidence.
+- `NaN` rate thresholds constructed non-JSON-compliant filter IR instead of raising `InvalidOptionError`.
+- Non-pushdown-safe region expressions on compressed unindexed VCFs were rejected instead of falling back to full-scan Rust evaluation.
 
 ## Red Evidence
 
@@ -64,3 +66,52 @@ Results after fix:
 15 passed in 0.12s
 ```
 
+## CLI/API Specialist Remediation
+
+### NaN Rate Threshold Validation
+
+Command:
+
+```bash
+pytest -q tests/test_filters.py
+```
+
+Result before fix:
+
+```text
+FAILED tests/test_filters.py::test_filter_constructors_reject_invalid_values[<lambda>6]
+FAILED tests/test_filters.py::test_filter_constructors_reject_invalid_values[<lambda>7]
+FAILED tests/test_filters.py::test_filter_constructors_reject_invalid_values[<lambda>9]
+Failed: DID NOT RAISE <class 'genoio._errors.InvalidOptionError'>
+```
+
+### Compressed Unindexed Non-Pushdown Region Fallback
+
+Command:
+
+```bash
+env CC=clang AR=ar cargo test --manifest-path rust/Cargo.toml -p genoio-io compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan
+```
+
+Result before fix:
+
+```text
+test compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan ... FAILED
+Parse { message: "region filter on compressed VCF requires an index" }
+```
+
+### Focused Green Evidence
+
+Commands:
+
+```bash
+pytest -q tests/test_filters.py
+env CC=clang AR=ar cargo test --manifest-path rust/Cargo.toml -p genoio-io compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan
+```
+
+Results after fix:
+
+```text
+18 passed in 0.41s
+test compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan ... ok
+```

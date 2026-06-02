@@ -266,7 +266,10 @@ fn reject_unindexed_compressed_region(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<()> {
-    if !variant_filter.is_some_and(VariantFilter::has_region_predicate) || !is_compressed_vcf(path)
+    if variant_filter
+        .and_then(VariantFilter::concrete_region_pushdown)
+        .is_none()
+        || !is_compressed_vcf(path)
     {
         return Ok(());
     }

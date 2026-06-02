@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -165,7 +166,7 @@ def _validate_rate(name: str, value: float) -> float:
         raise InvalidOptionError(f"{name} must be a number between 0 and 1")
     normalized = float(value)
     lower, upper = _GENOTYPE_RATE_RANGE
-    if normalized < lower or normalized > upper:
+    if not math.isfinite(normalized) or normalized < lower or normalized > upper:
         raise InvalidOptionError(f"{name} must be between 0 and 1")
     return normalized
 

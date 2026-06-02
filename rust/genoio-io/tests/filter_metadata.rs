@@ -186,3 +186,32 @@ fn compressed_vcf_region_filter_requires_index() {
 
     assert!(error.to_string().contains("requires an index"));
 }
+
+#[test]
+fn compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan() {
+    let dir = unique_dir("vcf-filter-unindexed-non-pushdown-region");
+    let path = dir.join("unindexed.vcf.gz");
+    write_compressed_unindexed_vcf(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "not",
+        "expr": {
+            "op": "predicate",
+            "name": "region",
+            "params": {"value": "1:20-30"}
+        }
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter))
+        .expect("non-pushdown region filter should full-scan unindexed compressed vcf");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs10"]
+    );
+    assert_eq!(dense.diagnostics.candidate_variants, 1);
+}
