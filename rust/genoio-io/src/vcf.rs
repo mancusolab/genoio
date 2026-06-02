@@ -56,6 +56,7 @@ pub fn read_vcf_dense(
     for record_result in reader.records() {
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        validate_dense_biallelic_record(path, &record)?;
         variants.push(variant_record_from_record(path, &header, &record)?);
         let genotypes = record
             .genotypes()
@@ -84,6 +85,26 @@ pub fn read_vcf_dense(
         variants,
         selection.diagnostics,
     )
+}
+
+fn validate_dense_biallelic_record(path: &Path, record: &rust_htslib::bcf::Record) -> Result<()> {
+    let allele_count = record.alleles().len();
+    if allele_count == 2 {
+        return Ok(());
+    }
+    let record_id = record.id();
+    let id = String::from_utf8_lossy(&record_id);
+    let reason = if allele_count > 2 {
+        "multi-ALT records are not supported"
+    } else {
+        "records with fewer than two alleles are not supported"
+    };
+    Err(MetadataError::parse(
+        path,
+        format!(
+            "vcf dense reads require biallelic records; record {id} has {allele_count} alleles: {reason}"
+        ),
+    ))
 }
 
 fn sample_records_from_header(header: &rust_htslib::bcf::header::HeaderView) -> Vec<SampleRecord> {

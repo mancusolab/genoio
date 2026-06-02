@@ -157,10 +157,10 @@ def _validate_read_options(
     _validate_kind(kind)
     _validate_sparse(sparse)
     _validate_variant_filter(variants)
-    _validate_sample_filter(samples)
     normalized_dtype = _normalize_dtype(dtype)
-    _validate_missing(missing)
     _validate_missing_dtype_compatibility(missing, normalized_dtype)
+    _validate_missing(missing)
+    _validate_sample_filter(samples)
     _validate_bool_option("return_samples", return_samples)
     _validate_bool_option("return_variants", return_variants)
     return normalized_dtype
@@ -217,7 +217,11 @@ def _normalize_dtype(dtype: Any) -> np.dtype[Any]:
 
 
 def _validate_missing_dtype_compatibility(missing: str, dtype: np.dtype[Any]) -> None:
-    if missing in {"nan", "impute"} and not np.issubdtype(dtype, np.floating):
+    if (
+        isinstance(missing, str)
+        and missing in {"nan", "impute"}
+        and not np.issubdtype(dtype, np.floating)
+    ):
         raise InvalidOptionError(f'missing="{missing}" requires a floating dtype')
 
 

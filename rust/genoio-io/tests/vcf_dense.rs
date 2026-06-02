@@ -132,3 +132,23 @@ fn vcf_dense_rejects_multiallelic_genotype_states() {
 
     assert!(error.to_string().contains("multiallelic"));
 }
+
+#[test]
+fn vcf_dense_rejects_multi_alt_records_even_when_gt_uses_first_alt() {
+    let dir = unique_dir("vcf-dense-multi-alt-record");
+    let path = dir.join("multi-alt.vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG,T\t.\tPASS\t.\tGT\t0/1
+",
+    );
+
+    let error = genoio_io::read_vcf_dense(&path, None).expect_err("multi-ALT records should fail");
+
+    assert!(error.to_string().contains("multi-ALT"));
+}

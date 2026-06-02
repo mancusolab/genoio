@@ -22,6 +22,34 @@ def write_biallelic_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_multi_alt_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "multi_alt.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG,T\t.\tPASS\t.\tGT\t0/1
+"""
+    )
+    return path
+
+
+def write_all_missing_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "all_missing.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t./.\t./.
+"""
+    )
+    return path
+
+
 def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_path):
     import genoio
 
@@ -80,6 +108,15 @@ def test_missing_policies_nan_raise_and_impute(tmp_path):
         dataset.read(missing="raise")
 
 
+def test_missing_policy_impute_rejects_all_missing_variant(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_all_missing_vcf(tmp_path))
+
+    with pytest.raises(genoio.MissingDataError, match="all-missing variant"):
+        dataset.read(missing="impute")
+
+
 def test_missing_policy_rejects_integer_dtype_combinations(tmp_path):
     import genoio
 
@@ -90,6 +127,24 @@ def test_missing_policy_rejects_integer_dtype_combinations(tmp_path):
     with pytest.raises(genoio.InvalidOptionError, match='missing="impute"'):
         dataset.read(dtype=np.int16, missing="impute")
     assert dataset.read(dtype=np.int16, missing="raise", samples=["S1"]).dtype == np.dtype("int16")
+
+
+def test_read_option_validation_prioritizes_dtype_and_missing_before_samples(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+
+    with pytest.raises(genoio.InvalidOptionError, match='missing="nan"'):
+        dataset.read(dtype=np.int16, missing="nan", samples=["S1", "S1"])
+
+
+def test_dense_vcf_read_rejects_multi_alt_records_even_when_gt_uses_first_alt(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_multi_alt_vcf(tmp_path))
+
+    with pytest.raises(genoio.InvalidSourceError, match="multi-ALT"):
+        dataset.read()
 
 
 def test_unordered_sample_keep_list_returns_rows_in_source_order_and_metadata_matches(tmp_path):
