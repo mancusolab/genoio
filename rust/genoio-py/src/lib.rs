@@ -129,12 +129,78 @@ fn read_sparse(
     sparse_to_py(py, output)
 }
 
+#[pyfunction]
+fn read_haplotypes_dense(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    let requested_samples = samples_option(options)?;
+    let variant_filter = variants_option(options)?;
+    let variant_window = variant_window_option(options)?;
+    let output = match format {
+        "vcf" | "bcf" => {
+            let key = if format == "vcf" { "vcf" } else { "bcf" };
+            let path = member_path(members, key)?;
+            genoio_io::read_vcf_haplotypes_dense_windowed(
+                &path,
+                requested_samples.as_deref(),
+                variant_filter.as_ref(),
+                variant_window,
+            )
+        }
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported haplotype format: {other}"
+            )));
+        }
+    }
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+
+    dense_to_py(py, output)
+}
+
+#[pyfunction]
+fn read_haplotypes_sparse(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    let requested_samples = samples_option(options)?;
+    let variant_filter = variants_option(options)?;
+    let variant_window = variant_window_option(options)?;
+    let output = match format {
+        "vcf" | "bcf" => {
+            let key = if format == "vcf" { "vcf" } else { "bcf" };
+            let path = member_path(members, key)?;
+            genoio_io::read_vcf_haplotypes_sparse_windowed(
+                &path,
+                requested_samples.as_deref(),
+                variant_filter.as_ref(),
+                variant_window,
+            )
+        }
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported haplotype format: {other}"
+            )));
+        }
+    }
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+
+    sparse_to_py(py, output)
+}
+
 #[pymodule]
 fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(backend_name, module)?)?;
     module.add_function(wrap_pyfunction!(read_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(read_dense, module)?)?;
     module.add_function(wrap_pyfunction!(read_sparse, module)?)?;
+    module.add_function(wrap_pyfunction!(read_haplotypes_dense, module)?)?;
+    module.add_function(wrap_pyfunction!(read_haplotypes_sparse, module)?)?;
     Ok(())
 }
 

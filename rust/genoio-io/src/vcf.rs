@@ -119,6 +119,58 @@ pub fn read_vcf_sparse_windowed(
     )
 }
 
+pub fn read_vcf_haplotypes_dense(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<DenseGenotypeMatrix> {
+    read_vcf_haplotypes_dense_windowed(path, requested_samples, variant_filter, None)
+}
+
+pub fn read_vcf_haplotypes_dense_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<DenseGenotypeMatrix> {
+    reject_unindexed_compressed_region(path, variant_filter)?;
+    let mut reader = Reader::from_path(path)
+        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+    read_vcf_haplotypes_dense_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
+pub fn read_vcf_haplotypes_sparse(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<SparseGenotypeMatrix> {
+    read_vcf_haplotypes_sparse_windowed(path, requested_samples, variant_filter, None)
+}
+
+pub fn read_vcf_haplotypes_sparse_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<SparseGenotypeMatrix> {
+    reject_unindexed_compressed_region(path, variant_filter)?;
+    let mut reader = Reader::from_path(path)
+        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+    read_vcf_haplotypes_sparse_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
 fn read_indexed_vcf_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -275,6 +327,183 @@ fn read_vcf_dense_records<R: Read>(
         values,
         missing_mask,
         selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+fn read_vcf_haplotypes_dense_records<R: Read>(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    reader: &mut R,
+) -> Result<DenseGenotypeMatrix> {
+    let header = reader.header().clone();
+    let all_samples = sample_records_from_header(&header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
+
+    let mut variants = Vec::new();
+    let mut variant_major_values = Vec::new();
+    let mut variant_major_missing = Vec::new();
+    let mut retained_index = 0_usize;
+    for record_result in reader.records() {
+        let record = record_result
+            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let mut variant = variant_record_from_record(path, &header, &record)?;
+        diagnostics.candidate_variants += 1;
+        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
+            diagnostics.dropped_metadata_variants += 1;
+            continue;
+        }
+
+        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
+        if !requires_stats {
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+
+        validate_dense_biallelic_record(path, &record)?;
+        let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
+        let stats = if requires_stats {
+            Some(compute_variant_stats(
+                &decoded.genotype_values,
+                &decoded.genotype_missing,
+            )?)
+        } else {
+            None
+        };
+        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+            diagnostics.dropped_genotype_variants += 1;
+            continue;
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
+        }
+        if requires_stats {
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+        variants.push(variant);
+        variant_major_values.extend(decoded.haplotype_values);
+        variant_major_missing.extend(decoded.haplotype_missing);
+    }
+
+    let samples = haplotype_sample_records(&selection.samples);
+    let n_samples = samples.len();
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        samples,
+        variants,
+        diagnostics,
+    )
+}
+
+fn read_vcf_haplotypes_sparse_records<R: Read>(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    reader: &mut R,
+) -> Result<SparseGenotypeMatrix> {
+    let header = reader.header().clone();
+    let all_samples = sample_records_from_header(&header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
+
+    let samples = haplotype_sample_records(&selection.samples);
+    let n_samples = samples.len();
+    let mut indptr = vec![0];
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    let mut variants = Vec::new();
+    let mut retained_index = 0_usize;
+    for record_result in reader.records() {
+        let record = record_result
+            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let mut variant = variant_record_from_record(path, &header, &record)?;
+        diagnostics.candidate_variants += 1;
+        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
+            diagnostics.dropped_metadata_variants += 1;
+            continue;
+        }
+
+        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
+        if !requires_stats {
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+
+        validate_dense_biallelic_record(path, &record)?;
+        let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
+        let stats = if requires_stats {
+            Some(compute_variant_stats(
+                &decoded.genotype_values,
+                &decoded.genotype_missing,
+            )?)
+        } else {
+            None
+        };
+        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+            diagnostics.dropped_genotype_variants += 1;
+            continue;
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
+        }
+        if requires_stats {
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
+        reject_sparse_missing_values(&decoded.haplotype_missing)?;
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoded.haplotype_values);
+        variants.push(variant);
+    }
+
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    SparseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        indptr,
+        indices,
+        data,
+        samples,
         variants,
         diagnostics,
     )
@@ -575,6 +804,108 @@ fn decode_diploid_gt(
     }
 
     Ok((dosage, false))
+}
+
+struct PhasedHaplotypeRecord {
+    haplotype_values: Vec<f32>,
+    haplotype_missing: Vec<bool>,
+    genotype_values: Vec<f32>,
+    genotype_missing: Vec<bool>,
+}
+
+fn decode_phased_haplotype_record(
+    path: &Path,
+    record: &rust_htslib::bcf::Record,
+    source_indices: &[usize],
+) -> Result<PhasedHaplotypeRecord> {
+    let genotypes = record
+        .genotypes()
+        .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+    let mut haplotype_values = Vec::with_capacity(source_indices.len() * 2);
+    let mut haplotype_missing = Vec::with_capacity(source_indices.len() * 2);
+    let mut genotype_values = Vec::with_capacity(source_indices.len());
+    let mut genotype_missing = Vec::with_capacity(source_indices.len());
+
+    for source_index in source_indices {
+        let genotype = genotypes.get(*source_index);
+        let (values, missing) = decode_phased_diploid_gt(path, record, &genotype)?;
+        haplotype_values.extend(values);
+        haplotype_missing.extend(missing);
+        genotype_values.push(values[0] + values[1]);
+        genotype_missing.push(missing[0] || missing[1]);
+    }
+
+    Ok(PhasedHaplotypeRecord {
+        haplotype_values,
+        haplotype_missing,
+        genotype_values,
+        genotype_missing,
+    })
+}
+
+fn decode_phased_diploid_gt(
+    path: &Path,
+    record: &rust_htslib::bcf::Record,
+    genotype: &rust_htslib::bcf::record::Genotype,
+) -> Result<([f32; 2], [bool; 2])> {
+    if genotype.len() != 2 {
+        return Err(MetadataError::parse(
+            path,
+            format!(
+                "vcf record {} has non-diploid GT with {} alleles",
+                String::from_utf8_lossy(&record.id()),
+                genotype.len()
+            ),
+        ));
+    }
+
+    let mut values = [0.0, 0.0];
+    let mut missing = [false, false];
+    for (allele_index, allele) in genotype.iter().enumerate() {
+        if allele_index > 0
+            && matches!(
+                allele,
+                GenotypeAllele::UnphasedMissing | GenotypeAllele::Unphased(_)
+            )
+        {
+            return Err(MetadataError::parse(
+                path,
+                format!(
+                    "vcf record {} contains an unphased GT separator in a retained haplotype variant",
+                    String::from_utf8_lossy(&record.id())
+                ),
+            ));
+        }
+        match allele {
+            GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing => {
+                missing[allele_index] = true;
+            }
+            GenotypeAllele::Phased(index) | GenotypeAllele::Unphased(index) => match index {
+                0 => {}
+                1 => values[allele_index] = 1.0,
+                other => {
+                    return Err(MetadataError::parse(
+                        path,
+                        format!(
+                            "vcf record {} has multiallelic GT allele index {other}",
+                            String::from_utf8_lossy(&record.id())
+                        ),
+                    ));
+                }
+            },
+        }
+    }
+
+    Ok((values, missing))
+}
+
+fn haplotype_sample_records(samples: &[SampleRecord]) -> Vec<SampleRecord> {
+    let mut haplotype_samples = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        haplotype_samples.push(sample.clone());
+        haplotype_samples.push(sample.clone());
+    }
+    haplotype_samples
 }
 
 fn record_has_phased_genotype(

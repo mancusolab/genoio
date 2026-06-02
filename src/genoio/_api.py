@@ -82,9 +82,9 @@ class Dataset:
             capabilities = self._metadata()["capabilities"]
             if not capabilities["supports_haplo"]:
                 raise UnsupportedRepresentation(f"{self.source.format.value} does not support haplo reads")
-            raise UnsupportedRepresentation("haplo reads are not implemented until Phase 6")
 
         return self._read_validated(
+            kind=kind,
             samples=samples,
             return_samples=return_samples,
             return_variants=return_variants,
@@ -122,6 +122,7 @@ class Dataset:
         start = 0
         while True:
             block = self._read_block_from_rust(
+                kind=read_options["kind"],
                 samples=read_options["samples"],
                 return_samples=read_options["return_samples"],
                 return_variants=read_options["return_variants"],
@@ -139,6 +140,7 @@ class Dataset:
     def _read_block_from_rust(
         self,
         *,
+        kind: str,
         samples: list[str] | tuple[str, ...] | set[str] | None,
         return_samples: bool,
         return_variants: bool,
@@ -146,6 +148,7 @@ class Dataset:
         variant_window: dict[str, int],
     ) -> Any:
         return self._read_validated(
+            kind=kind,
             samples=samples,
             return_samples=return_samples,
             return_variants=return_variants,
@@ -156,6 +159,7 @@ class Dataset:
     def _read_validated(
         self,
         *,
+        kind: str,
         samples: list[str] | tuple[str, ...] | set[str] | None,
         return_samples: bool,
         return_variants: bool,
@@ -169,7 +173,11 @@ class Dataset:
             "variant_window": variant_window,
         }
         if validated_options.sparse_format is None:
-            rust_result = self._read_dense_from_rust(members, options)
+            rust_result = (
+                self._read_dense_from_rust(members, options)
+                if kind == "geno"
+                else self._read_haplotypes_dense_from_rust(members, options)
+            )
             genotype_matrix = dense_array_from_rust(
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
@@ -178,7 +186,11 @@ class Dataset:
                 dtype=validated_options.dtype,
             )
         else:
-            rust_result = self._read_sparse_from_rust(members, options)
+            rust_result = (
+                self._read_sparse_from_rust(members, options)
+                if kind == "geno"
+                else self._read_haplotypes_sparse_from_rust(members, options)
+            )
             genotype_matrix = sparse_matrix_from_rust(
                 indptr=rust_result["indptr"],
                 indices=rust_result["indices"],
@@ -202,6 +214,26 @@ class Dataset:
             return _rust.read_dense(self.source.format.value, members, options)
         except ValueError as error:
             raise _public_read_error(error) from error
+
+    def _read_haplotypes_dense_from_rust(
+        self,
+        members: dict[str, str],
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return _rust.read_haplotypes_dense(self.source.format.value, members, options)
+        except ValueError as error:
+            raise _public_haplotype_read_error(error) from error
+
+    def _read_haplotypes_sparse_from_rust(
+        self,
+        members: dict[str, str],
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return _rust.read_haplotypes_sparse(self.source.format.value, members, options)
+        except ValueError as error:
+            raise _public_haplotype_read_error(error) from error
 
     def _read_sparse_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -395,6 +427,15 @@ def _public_read_error(error: ValueError) -> Exception:
     if "sparse missing values" in message:
         return MissingDataError(message)
     return InvalidSourceError(message)
+
+
+def _public_haplotype_read_error(error: ValueError) -> Exception:
+    message = str(error)
+    if "unphased" in message or "unsupported haplotype format" in message:
+        return UnsupportedRepresentation(message)
+    if "sparse missing values" in message:
+        return MissingDataError(message)
+    return _public_read_error(error)
 
 
 def _validate_bool_option(name: str, value: bool) -> None:
