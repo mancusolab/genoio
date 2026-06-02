@@ -49,14 +49,14 @@ def test_open_returns_lightweight_dataset_for_vcf(tmp_path):
     assert dataset.source.format.value == "vcf"
 
 
-def test_dataset_read_rejects_later_phase_sparse_options(tmp_path):
+def test_dataset_read_recognizes_sparse_options_and_validates_missing_policy(tmp_path):
     import genoio
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
     dataset = genoio.open(source_path)
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse"):
+    with pytest.raises(genoio.InvalidOptionError, match="sparse missing values"):
         dataset.read(sparse="csc")
 
 
@@ -78,8 +78,9 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
         "return_variants": True,
     }
 
-    with pytest.raises(NotImplementedError, match="implemented in a later phase"):
-        dataset.blocks(8192, **read_options)
+    block_iterator = dataset.blocks(8192, **read_options)
+
+    assert iter(block_iterator) is block_iterator
 
     with pytest.raises(genoio.InvalidOptionError, match="block size"):
         dataset.blocks(0, **read_options)
@@ -124,7 +125,7 @@ def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
     with pytest.raises(genoio.UnsupportedRepresentation):
         dataset.read(kind="unsupported")
 
-    with pytest.raises(genoio.UnsupportedRepresentation):
+    with pytest.raises(genoio.InvalidOptionError):
         dataset.read(sparse="unsupported")
 
 
