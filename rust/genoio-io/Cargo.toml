@@ -1,0 +1,11 @@
+[package]
+name = "genoio-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+genoio-core = { path = "../genoio-core" }
+
+[lib]
+path = "src/lib.rs"

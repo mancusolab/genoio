@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.10,<2"]
+build-backend = "maturin"
+
+[project]
+name = "genoio"
+version = "0.1.0"
+description = "Genotype IO tools for Python"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "polars",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "maturin>=1.10,<2",
+    "pytest",
+    "ruff",
+]
+
+[tool.maturin]
+python-source = "src"
+module-name = "genoio._rust"
+manifest-path = "rust/genoio-py/Cargo.toml"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["genoio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
