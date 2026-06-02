@@ -77,11 +77,50 @@ fn read_dense(
     dense_to_py(py, output)
 }
 
+#[pyfunction]
+fn read_sparse(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    let requested_samples = samples_option(options)?;
+    let variant_filter = variants_option(options)?;
+    let output = match format {
+        "vcf" | "bcf" => {
+            let key = if format == "vcf" { "vcf" } else { "bcf" };
+            let path = member_path(members, key)?;
+            genoio_io::read_vcf_sparse(&path, requested_samples.as_deref(), variant_filter.as_ref())
+        }
+        "plink1" => {
+            let bed = member_path(members, "bed")?;
+            let bim = member_path(members, "bim")?;
+            let fam = member_path(members, "fam")?;
+            genoio_io::read_plink1_sparse(
+                &bed,
+                &bim,
+                &fam,
+                requested_samples.as_deref(),
+                variant_filter.as_ref(),
+            )
+        }
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported sparse format: {other}"
+            )));
+        }
+    }
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+
+    sparse_to_py(py, output)
+}
+
 #[pymodule]
 fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(backend_name, module)?)?;
     module.add_function(wrap_pyfunction!(read_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(read_dense, module)?)?;
+    module.add_function(wrap_pyfunction!(read_sparse, module)?)?;
     Ok(())
 }
 
@@ -166,6 +205,34 @@ fn dense_to_py(py: Python<'_>, output: genoio_core::DenseGenotypeMatrix) -> PyRe
     dict.set_item("values", output.values)?;
     dict.set_item("shape", (output.n_samples, output.n_variants))?;
     dict.set_item("missing_mask", output.missing_mask)?;
+    dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
+    dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+
+    let diagnostics = PyDict::new(py);
+    diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
+    diagnostics.set_item("retained_samples", output.diagnostics.retained_samples)?;
+    diagnostics.set_item("missing_samples", output.diagnostics.missing_samples)?;
+    diagnostics.set_item("candidate_variants", output.diagnostics.candidate_variants)?;
+    diagnostics.set_item("retained_variants", output.diagnostics.retained_variants)?;
+    diagnostics.set_item(
+        "dropped_metadata_variants",
+        output.diagnostics.dropped_metadata_variants,
+    )?;
+    diagnostics.set_item(
+        "dropped_genotype_variants",
+        output.diagnostics.dropped_genotype_variants,
+    )?;
+    dict.set_item("diagnostics", diagnostics)?;
+
+    Ok(dict.unbind())
+}
+
+fn sparse_to_py(py: Python<'_>, output: genoio_core::SparseGenotypeMatrix) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("indptr", output.indptr)?;
+    dict.set_item("indices", output.indices)?;
+    dict.set_item("data", output.data)?;
+    dict.set_item("shape", (output.n_rows, output.n_cols))?;
     dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
     dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
 

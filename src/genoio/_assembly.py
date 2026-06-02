@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+from scipy import sparse as scipy_sparse
 
 from ._errors import MissingDataError
 
@@ -85,8 +86,32 @@ def dense_array_from_rust(
     raise AssertionError(f"unvalidated missing-data policy: {missing}")
 
 
+def sparse_matrix_from_rust(
+    *,
+    indptr: list[int],
+    indices: list[int],
+    data: list[float],
+    shape: tuple[int, int],
+    dtype: np.dtype[Any],
+    sparse_format: str,
+) -> Any:
+    matrix = scipy_sparse.csc_matrix(
+        (
+            np.asarray(data, dtype=dtype),
+            np.asarray(indices, dtype=np.int64),
+            np.asarray(indptr, dtype=np.int64),
+        ),
+        shape=shape,
+    )
+    if sparse_format == "csc":
+        return matrix
+    if sparse_format == "csr":
+        return matrix.tocsr()
+    raise AssertionError(f"unvalidated sparse format: {sparse_format}")
+
+
 def read_result_tuple(
-    genotype_matrix: np.ndarray,
+    genotype_matrix: Any,
     samples: pl.DataFrame,
     variants: pl.DataFrame,
     *,

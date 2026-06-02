@@ -12,8 +12,20 @@ from typing import Any
 import numpy as np
 
 from . import _rust
-from ._assembly import dense_array_from_rust, read_result_tuple, samples_frame, variants_frame
-from ._errors import InvalidOptionError, InvalidSourceError, SampleFilterError, UnsupportedRepresentation
+from ._assembly import (
+    dense_array_from_rust,
+    read_result_tuple,
+    samples_frame,
+    sparse_matrix_from_rust,
+    variants_frame,
+)
+from ._errors import (
+    InvalidOptionError,
+    InvalidSourceError,
+    MissingDataError,
+    SampleFilterError,
+    UnsupportedRepresentation,
+)
 from ._filters import FilterExpr, id_in
 from ._source import ResolvedSource, resolve_source
 
@@ -24,6 +36,7 @@ _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
 @dataclass(frozen=True)
 class _ValidatedReadOptions:
     dtype: np.dtype[Any]
+    sparse_format: str | None
     variant_filter_ir: dict[str, Any] | None
 
 
@@ -65,23 +78,27 @@ class Dataset:
             "samples": None if samples is None else list(samples),
             "variants": validated_options.variant_filter_ir,
         }
-        try:
-            dense = _rust.read_dense(self.source.format.value, members, options)
-        except ValueError as error:
-            message = str(error)
-            if "missing requested sample" in message:
-                raise SampleFilterError(message) from error
-            raise InvalidSourceError(message) from error
-
-        genotype_matrix = dense_array_from_rust(
-            values=dense["values"],
-            shape=tuple(dense["shape"]),
-            missing_mask=dense["missing_mask"],
-            missing=missing,
-            dtype=validated_options.dtype,
-        )
-        sample_metadata = samples_frame(dense["samples"])
-        variant_metadata = variants_frame(dense["variants"])
+        if validated_options.sparse_format is None:
+            rust_result = self._read_dense_from_rust(members, options)
+            genotype_matrix = dense_array_from_rust(
+                values=rust_result["values"],
+                shape=tuple(rust_result["shape"]),
+                missing_mask=rust_result["missing_mask"],
+                missing=missing,
+                dtype=validated_options.dtype,
+            )
+        else:
+            rust_result = self._read_sparse_from_rust(members, options)
+            genotype_matrix = sparse_matrix_from_rust(
+                indptr=rust_result["indptr"],
+                indices=rust_result["indices"],
+                data=rust_result["data"],
+                shape=tuple(rust_result["shape"]),
+                dtype=validated_options.dtype,
+                sparse_format=validated_options.sparse_format,
+            )
+        sample_metadata = samples_frame(rust_result["samples"])
+        variant_metadata = variants_frame(rust_result["variants"])
         return read_result_tuple(
             genotype_matrix,
             sample_metadata,
@@ -103,6 +120,18 @@ class Dataset:
         _validate_block_size(size)
         _validate_read_options_from_mapping(read_options)
         raise NotImplementedError("block iteration is implemented in a later phase")
+
+    def _read_dense_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _rust.read_dense(self.source.format.value, members, options)
+        except ValueError as error:
+            raise _public_read_error(error) from error
+
+    def _read_sparse_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _rust.read_sparse(self.source.format.value, members, options)
+        except ValueError as error:
+            raise _public_read_error(error) from error
 
     def _metadata(self) -> dict[str, Any]:
         if self._metadata_cache is None:
@@ -166,15 +195,20 @@ def _validate_read_options(
     return_variants: bool,
 ) -> _ValidatedReadOptions:
     _validate_kind(kind)
-    _validate_sparse(sparse)
+    sparse_format = _validate_sparse(sparse)
     variant_filter_ir = _validate_variant_filter(variants)
     normalized_dtype = _normalize_dtype(dtype)
+    _validate_sparse_missing_compatibility(sparse_format, missing)
     _validate_missing_dtype_compatibility(missing, normalized_dtype)
     _validate_missing(missing)
     _validate_sample_filter(samples)
     _validate_bool_option("return_samples", return_samples)
     _validate_bool_option("return_variants", return_variants)
-    return _ValidatedReadOptions(dtype=normalized_dtype, variant_filter_ir=variant_filter_ir)
+    return _ValidatedReadOptions(
+        dtype=normalized_dtype,
+        sparse_format=sparse_format,
+        variant_filter_ir=variant_filter_ir,
+    )
 
 
 def _reject_options(options: dict[str, Any]) -> None:
@@ -193,9 +227,14 @@ def _validate_kind(kind: str) -> None:
         raise UnsupportedRepresentation(f"unsupported genotype kind: {kind}")
 
 
-def _validate_sparse(sparse: bool | str) -> None:
-    if sparse is not False:
-        raise UnsupportedRepresentation("sparse reads are not implemented until a later phase")
+def _validate_sparse(sparse: bool | str) -> str | None:
+    if sparse is False:
+        return None
+    if sparse is True:
+        return "csc"
+    if sparse in {"csc", "csr"}:
+        return sparse
+    raise InvalidOptionError(f"unsupported sparse option: {sparse!r}")
 
 
 def _validate_variant_filter(variants: Any) -> dict[str, Any] | None:
@@ -251,6 +290,20 @@ def _validate_missing_dtype_compatibility(missing: str, dtype: np.dtype[Any]) ->
         and not np.issubdtype(dtype, np.floating)
     ):
         raise InvalidOptionError(f'missing="{missing}" requires a floating dtype')
+
+
+def _validate_sparse_missing_compatibility(sparse_format: str | None, missing: str) -> None:
+    if sparse_format is not None and missing in {"nan", "impute"}:
+        raise InvalidOptionError("this release does not store sparse missing values; use missing='raise'")
+
+
+def _public_read_error(error: ValueError) -> Exception:
+    message = str(error)
+    if "missing requested sample" in message:
+        return SampleFilterError(message)
+    if "sparse missing values" in message:
+        return MissingDataError(message)
+    return InvalidSourceError(message)
 
 
 def _validate_bool_option(name: str, value: bool) -> None:
