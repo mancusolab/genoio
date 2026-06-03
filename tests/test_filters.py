@@ -116,6 +116,62 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
     np.testing.assert_array_equal(G, np.array([[0.0], [1.0], [2.0]], dtype=np.float32))
 
 
+def test_biallelic_filter_matches_fixture_reference_results(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_filter_vcf(tmp_path))
+
+    G, variants = dataset.read(variants=genoio.biallelic(), return_variants=True)
+
+    assert variants["id"].to_list() == ["rs1", "rs2", "indel1", "rs4"]
+    np.testing.assert_array_equal(
+        G,
+        np.array(
+            [
+                [0.0, 0.0, 1.0, np.nan],
+                [1.0, np.nan, 0.0, np.nan],
+                [2.0, 0.0, 0.0, np.nan],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+
+def test_mac_filter_matches_called_genotype_reference_results(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_filter_vcf(tmp_path))
+
+    G, variants = dataset.read(variants=genoio.mac(min=1, max=1), return_variants=True)
+
+    assert variants["id"].to_list() == ["indel1"]
+    assert variants["mac"].to_list() == [1]
+    assert variants["n_called"].to_list() == [3]
+    np.testing.assert_array_equal(G, np.array([[1.0], [0.0], [0.0]], dtype=np.float32))
+
+
+def test_polymorphic_filter_matches_called_genotype_reference_results(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_filter_vcf(tmp_path))
+
+    G, variants = dataset.read(variants=genoio.polymorphic(), return_variants=True)
+
+    assert variants["id"].to_list() == ["rs1", "indel1"]
+    assert variants["mac"].to_list() == [3, 1]
+    np.testing.assert_array_equal(
+        G,
+        np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+
 def test_iterable_variant_id_selection_preserves_source_variant_order(tmp_path):
     import genoio
 
