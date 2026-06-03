@@ -42,6 +42,18 @@ _DEFAULT_MISSING = _DefaultMissing()
 
 
 @dataclass(frozen=True)
+class _ReadOptions:
+    kind: str
+    sparse: bool | str
+    variants: Any
+    samples: list[str] | tuple[str, ...] | set[str] | None
+    missing: Any
+    dtype: Any
+    return_samples: bool
+    return_variants: bool
+
+
+@dataclass(frozen=True)
 class _ValidatedReadOptions:
     dtype: np.dtype[Any]
     missing: str
@@ -115,7 +127,7 @@ class Dataset:
         - `genoio.MissingDataError`: if retained missing calls conflict with
           the requested missing-data policy.
         """
-        validated_options = _validate_read_options(
+        read_options = _ReadOptions(
             kind=kind,
             sparse=sparse,
             variants=variants,
@@ -125,16 +137,11 @@ class Dataset:
             return_samples=return_samples,
             return_variants=return_variants,
         )
-        if kind != "geno":
-            capabilities = self._metadata()["capabilities"]
-            if not capabilities["supports_haplo"]:
-                raise _unsupported_haplotype_source(self.source.format.value)
+        validated_options = _validate_read_options(read_options)
+        self._validate_source_supports_kind(read_options.kind)
 
         return self._read_validated(
-            kind=kind,
-            samples=samples,
-            return_samples=return_samples,
-            return_variants=return_variants,
+            read_options=read_options,
             validated_options=validated_options,
             variant_window=None,
         )
@@ -185,17 +192,14 @@ class Dataset:
         """
         _validate_block_size(size)
         normalized_options = _read_options_with_defaults(read_options)
-        validated_options = _validate_read_options(**normalized_options)
-        if normalized_options["kind"] != "geno":
-            capabilities = self._metadata()["capabilities"]
-            if not capabilities["supports_haplo"]:
-                raise _unsupported_haplotype_source(self.source.format.value)
+        validated_options = _validate_read_options(normalized_options)
+        self._validate_source_supports_kind(normalized_options.kind)
         return self._block_iterator(size, normalized_options, validated_options)
 
     def _block_iterator(
         self,
         size: int,
-        read_options: dict[str, Any],
+        read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
     ) -> Any:
         start = 0
@@ -203,11 +207,8 @@ class Dataset:
             # Variant windows are expressed in retained-variant coordinates.
             # Rust applies metadata/genotype filters before deciding whether a
             # retained variant falls into this block.
-            block = self._read_block_from_rust(
-                kind=read_options["kind"],
-                samples=read_options["samples"],
-                return_samples=read_options["return_samples"],
-                return_variants=read_options["return_variants"],
+            block = self._read_validated(
+                read_options=read_options,
                 validated_options=validated_options,
                 variant_window={"start": start, "len": size},
             )
@@ -219,47 +220,25 @@ class Dataset:
                 break
             start += size
 
-    def _read_block_from_rust(
-        self,
-        *,
-        kind: str,
-        samples: list[str] | tuple[str, ...] | set[str] | None,
-        return_samples: bool,
-        return_variants: bool,
-        validated_options: _ValidatedReadOptions,
-        variant_window: dict[str, int],
-    ) -> Any:
-        return self._read_validated(
-            kind=kind,
-            samples=samples,
-            return_samples=return_samples,
-            return_variants=return_variants,
-            validated_options=validated_options,
-            variant_window=variant_window,
-        )
-
     def _read_validated(
         self,
         *,
-        kind: str,
-        samples: list[str] | tuple[str, ...] | set[str] | None,
-        return_samples: bool,
-        return_variants: bool,
+        read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
     ) -> Any:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
-            "samples": None if samples is None else list(samples),
+            "samples": None if read_options.samples is None else list(read_options.samples),
             "variants": validated_options.variant_filter_ir,
             "variant_window": variant_window,
-            "return_samples": return_samples,
-            "return_variants": return_variants,
+            "return_samples": read_options.return_samples,
+            "return_variants": read_options.return_variants,
         }
         if validated_options.sparse_format is None:
             rust_result = (
                 self._read_dense_from_rust(members, options)
-                if kind == "geno"
+                if read_options.kind == "geno"
                 else self._read_haplotypes_dense_from_rust(members, options)
             )
             genotype_matrix = dense_array_from_rust(
@@ -272,7 +251,7 @@ class Dataset:
         else:
             rust_result = (
                 self._read_sparse_from_rust(members, options)
-                if kind == "geno"
+                if read_options.kind == "geno"
                 else self._read_haplotypes_sparse_from_rust(members, options)
             )
             genotype_matrix = sparse_matrix_from_rust(
@@ -285,14 +264,14 @@ class Dataset:
             )
         # Metadata frames are assembled only when requested. Large PLINK2
         # block reads can otherwise avoid parsing full variant metadata.
-        sample_metadata = samples_frame(rust_result["samples"]) if return_samples else None
-        variant_metadata = variants_frame(rust_result["variants"]) if return_variants else None
+        sample_metadata = samples_frame(rust_result["samples"]) if read_options.return_samples else None
+        variant_metadata = variants_frame(rust_result["variants"]) if read_options.return_variants else None
         return read_result_tuple(
             genotype_matrix,
             sample_metadata,
             variant_metadata,
-            return_samples=return_samples,
-            return_variants=return_variants,
+            return_samples=read_options.return_samples,
+            return_variants=read_options.return_variants,
         )
 
     def _read_dense_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
@@ -333,11 +312,16 @@ class Dataset:
             try:
                 metadata = _rust.read_metadata(self.source.format.value, members)
             except ValueError as error:
-                from ._errors import InvalidSourceError
-
                 raise InvalidSourceError(str(error)) from error
             object.__setattr__(self, "_metadata_cache", metadata)
         return self._metadata_cache
+
+    def _validate_source_supports_kind(self, kind: str) -> None:
+        if kind == "geno":
+            return
+        capabilities = self._metadata()["capabilities"]
+        if not capabilities["supports_haplo"]:
+            raise _unsupported_haplotype_source(self.source.format.value)
 
 
 def open(path: str | Path, format: str | None = None) -> Dataset:
@@ -463,27 +447,17 @@ def blocks(path: str | Path, size: int, *, format: str | None = None, **read_opt
     return open(path, format=format).blocks(size, **read_options)
 
 
-def _validate_read_options(
-    *,
-    kind: str,
-    sparse: bool | str,
-    variants: Any,
-    samples: list[str] | tuple[str, ...] | set[str] | None,
-    missing: Any,
-    dtype: Any,
-    return_samples: bool,
-    return_variants: bool,
-) -> _ValidatedReadOptions:
-    _validate_kind(kind)
-    sparse_format = _validate_sparse(sparse)
-    normalized_missing = _normalize_missing(missing, sparse_format=sparse_format)
-    variant_filter_ir = _validate_variant_filter(variants)
-    normalized_dtype = _normalize_dtype(dtype)
+def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:
+    _validate_kind(options.kind)
+    sparse_format = _validate_sparse(options.sparse)
+    normalized_missing = _normalize_missing(options.missing, sparse_format=sparse_format)
+    variant_filter_ir = _variant_filter_ir(options.variants)
+    normalized_dtype = _normalize_dtype(options.dtype)
     _validate_sparse_missing_compatibility(sparse_format, normalized_missing)
     _validate_missing_dtype_compatibility(normalized_missing, normalized_dtype)
-    _validate_sample_filter(samples)
-    _validate_bool_option("return_samples", return_samples)
-    _validate_bool_option("return_variants", return_variants)
+    _validate_sample_filter(options.samples)
+    _validate_bool_option("return_samples", options.return_samples)
+    _validate_bool_option("return_variants", options.return_variants)
     return _ValidatedReadOptions(
         dtype=normalized_dtype,
         missing=normalized_missing,
@@ -524,12 +498,6 @@ def _validate_sparse(sparse: bool | str) -> str | None:
     if isinstance(sparse, str) and sparse in {"csc", "csr"}:
         return sparse
     raise InvalidOptionError(f"unsupported sparse option: {sparse!r}")
-
-
-def _validate_variant_filter(variants: Any) -> dict[str, Any] | None:
-    if variants is None:
-        return None
-    return _variant_filter_ir(variants)
 
 
 def _variant_filter_ir(variants: Any) -> dict[str, Any] | None:
@@ -617,7 +585,7 @@ def _validate_block_size(size: int) -> None:
         raise InvalidOptionError("block size must be a positive integer")
 
 
-def _read_options_with_defaults(read_options: dict[str, Any]) -> dict[str, Any]:
+def _read_options_with_defaults(read_options: dict[str, Any]) -> _ReadOptions:
     defaults = {
         "kind": "geno",
         "sparse": False,
@@ -632,4 +600,4 @@ def _read_options_with_defaults(read_options: dict[str, Any]) -> dict[str, Any]:
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
-    return defaults | read_options
+    return _ReadOptions(**(defaults | read_options))

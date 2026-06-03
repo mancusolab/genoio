@@ -93,13 +93,13 @@ def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monke
 
     dataset = genoio.open(write_blocks_vcf(tmp_path))
     calls = []
-    original = genoio.Dataset._read_block_from_rust
+    original = genoio.Dataset._read_validated
 
-    def recording_read_block(self, *, variant_window, **kwargs):
+    def recording_read_validated(self, *, variant_window, **kwargs):
         calls.append(dict(variant_window))
         return original(self, variant_window=variant_window, **kwargs)
 
-    monkeypatch.setattr(genoio.Dataset, "_read_block_from_rust", recording_read_block)
+    monkeypatch.setattr(genoio.Dataset, "_read_validated", recording_read_validated)
 
     list(dataset.blocks(size=2))
 
