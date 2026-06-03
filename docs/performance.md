@@ -50,7 +50,8 @@ Then run the benchmark scripts:
 ```bash
 python scripts/benchmark_vcf.py --max-variants 1000 --repeats 3
 python scripts/benchmark_plink1.py --max-variants 1000 --repeats 3
-python scripts/benchmark_plink2.py --max-variants 1000 --repeats 3
+python scripts/benchmark_plink2.py --scenario all --max-variants 1000 --repeats 5
+python scripts/benchmark_plink2.py --scenario matrix-only --max-variants 10000 --repeats 5 --no-compare
 ```
 
 Optional comparison packages are used when installed:
