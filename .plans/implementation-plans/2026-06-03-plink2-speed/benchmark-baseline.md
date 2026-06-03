@@ -394,3 +394,54 @@ Decision rationale: packed batches materially improve the unfiltered matrix-only
 source-window path at both required window sizes while preserving exact matrix
 agreement with `pgenlib` on the 1,000-variant comparison. Keep the production
 path and retain the parity tests.
+
+## Phase 7 Packed Genotype-Stat Filtering Decision
+
+Provenance:
+
+- Date: 2026-06-03 12:04:59 HST
+- Git commit before documentation commit: `c673ec535a566f8f24b53147d7022ac654c73431`
+- Build status: Rust extension rebuilt in release mode with
+  `env CC=clang AR=ar python -m maturin develop --release`
+- Packed genotype-stat status: current build computes PLINK2 genotype-filter
+  statistics from packed hard-call categories before expanding retained
+  variants to float matrix values.
+- Data prefix: `data/chr22_hg38`
+- Decision: keep the packed-count production path.
+
+Required genotype-filtered command:
+
+```bash
+python scripts/benchmark_plink2.py --scenario genotype-filtered --prefix data/chr22_hg38 --max-variants 1000 --repeats 5 --no-compare
+```
+
+Output:
+
+```text
+genoio_plink2_genotype_filtered
+  matrix shape=(3202, 1000) dtype=float32 sum=447988 missing=0
+  time median=7.8559s min=7.6775s runs=7.8559 8.1471 7.9423 7.7117 7.6775
+skipped pgenlib comparison for genotype-filtered: pgenlib does not provide the same metadata/filter contract
+```
+
+Genotype-filtered comparison:
+
+| Scenario | Phase 1 baseline median | Phase 6 median | Phase 7 packed-count median | Matrix summary |
+| --- | ---: | ---: | ---: | --- |
+| Genotype-filtered, 1,000 retained variants | 16.1535 s | Not remeasured | 7.8559 s | shape `(3202, 1000)`, sum `447988`, missing `0` |
+
+Retained-count signal: the benchmark matrix shape remained `(3202, 1000)`,
+which is the same retained variant count and sample count previously recorded
+for the genotype-filtered scenario. The matrix sum and missing count also match
+the Phase 1 and Phase 3 genotype-filtered benchmark summaries, so the packed
+stats path preserved the public retained-matrix contract on this fixture.
+
+Decision rationale: keep the packed-count implementation. Targeted Rust and
+Python filter tests covered MAF, MAC, missingness, polymorphic decisions,
+attached stats, sparse filtering, and explicit malformed-record failures. The
+benchmark median improved from the Phase 1 genotype-filtered baseline of
+16.1535 s to 7.8559 s while retaining the same matrix shape, sum, and missing
+count. The dominant remaining cost is scanning enough source variants and
+building the retained matrix to produce 1,000 variants after the genotype
+filter; the packed-count path removes the previous full float expansion cost
+for variants dropped by genotype statistics.

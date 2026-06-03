@@ -33,7 +33,8 @@ VCF header records `##source=PLINKv2.0`.
 
 For the PLINK2 timing above, the raw Phase 1 baseline, post-short-circuit
 benchmark, Phase 3 scratch-reuse/sequential-read benchmark, Phase 4 direct
-sample-major fill decision, and Phase 6 packed-batch decision are recorded in
+sample-major fill decision, Phase 6 packed-batch decision, and Phase 7 packed
+genotype-stat filtering decision are recorded in
 `.plans/implementation-plans/2026-06-03-plink2-speed/benchmark-baseline.md`.
 The Phase 6 PLINK2 packed-batch decision run was collected on 2026-06-03 at git
 commit `3bb767085c43c8a39687fa93e4b238c305d3c5bc`, after rebuilding the Rust
@@ -44,6 +45,14 @@ Matrix-only 1,000-variant medians were 0.0100 s for `genoio` and 0.0069 s for
 for `pgenlib`. The benchmark-supported decision is to keep packed batches for
 unfiltered dense source windows because they improve both required matrix-only
 benchmark sizes while preserving exact agreement with `pgenlib`.
+
+The Phase 7 genotype-filtered benchmark uses packed PLINK2 hard-call counts to
+evaluate genotype-stat predicates before expanding retained variants to
+`float32` matrix values. The 1,000-retained-variant median was 7.8559 s, with
+matrix shape `(3202, 1000)`, genotype sum `447988`, and zero missing values.
+This keeps the packed-count production path because it preserves the recorded
+retained matrix summary while improving the Phase 1 genotype-filtered median
+of 16.1535 s.
 
 For the timings above, the VCF, PLINK1, and PLINK2 matrix-only comparisons
 produced the same matrix summary:
