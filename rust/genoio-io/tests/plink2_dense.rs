@@ -805,6 +805,62 @@ fn plink2_dense_rejects_truncated_fixed_width_records() {
 }
 
 #[test]
+fn plink2_dense_rejects_unsupported_variable_width_compression() {
+    let dir = unique_dir("plink2-dense-unsupported-compression");
+    let pgen_bytes = variable_width_pgen(&[5], &[&[0]], 4);
+    let pgen = dir.join("bad_compression.pgen");
+    let pvar = dir.join("bad_compression.pvar");
+    let psam = dir.join("bad_compression.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(&pvar, "#CHROM POS ID REF ALT\n1 10 rs1 A G\n");
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    );
+
+    let error = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect_err("unsupported variable-width compression should fail");
+
+    assert!(error
+        .to_string()
+        .contains("unsupported pgen main-track compression type 5"));
+}
+
+#[test]
+fn plink2_dense_rejects_ld_compressed_record_before_non_ld_state() {
+    let dir = unique_dir("plink2-dense-ld-before-state");
+    let pgen_bytes = variable_width_pgen(&[2], &[&[0]], 4);
+    let pgen = dir.join("ld_before_state.pgen");
+    let pvar = dir.join("ld_before_state.pvar");
+    let psam = dir.join("ld_before_state.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(&pvar, "#CHROM POS ID REF ALT\n1 10 rs1 A G\n");
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    );
+
+    let error = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect_err("LD-compressed first record should fail");
+
+    assert!(error
+        .to_string()
+        .contains("LD-compressed record appears before any non-LD record"));
+}
+
+#[test]
 fn plink2_dense_rejects_non_increasing_difflist_sample_ids() {
     let dir = unique_dir("plink2-dense-bad-difflist");
     let pgen_bytes = variable_width_pgen(&[4], &[&[2, 1, 5, 0]], 4);
