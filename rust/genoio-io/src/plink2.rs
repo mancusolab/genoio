@@ -217,6 +217,7 @@ impl PgenDecoderState {
     }
 }
 
+#[cfg(test)]
 fn append_variant_to_sample_major(
     values: &[f32],
     missing: &[bool],
@@ -235,6 +236,28 @@ fn append_variant_to_sample_major(
         out_values[offset] = value;
         out_missing[offset] = is_missing;
     }
+}
+
+fn flush_packed_variant_batch(
+    batch: &mut PackedVariantBatch,
+    source_indices: &[usize],
+    batch_start: &mut usize,
+    n_variants: usize,
+    values: &mut [f32],
+    missing_mask: &mut [bool],
+) {
+    if batch.is_empty() {
+        return;
+    }
+    batch.expand_into_sample_major(
+        source_indices,
+        *batch_start,
+        n_variants,
+        values,
+        missing_mask,
+    );
+    *batch_start += batch.len();
+    batch.clear();
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +587,8 @@ fn read_plink2_dense_matrix_only_source_window(
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, n_samples);
     let mut values = vec![0.0; n_samples * n_variants];
     let mut missing_mask = vec![false; n_samples * n_variants];
+    let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
+    let mut batch_start = 0_usize;
 
     // Unfiltered source windows know their final retained width up front, so
     // construct the public sample-major buffers directly.
@@ -572,50 +597,66 @@ fn read_plink2_dense_matrix_only_source_window(
             if n_variants > 0 {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
             }
-            for variant_index in 0..n_variants {
+            for _ in 0..n_variants {
                 read_fixed_width_variant_packed_sequential(
                     pgen,
                     &mut file,
                     &header,
                     &mut decoder_state,
                 )?;
-                decoder_state.packed.expand_selected(
-                    &source_indices,
-                    &mut decoder_state.values,
-                    &mut decoder_state.missing,
-                );
-                append_variant_to_sample_major(
-                    &decoder_state.values,
-                    &decoder_state.missing,
-                    variant_index,
-                    n_variants,
-                    &mut values,
-                    &mut missing_mask,
-                );
-            }
-        }
-        PgenLayout::VariableWidth => {
-            let prefix_end = window.start + n_variants;
-            for source_variant_index in 0..prefix_end {
-                read_plink2_variant_values(
-                    pgen,
-                    &mut file,
-                    &header,
-                    source_variant_index,
-                    &source_indices,
-                    &mut decoder_state,
-                )?;
-                if source_variant_index >= window.start {
-                    append_variant_to_sample_major(
-                        &decoder_state.values,
-                        &decoder_state.missing,
-                        source_variant_index - window.start,
+                packed_batch.push(&decoder_state.packed);
+                if packed_batch.is_full() {
+                    flush_packed_variant_batch(
+                        &mut packed_batch,
+                        &source_indices,
+                        &mut batch_start,
                         n_variants,
                         &mut values,
                         &mut missing_mask,
                     );
                 }
             }
+            flush_packed_variant_batch(
+                &mut packed_batch,
+                &source_indices,
+                &mut batch_start,
+                n_variants,
+                &mut values,
+                &mut missing_mask,
+            );
+        }
+        PgenLayout::VariableWidth => {
+            let prefix_end = window.start + n_variants;
+            for source_variant_index in 0..prefix_end {
+                read_plink2_variant_packed(
+                    pgen,
+                    &mut file,
+                    &header,
+                    source_variant_index,
+                    &mut decoder_state,
+                )?;
+                if source_variant_index >= window.start {
+                    packed_batch.push(&decoder_state.packed);
+                    if packed_batch.is_full() {
+                        flush_packed_variant_batch(
+                            &mut packed_batch,
+                            &source_indices,
+                            &mut batch_start,
+                            n_variants,
+                            &mut values,
+                            &mut missing_mask,
+                        );
+                    }
+                }
+            }
+            flush_packed_variant_batch(
+                &mut packed_batch,
+                &source_indices,
+                &mut batch_start,
+                n_variants,
+                &mut values,
+                &mut missing_mask,
+            );
         }
     }
 
@@ -652,17 +693,17 @@ fn read_plink2_dense_source_window(
     let mut variants = Vec::new();
     let mut values = vec![0.0; n_samples * n_variants];
     let mut missing_mask = vec![false; n_samples * n_variants];
+    let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
+    let mut batch_start = 0_usize;
 
-    // This metadata-bearing source-window path uses the same direct
-    // sample-major construction as matrix-only windows.
+    // This metadata-bearing source-window path uses the same packed batch
+    // expansion as matrix-only windows while preserving metadata alignment.
     match header.layout {
         PgenLayout::FixedWidth => {
             if let Some((first_variant_index, _)) = window_variants.first() {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, *first_variant_index)?;
             }
-            for (window_variant_index, (source_variant_index, variant)) in
-                window_variants.into_iter().enumerate()
-            {
+            for (source_variant_index, variant) in window_variants {
                 debug_assert!(source_variant_index < header.variant_ct);
                 read_fixed_width_variant_packed_sequential(
                     pgen,
@@ -670,35 +711,40 @@ fn read_plink2_dense_source_window(
                     &header,
                     &mut decoder_state,
                 )?;
-                decoder_state.packed.expand_selected(
-                    &selection.source_indices,
-                    &mut decoder_state.values,
-                    &mut decoder_state.missing,
-                );
                 variants.push(variant);
-                append_variant_to_sample_major(
-                    &decoder_state.values,
-                    &decoder_state.missing,
-                    window_variant_index,
-                    n_variants,
-                    &mut values,
-                    &mut missing_mask,
-                );
+                packed_batch.push(&decoder_state.packed);
+                if packed_batch.is_full() {
+                    flush_packed_variant_batch(
+                        &mut packed_batch,
+                        &selection.source_indices,
+                        &mut batch_start,
+                        n_variants,
+                        &mut values,
+                        &mut missing_mask,
+                    );
+                }
             }
+            flush_packed_variant_batch(
+                &mut packed_batch,
+                &selection.source_indices,
+                &mut batch_start,
+                n_variants,
+                &mut values,
+                &mut missing_mask,
+            );
         }
         PgenLayout::VariableWidth => {
             let mut window_iter = window_variants.into_iter().peekable();
             let prefix_end = header.record_types.len();
             // Variable-width PGEN can use LD-compressed records that depend on
             // earlier non-LD records. Decode the prefix through the requested
-            // window to maintain state, but append only requested variants.
+            // window to maintain state, but batch only requested variants.
             for variant_index in 0..prefix_end {
-                read_plink2_variant_values(
+                read_plink2_variant_packed(
                     pgen,
                     &mut file,
                     &header,
                     variant_index,
-                    &selection.source_indices,
                     &mut decoder_state,
                 )?;
                 if window_iter
@@ -706,18 +752,28 @@ fn read_plink2_dense_source_window(
                     .is_some_and(|(source_index, _)| *source_index == variant_index)
                 {
                     let (_, variant) = window_iter.next().expect("peeked variant should exist");
-                    let window_variant_index = variants.len();
                     variants.push(variant);
-                    append_variant_to_sample_major(
-                        &decoder_state.values,
-                        &decoder_state.missing,
-                        window_variant_index,
-                        n_variants,
-                        &mut values,
-                        &mut missing_mask,
-                    );
+                    packed_batch.push(&decoder_state.packed);
+                    if packed_batch.is_full() {
+                        flush_packed_variant_batch(
+                            &mut packed_batch,
+                            &selection.source_indices,
+                            &mut batch_start,
+                            n_variants,
+                            &mut values,
+                            &mut missing_mask,
+                        );
+                    }
                 }
             }
+            flush_packed_variant_batch(
+                &mut packed_batch,
+                &selection.source_indices,
+                &mut batch_start,
+                n_variants,
+                &mut values,
+                &mut missing_mask,
+            );
         }
     }
 
