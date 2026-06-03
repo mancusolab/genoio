@@ -82,13 +82,16 @@ pub fn read_plink2_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    _matrix_only: bool,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     // With no variant filter, retained order is identical to source order.
     // This lets block reads avoid full PVAR parsing and full variable-width
     // header validation. Filtered reads use the slower complete path because
     // retained-window membership depends on evaluating earlier variants.
     if let (None, Some(window)) = (variant_filter, variant_window) {
+        if requested_samples.is_none() && matrix_only {
+            return read_plink2_dense_matrix_only_source_window(pgen, window);
+        }
         return read_plink2_dense_source_window(pgen, pvar, psam, requested_samples, window);
     }
 
@@ -336,6 +339,83 @@ pub fn read_plink2_sparse_windowed(
         variants,
         diagnostics,
     )
+}
+
+fn read_plink2_dense_matrix_only_source_window(
+    pgen: &Path,
+    window: VariantWindow,
+) -> Result<DenseGenotypeMatrix> {
+    let decode_variant_ct = window
+        .start
+        .checked_add(window.len)
+        .ok_or_else(|| MetadataError::parse(pgen, "variant window end is out of range"))?;
+    let header = read_supported_pgen_header_prefix(pgen, decode_variant_ct)?;
+    if window.start > header.variant_ct {
+        return Err(MetadataError::parse(
+            pgen,
+            format!(
+                "variant window start {} exceeds pgen variant count {}",
+                window.start, header.variant_ct
+            ),
+        ));
+    }
+    let n_variants = window.len.min(header.variant_ct - window.start);
+    let n_samples = header.sample_ct;
+    let source_indices = (0..n_samples).collect::<Vec<_>>();
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState {
+        previous_non_ld_categories: None,
+    };
+    let mut variant_major_values = Vec::with_capacity(n_samples * n_variants);
+    let mut variant_major_missing = Vec::with_capacity(n_samples * n_variants);
+
+    match header.layout {
+        PgenLayout::FixedWidth => {
+            for variant_index in window.start..(window.start + n_variants) {
+                let (current_values, current_missing) = read_plink2_variant_values(
+                    pgen,
+                    &mut file,
+                    &header,
+                    variant_index,
+                    &source_indices,
+                    &mut decoder_state,
+                )?;
+                variant_major_values.extend(current_values);
+                variant_major_missing.extend(current_missing);
+            }
+        }
+        PgenLayout::VariableWidth => {
+            let prefix_end = window.start + n_variants;
+            for variant_index in 0..prefix_end {
+                let (current_values, current_missing) = read_plink2_variant_values(
+                    pgen,
+                    &mut file,
+                    &header,
+                    variant_index,
+                    &source_indices,
+                    &mut decoder_state,
+                )?;
+                if variant_index >= window.start {
+                    variant_major_values.extend(current_values);
+                    variant_major_missing.extend(current_missing);
+                }
+            }
+        }
+    }
+
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+    let diagnostics = genoio_core::DenseDiagnostics {
+        requested_samples: n_samples,
+        retained_samples: n_samples,
+        candidate_variants: n_variants,
+        retained_variants: n_variants,
+        ..genoio_core::DenseDiagnostics::default()
+    };
+
+    DenseGenotypeMatrix::new_matrix_only(n_samples, n_variants, values, missing_mask, diagnostics)
 }
 
 fn read_plink2_dense_source_window(

@@ -94,6 +94,48 @@ impl DenseGenotypeMatrix {
             diagnostics,
         })
     }
+
+    /// Build a dense matrix when callers intentionally omitted metadata.
+    pub fn new_matrix_only(
+        n_samples: usize,
+        n_variants: usize,
+        values: Vec<f32>,
+        missing_mask: Vec<bool>,
+        diagnostics: DenseDiagnostics,
+    ) -> Result<Self, MetadataError> {
+        let expected_len = n_samples
+            .checked_mul(n_variants)
+            .ok_or_else(|| MetadataError::parse("<dense>", "dense matrix shape is out of range"))?;
+        if values.len() != expected_len {
+            return Err(MetadataError::parse(
+                "<dense>",
+                format!(
+                    "dense values length {} does not match shape {n_samples} x {n_variants}",
+                    values.len()
+                ),
+            ));
+        }
+        if missing_mask.len() != values.len() {
+            return Err(MetadataError::parse(
+                "<dense>",
+                format!(
+                    "dense missing mask length {} does not match values length {}",
+                    missing_mask.len(),
+                    values.len()
+                ),
+            ));
+        }
+
+        Ok(Self {
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples: Vec::new(),
+            variants: Vec::new(),
+            diagnostics,
+        })
+    }
 }
 
 /// Result of applying an optional sample keep list to source sample metadata.

@@ -318,6 +318,130 @@ S4
 }
 
 #[test]
+fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
+    let dir = unique_dir("plink2-matrix-only-malformed-metadata");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11, 0x06], 3, 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+
+    write_text(&pvar, "#CHROM POS ID REF ALT\n1 bad rs1 A G\n");
+    let metadata_error = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+        false,
+    )
+    .expect_err("metadata-bearing window should parse and reject malformed pvar");
+    assert!(metadata_error.to_string().contains("invalid position"));
+
+    let matrix_only = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only window should not parse malformed pvar");
+    assert_eq!(matrix_only.n_samples, 3);
+    assert_eq!(matrix_only.n_variants, 1);
+    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.variants.is_empty());
+    assert_eq!(matrix_only.values, vec![0.0, 0.0, 2.0]);
+
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 C T
+1 30 rs3 G A
+",
+    );
+    write_text(&psam, "#IID\n");
+    let metadata_error = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+        false,
+    )
+    .expect_err("metadata-bearing window should validate malformed psam dimensions");
+    assert!(metadata_error.to_string().contains("sample count"));
+
+    let matrix_only = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 1 }),
+        true,
+    )
+    .expect("matrix-only window should not parse malformed psam");
+    assert_eq!(matrix_only.n_samples, 3);
+    assert_eq!(matrix_only.n_variants, 1);
+    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.variants.is_empty());
+    assert_eq!(matrix_only.values, vec![1.0, 0.0, 1.0]);
+}
+
+#[test]
+fn plink2_dense_matrix_only_window_matches_metadata_source_window_values() {
+    let dir = unique_dir("plink2-matrix-only-source-window-values");
+    let pgen_bytes = variable_width_pgen(
+        &[0, 4, 1, 2, 3],
+        &[&[0xe4], &[2, 1, 9, 2], &[2, 5, 0], &[1, 1, 3], &[0]],
+        4,
+    );
+    let pgen = dir.join("variable.pgen");
+    let pvar = dir.join("variable.pvar");
+    let psam = dir.join("variable.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 A G
+1 30 rs3 A G
+1 40 rs4 A G
+1 50 rs5 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    );
+
+    let window = VariantWindow { start: 2, len: 2 };
+    let metadata_bearing =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), false)
+            .expect("metadata-bearing source window should decode");
+    let matrix_only =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), true)
+            .expect("matrix-only source window should decode");
+
+    assert_eq!(matrix_only.n_samples, metadata_bearing.n_samples);
+    assert_eq!(matrix_only.n_variants, metadata_bearing.n_variants);
+    assert_eq!(matrix_only.values, metadata_bearing.values);
+    assert_eq!(matrix_only.missing_mask, metadata_bearing.missing_mask);
+    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.variants.is_empty());
+}
+
+#[test]
 fn plink2_dense_rejects_truncated_fixed_width_records() {
     let dir = unique_dir("plink2-dense-truncated-fixed");
     let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11], 3, 3);
