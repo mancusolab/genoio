@@ -249,3 +249,84 @@ absolute runtime is still dominated by filter evaluation over genotypes: it
 remains a 13-second path while the direct matrix and metadata scenarios are
 below 20 milliseconds. The remaining gap to `pgenlib` in matrix-only reads is
 still visible (`pgenlib` median 0.0065 s versus `genoio` median 0.0148 s).
+
+## Phase 4 Direct Sample-Major Fill Decision
+
+Provenance:
+
+- Date: 2026-06-03 10:41:33 HST
+- Git commit before documentation commit: `135f3d2a165882263ed3520872998473bfd9615b`
+- Build status: Rust extension rebuilt in release mode with
+  `env CC=clang AR=ar python -m maturin develop --release`
+- Direct-fill status: current build uses direct sample-major fill for
+  unfiltered source windows in the matrix-only dense path.
+- Data prefix: `data/chr22_hg38`
+- Benchmark script label decision: no script label was added. The benchmark
+  scenario label remains `genoio_plink2_matrix_only`; this artifact records the
+  implementation state and decision without changing benchmark output format.
+
+Required 1,000-variant command:
+
+```bash
+python scripts/benchmark_plink2.py --scenario matrix-only --prefix data/chr22_hg38 --max-variants 1000 --repeats 5 --no-compare
+```
+
+Output:
+
+```text
+genoio_plink2_matrix_only
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0147s min=0.0147s runs=0.0147 0.0147 0.0147 0.0150 0.0149
+pgenlib_pgenreader
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0066s min=0.0065s runs=0.0079 0.0067 0.0065 0.0066 0.0066
+```
+
+Repeat 1,000-variant command used to classify the small absolute delta against
+the Phase 3 baseline:
+
+```bash
+python scripts/benchmark_plink2.py --scenario matrix-only --prefix data/chr22_hg38 --max-variants 1000 --repeats 5 --no-compare
+```
+
+Output:
+
+```text
+genoio_plink2_matrix_only
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0145s min=0.0144s runs=0.0151 0.0148 0.0144 0.0145 0.0145
+pgenlib_pgenreader
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0066s min=0.0064s runs=0.0077 0.0064 0.0064 0.0066 0.0066
+```
+
+Required 10,000-variant command:
+
+```bash
+python scripts/benchmark_plink2.py --scenario matrix-only --prefix data/chr22_hg38 --max-variants 10000 --repeats 5 --no-compare
+```
+
+Output:
+
+```text
+genoio_plink2_matrix_only
+  matrix shape=(3202, 10000) dtype=float32 sum=802432 missing=0
+  time median=0.2746s min=0.2708s runs=0.2753 0.2708 0.2718 0.2766 0.2746
+pgenlib_pgenreader
+  matrix shape=(3202, 10000) dtype=float32 sum=802432 missing=0
+  time median=0.0467s min=0.0465s runs=0.0476 0.0467 0.0467 0.0465 0.0522
+```
+
+Direct-fill comparison:
+
+| Window | Phase 3 `genoio` median | Phase 4 direct-fill `genoio` median | `pgenlib` median | Decision signal |
+| --- | ---: | ---: | ---: | --- |
+| 1,000 variants | 0.0148 s | 0.0145-0.0147 s | 0.0066 s | Neutral to slightly improved across repeat runs |
+| 10,000 variants | Not recorded | 0.2746 s | 0.0467 s | New scale evidence; pgenlib remains materially faster |
+
+Decision: keep the direct sample-major fill path. The 1,000-variant direct-fill
+measurements are neutral to slightly improved relative to the Phase 3
+scratch-reuse baseline while removing the variant-major accumulation and
+transpose copy for unfiltered matrix-only source windows. Proceed to packed
+batch transpose work because `pgenlib` remains materially faster: 2.16x faster
+on the best direct-fill 1,000-variant run and 5.88x faster at 10,000 variants.
