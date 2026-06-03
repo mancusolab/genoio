@@ -401,6 +401,8 @@ fn read_plink2_dense_matrix_only_source_window(
     let mut values = vec![0.0; n_samples * n_variants];
     let mut missing_mask = vec![false; n_samples * n_variants];
 
+    // Unfiltered source windows know their final retained width up front, so
+    // construct the public sample-major buffers directly.
     match header.layout {
         PgenLayout::FixedWidth => {
             if n_variants > 0 {
@@ -483,6 +485,8 @@ fn read_plink2_dense_source_window(
     let mut values = vec![0.0; n_samples * n_variants];
     let mut missing_mask = vec![false; n_samples * n_variants];
 
+    // This metadata-bearing source-window path uses the same direct
+    // sample-major construction as matrix-only windows.
     match header.layout {
         PgenLayout::FixedWidth => {
             if let Some((first_variant_index, _)) = window_variants.first() {
