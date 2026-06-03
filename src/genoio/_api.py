@@ -24,7 +24,6 @@ from ._errors import (
     InvalidSourceError,
     MissingDataError,
     SampleFilterError,
-    UnsupportedFormatError,
     UnsupportedRepresentation,
 )
 from ._filters import FilterExpr, id_in
@@ -77,7 +76,6 @@ class Dataset:
             return_samples=return_samples,
             return_variants=return_variants,
         )
-        _reject_deferred_plink2_decode(self.source.format.value)
         if kind != "geno":
             capabilities = self._metadata()["capabilities"]
             if not capabilities["supports_haplo"]:
@@ -105,7 +103,6 @@ class Dataset:
         _validate_block_size(size)
         normalized_options = _read_options_with_defaults(read_options)
         validated_options = _validate_read_options(**normalized_options)
-        _reject_deferred_plink2_decode(self.source.format.value)
         if normalized_options["kind"] != "geno":
             capabilities = self._metadata()["capabilities"]
             if not capabilities["supports_haplo"]:
@@ -339,11 +336,6 @@ def _validate_variant_stats(stats: Any) -> None:
 def _validate_kind(kind: str) -> None:
     if not isinstance(kind, str) or kind not in _SUPPORTED_KINDS:
         raise UnsupportedRepresentation(f"unsupported genotype kind: {kind}")
-
-
-def _reject_deferred_plink2_decode(source_format: str) -> None:
-    if source_format == "plink2":
-        raise UnsupportedFormatError("PLINK2 decode is deferred pending docs/plink2-parser-strategy.md")
 
 
 def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:

@@ -116,7 +116,7 @@ def test_resolves_complete_plink2_prefix(tmp_path):
     assert set(dataset.source.members) == {"pgen", "pvar", "psam"}
 
 
-def test_plink2_read_raises_deferred_decode_error(tmp_path):
+def test_plink2_read_rejects_invalid_empty_files(tmp_path):
     import genoio
 
     for suffix in (".pgen", ".pvar", ".psam"):
@@ -124,7 +124,7 @@ def test_plink2_read_raises_deferred_decode_error(tmp_path):
 
     dataset = genoio.open(tmp_path / "cohort")
 
-    with pytest.raises(genoio.UnsupportedFormatError, match="PLINK2 decode is deferred"):
+    with pytest.raises(genoio.InvalidSourceError):
         dataset.read()
 
 

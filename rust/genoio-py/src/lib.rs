@@ -31,6 +31,12 @@ fn read_metadata(
             let fam = member_path(members, "fam")?;
             genoio_io::read_plink1_metadata(&bed, &bim, &fam)
         }
+        "plink2" => {
+            let pgen = member_path(members, "pgen")?;
+            let pvar = member_path(members, "pvar")?;
+            let psam = member_path(members, "psam")?;
+            genoio_io::read_plink2_metadata(&pgen, &pvar, &psam)
+        }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported metadata format: {other}"
@@ -69,6 +75,19 @@ fn read_dense(
                 &bed,
                 &bim,
                 &fam,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
+            )
+        }
+        "plink2" => {
+            let pgen = member_path(members, "pgen")?;
+            let pvar = member_path(members, "pvar")?;
+            let psam = member_path(members, "psam")?;
+            genoio_io::read_plink2_dense_windowed(
+                &pgen,
+                &pvar,
+                &psam,
                 read_options.requested_samples.as_deref(),
                 read_options.variant_filter.as_ref(),
                 read_options.variant_window,
@@ -117,6 +136,19 @@ fn read_sparse(
                 &bed,
                 &bim,
                 &fam,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
+            )
+        }
+        "plink2" => {
+            let pgen = member_path(members, "pgen")?;
+            let pvar = member_path(members, "pvar")?;
+            let psam = member_path(members, "psam")?;
+            genoio_io::read_plink2_sparse_windowed(
+                &pgen,
+                &pvar,
+                &psam,
                 read_options.requested_samples.as_deref(),
                 read_options.variant_filter.as_ref(),
                 read_options.variant_window,

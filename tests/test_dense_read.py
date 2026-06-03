@@ -64,6 +64,48 @@ def write_common_a1_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_fixed_width_plink2(tmp_path: Path) -> Path:
+    prefix = tmp_path / "tiny"
+    prefix.with_suffix(".pgen").write_bytes(
+        bytes(
+            [
+                0x6C,
+                0x1B,
+                0x02,
+                0x03,
+                0x00,
+                0x00,
+                0x00,
+                0x03,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x2C,
+                0x11,
+                0x06,
+            ]
+        )
+    )
+    prefix.with_suffix(".pvar").write_text(
+        """\
+#CHROM POS ID REF ALT QUAL
+1 10 rs1 A G 30
+1 20 rs2 C T 40
+2 30 rs3 G A 50
+"""
+    )
+    prefix.with_suffix(".psam").write_text(
+        """\
+#FID IID PAT MAT SEX PHENO
+F1 S1 0 0 1 -9
+F1 S2 S1 0 2 1.5
+F2 S3 0 0 0 2.0
+"""
+    )
+    return prefix
+
+
 def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_path):
     import genoio
 
@@ -141,6 +183,30 @@ def test_dense_plink1_read_matches_fixture_matrix_and_return_tuple_shapes():
     np.testing.assert_array_equal(G_both[0], expected)
     assert G_both[1]["iid"].to_list() == ["S1", "S2", "S3"]
     assert G_both[2]["id"].to_list() == ["rs1", "rs2", "indel1"]
+
+
+def test_dense_plink2_read_matches_fixed_width_hardcall_fixture(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_fixed_width_plink2(tmp_path))
+
+    G, samples, variants = dataset.read(return_samples=True, return_variants=True)
+
+    assert G.dtype == np.dtype("float32")
+    np.testing.assert_array_equal(
+        G,
+        np.array(
+            [
+                [0.0, 1.0, 2.0],
+                [np.nan, 0.0, 1.0],
+                [2.0, 1.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert samples["iid"].to_list() == ["S1", "S2", "S3"]
+    assert variants["id"].to_list() == ["rs1", "rs2", "rs3"]
+    assert variants["qual"].to_list() == [30.0, 40.0, 50.0]
 
 
 def test_missing_policies_nan_raise_and_impute(tmp_path):
