@@ -30,6 +30,92 @@ struct PgenHeader {
     record_offsets: Vec<u64>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PackedGenotypes {
+    words: Vec<u64>,
+    sample_ct: usize,
+}
+
+impl PackedGenotypes {
+    const SAMPLES_PER_WORD: usize = 32;
+    const BITS_PER_SAMPLE: usize = 2;
+
+    fn resize(&mut self, sample_ct: usize) {
+        self.sample_ct = sample_ct;
+        self.words.resize(sample_ct.div_ceil(Self::SAMPLES_PER_WORD), 0);
+        self.mask_unused_slots();
+    }
+
+    fn clear_to(&mut self, category: u8) {
+        let category = u64::from(category & 0b11);
+        let mut word = 0_u64;
+        for slot_index in 0..Self::SAMPLES_PER_WORD {
+            word |= category << (slot_index * Self::BITS_PER_SAMPLE);
+        }
+        self.words.fill(word);
+        self.mask_unused_slots();
+    }
+
+    fn set(&mut self, sample_index: usize, category: u8) {
+        debug_assert!(sample_index < self.sample_ct);
+        let word_index = sample_index / Self::SAMPLES_PER_WORD;
+        let shift = (sample_index % Self::SAMPLES_PER_WORD) * Self::BITS_PER_SAMPLE;
+        let mask = 0b11_u64 << shift;
+        self.words[word_index] =
+            (self.words[word_index] & !mask) | (u64::from(category & 0b11) << shift);
+    }
+
+    fn get(&self, sample_index: usize) -> u8 {
+        debug_assert!(sample_index < self.sample_ct);
+        let word_index = sample_index / Self::SAMPLES_PER_WORD;
+        let shift = (sample_index % Self::SAMPLES_PER_WORD) * Self::BITS_PER_SAMPLE;
+        ((self.words[word_index] >> shift) & 0b11) as u8
+    }
+
+    fn copy_from(&mut self, other: &Self) {
+        self.sample_ct = other.sample_ct;
+        self.words.clear();
+        self.words.extend_from_slice(&other.words);
+    }
+
+    fn invert_0_2(&mut self) {
+        for sample_index in 0..self.sample_ct {
+            match self.get(sample_index) {
+                0 => self.set(sample_index, 2),
+                2 => self.set(sample_index, 0),
+                _ => {}
+            }
+        }
+    }
+
+    fn expand_selected(
+        &self,
+        source_indices: &[usize],
+        values: &mut Vec<f32>,
+        missing: &mut Vec<bool>,
+    ) {
+        values.clear();
+        missing.clear();
+        for source_index in source_indices {
+            let (value, is_missing) = decode_pgen_code(self.get(*source_index));
+            values.push(value);
+            missing.push(is_missing);
+        }
+    }
+
+    fn mask_unused_slots(&mut self) {
+        let used_slots = self.sample_ct % Self::SAMPLES_PER_WORD;
+        if used_slots == 0 || self.words.is_empty() {
+            return;
+        }
+        let used_bits = used_slots * Self::BITS_PER_SAMPLE;
+        let mask = (1_u64 << used_bits) - 1;
+        if let Some(last_word) = self.words.last_mut() {
+            *last_word &= mask;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PgenDecoderState {
     previous_non_ld_categories: Vec<u8>,
@@ -1632,6 +1718,59 @@ fn decode_pgen_code(code: u8) -> (f32, bool) {
         0b10 => (2.0, false),
         0b11 => (0.0, true),
         _ => unreachable!("two-bit PGEN code should be masked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_genotypes_round_trip_and_expand_selected() {
+        let mut packed = PackedGenotypes::default();
+        packed.resize(35);
+        packed.clear_to(0);
+        packed.set(0, 0);
+        packed.set(1, 1);
+        packed.set(2, 2);
+        packed.set(3, 3);
+        packed.set(34, 2);
+
+        assert_eq!(packed.get(0), 0);
+        assert_eq!(packed.get(1), 1);
+        assert_eq!(packed.get(2), 2);
+        assert_eq!(packed.get(3), 3);
+        assert_eq!(packed.get(34), 2);
+
+        let mut values = vec![99.0];
+        let mut missing = vec![true];
+        packed.expand_selected(&[3, 1, 34, 0], &mut values, &mut missing);
+
+        assert_eq!(values, vec![0.0, 1.0, 2.0, 0.0]);
+        assert_eq!(missing, vec![true, false, false, false]);
+    }
+
+    #[test]
+    fn packed_genotypes_copy_and_invert_0_2() {
+        let mut source = PackedGenotypes::default();
+        source.resize(5);
+        source.clear_to(3);
+        source.set(0, 0);
+        source.set(1, 1);
+        source.set(2, 2);
+
+        let mut copy = PackedGenotypes::default();
+        copy.copy_from(&source);
+        copy.invert_0_2();
+
+        assert_eq!(
+            (0..5).map(|sample_index| copy.get(sample_index)).collect::<Vec<_>>(),
+            vec![2, 1, 0, 3, 3]
+        );
+        assert_eq!(
+            (0..5).map(|sample_index| source.get(sample_index)).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 3]
+        );
     }
 }
 
