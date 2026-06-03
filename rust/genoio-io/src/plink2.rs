@@ -53,6 +53,26 @@ impl PgenDecoderState {
     }
 }
 
+fn append_variant_to_sample_major(
+    values: &[f32],
+    missing: &[bool],
+    variant_index: usize,
+    n_variants: usize,
+    out_values: &mut [f32],
+    out_missing: &mut [bool],
+) {
+    debug_assert_eq!(values.len(), missing.len());
+    debug_assert!(variant_index < n_variants);
+    debug_assert_eq!(out_values.len(), values.len() * n_variants);
+    debug_assert_eq!(out_missing.len(), missing.len() * n_variants);
+
+    for (sample_index, (&value, &is_missing)) in values.iter().zip(missing).enumerate() {
+        let offset = sample_index * n_variants + variant_index;
+        out_values[offset] = value;
+        out_missing[offset] = is_missing;
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PgenLayout {
     FixedWidth,
@@ -378,15 +398,15 @@ fn read_plink2_dense_matrix_only_source_window(
     let source_indices = (0..n_samples).collect::<Vec<_>>();
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, n_samples);
-    let mut variant_major_values = Vec::with_capacity(n_samples * n_variants);
-    let mut variant_major_missing = Vec::with_capacity(n_samples * n_variants);
+    let mut values = vec![0.0; n_samples * n_variants];
+    let mut missing_mask = vec![false; n_samples * n_variants];
 
     match header.layout {
         PgenLayout::FixedWidth => {
             if n_variants > 0 {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
             }
-            for _ in 0..n_variants {
+            for variant_index in 0..n_variants {
                 read_fixed_width_variant_categories_sequential(
                     pgen,
                     &mut file,
@@ -394,33 +414,41 @@ fn read_plink2_dense_matrix_only_source_window(
                     &mut decoder_state,
                 )?;
                 fill_plink2_variant_values(&source_indices, &mut decoder_state);
-                variant_major_values.extend_from_slice(&decoder_state.values);
-                variant_major_missing.extend_from_slice(&decoder_state.missing);
+                append_variant_to_sample_major(
+                    &decoder_state.values,
+                    &decoder_state.missing,
+                    variant_index,
+                    n_variants,
+                    &mut values,
+                    &mut missing_mask,
+                );
             }
         }
         PgenLayout::VariableWidth => {
             let prefix_end = window.start + n_variants;
-            for variant_index in 0..prefix_end {
+            for source_variant_index in 0..prefix_end {
                 read_plink2_variant_values(
                     pgen,
                     &mut file,
                     &header,
-                    variant_index,
+                    source_variant_index,
                     &source_indices,
                     &mut decoder_state,
                 )?;
-                if variant_index >= window.start {
-                    variant_major_values.extend_from_slice(&decoder_state.values);
-                    variant_major_missing.extend_from_slice(&decoder_state.missing);
+                if source_variant_index >= window.start {
+                    append_variant_to_sample_major(
+                        &decoder_state.values,
+                        &decoder_state.missing,
+                        source_variant_index - window.start,
+                        n_variants,
+                        &mut values,
+                        &mut missing_mask,
+                    );
                 }
             }
         }
     }
 
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
     let diagnostics = genoio_core::DenseDiagnostics {
         requested_samples: n_samples,
         retained_samples: n_samples,
@@ -449,19 +477,21 @@ fn read_plink2_dense_source_window(
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
+    let n_samples = selection.samples.len();
+    let n_variants = window_variants.len();
     let mut variants = Vec::new();
-    let mut variant_major_values =
-        Vec::with_capacity(selection.samples.len() * window_variants.len());
-    let mut variant_major_missing =
-        Vec::with_capacity(selection.samples.len() * window_variants.len());
+    let mut values = vec![0.0; n_samples * n_variants];
+    let mut missing_mask = vec![false; n_samples * n_variants];
 
     match header.layout {
         PgenLayout::FixedWidth => {
             if let Some((first_variant_index, _)) = window_variants.first() {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, *first_variant_index)?;
             }
-            for (variant_index, variant) in window_variants {
-                debug_assert!(variant_index < header.variant_ct);
+            for (window_variant_index, (source_variant_index, variant)) in
+                window_variants.into_iter().enumerate()
+            {
+                debug_assert!(source_variant_index < header.variant_ct);
                 read_fixed_width_variant_categories_sequential(
                     pgen,
                     &mut file,
@@ -470,8 +500,14 @@ fn read_plink2_dense_source_window(
                 )?;
                 fill_plink2_variant_values(&selection.source_indices, &mut decoder_state);
                 variants.push(variant);
-                variant_major_values.extend_from_slice(&decoder_state.values);
-                variant_major_missing.extend_from_slice(&decoder_state.missing);
+                append_variant_to_sample_major(
+                    &decoder_state.values,
+                    &decoder_state.missing,
+                    window_variant_index,
+                    n_variants,
+                    &mut values,
+                    &mut missing_mask,
+                );
             }
         }
         PgenLayout::VariableWidth => {
@@ -494,22 +530,24 @@ fn read_plink2_dense_source_window(
                     .is_some_and(|(source_index, _)| *source_index == variant_index)
                 {
                     let (_, variant) = window_iter.next().expect("peeked variant should exist");
+                    let window_variant_index = variants.len();
                     variants.push(variant);
-                    variant_major_values.extend_from_slice(&decoder_state.values);
-                    variant_major_missing.extend_from_slice(&decoder_state.missing);
+                    append_variant_to_sample_major(
+                        &decoder_state.values,
+                        &decoder_state.missing,
+                        window_variant_index,
+                        n_variants,
+                        &mut values,
+                        &mut missing_mask,
+                    );
                 }
             }
         }
     }
 
-    let n_samples = selection.samples.len();
-    let n_variants = variants.len();
+    debug_assert_eq!(variants.len(), n_variants);
     diagnostics.candidate_variants = n_variants;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
 
     DenseGenotypeMatrix::new(
         n_samples,

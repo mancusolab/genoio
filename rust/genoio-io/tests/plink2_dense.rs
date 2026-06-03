@@ -79,6 +79,21 @@ fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -
     bytes
 }
 
+fn sample_major_window<T: Copy>(
+    values: &[T],
+    n_samples: usize,
+    n_variants: usize,
+    start: usize,
+    len: usize,
+) -> Vec<T> {
+    let mut window = Vec::with_capacity(n_samples * len);
+    for sample_index in 0..n_samples {
+        let row_start = sample_index * n_variants + start;
+        window.extend_from_slice(&values[row_start..row_start + len]);
+    }
+    window
+}
+
 #[test]
 fn plink2_dense_decodes_fixed_width_unphased_biallelic_hardcalls() {
     let dir = unique_dir("plink2-dense-values");
@@ -567,6 +582,108 @@ S3
     );
     assert_eq!(matrix_only.values, window.values);
     assert_eq!(matrix_only.missing_mask, window.missing_mask);
+}
+
+#[test]
+fn plink2_dense_variable_width_source_window_matches_full_read_slice() {
+    let dir = unique_dir("plink2-variable-window-matches-full");
+    let pgen_bytes = variable_width_pgen(
+        &[0, 4, 1, 2, 3],
+        &[&[0xe4], &[2, 1, 9, 2], &[2, 5, 0], &[1, 1, 3], &[0]],
+        4,
+    );
+    let pgen = dir.join("variable.pgen");
+    let pvar = dir.join("variable.pvar");
+    let psam = dir.join("variable.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 A G
+1 30 rs3 A G
+1 40 rs4 A G
+1 50 rs5 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    );
+
+    let full = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect("full variable-width pgen should decode");
+    let window = VariantWindow { start: 1, len: 3 };
+    let metadata_bearing =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), false)
+            .expect("variable-width source window should decode");
+    let matrix_only =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), true)
+            .expect("variable-width matrix-only source window should decode");
+    let keep = vec!["S4".to_string(), "S2".to_string()];
+    let filtered_full = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, Some(&keep), None)
+        .expect("sample-filtered full variable-width pgen should decode");
+    let filtered_window = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        Some(&keep),
+        None,
+        Some(window),
+        false,
+    )
+    .expect("sample-filtered variable-width source window should decode");
+
+    let expected_values = sample_major_window(
+        &full.values,
+        full.n_samples,
+        full.n_variants,
+        window.start,
+        window.len,
+    );
+    let expected_missing = sample_major_window(
+        &full.missing_mask,
+        full.n_samples,
+        full.n_variants,
+        window.start,
+        window.len,
+    );
+    assert_eq!(metadata_bearing.values, expected_values);
+    assert_eq!(metadata_bearing.missing_mask, expected_missing);
+    assert_eq!(matrix_only.values, expected_values);
+    assert_eq!(matrix_only.missing_mask, expected_missing);
+
+    let expected_filtered_values = sample_major_window(
+        &filtered_full.values,
+        filtered_full.n_samples,
+        filtered_full.n_variants,
+        window.start,
+        window.len,
+    );
+    let expected_filtered_missing = sample_major_window(
+        &filtered_full.missing_mask,
+        filtered_full.n_samples,
+        filtered_full.n_variants,
+        window.start,
+        window.len,
+    );
+    assert_eq!(filtered_window.values, expected_filtered_values);
+    assert_eq!(filtered_window.missing_mask, expected_filtered_missing);
+    assert_eq!(
+        filtered_window
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S2", "S4"]
+    );
 }
 
 #[test]
