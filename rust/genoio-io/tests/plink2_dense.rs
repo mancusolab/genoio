@@ -491,6 +491,116 @@ S4
 }
 
 #[test]
+fn plink2_dense_fixed_width_source_window_matches_full_read_slice() {
+    let dir = unique_dir("plink2-fixed-window-matches-full");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11, 0x06, 0x3f], 3, 4);
+    let pgen = dir.join("fixed.pgen");
+    let pvar = dir.join("fixed.pvar");
+    let psam = dir.join("fixed.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 A G
+1 30 rs3 A G
+1 40 rs4 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+
+    let full = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect("full fixed-width pgen should decode");
+    let window = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 2 }),
+        false,
+    )
+    .expect("fixed-width source window should decode");
+    let matrix_only = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 2 }),
+        true,
+    )
+    .expect("fixed-width matrix-only source window should decode");
+
+    assert_eq!(window.n_samples, 3);
+    assert_eq!(window.n_variants, 2);
+    assert_eq!(
+        window.values,
+        vec![
+            full.values[1],
+            full.values[2],
+            full.values[5],
+            full.values[6],
+            full.values[9],
+            full.values[10]
+        ]
+    );
+    assert_eq!(
+        window.missing_mask,
+        vec![
+            full.missing_mask[1],
+            full.missing_mask[2],
+            full.missing_mask[5],
+            full.missing_mask[6],
+            full.missing_mask[9],
+            full.missing_mask[10]
+        ]
+    );
+    assert_eq!(matrix_only.values, window.values);
+    assert_eq!(matrix_only.missing_mask, window.missing_mask);
+}
+
+#[test]
+fn plink2_dense_rejects_truncated_one_bit_variable_record() {
+    let dir = unique_dir("plink2-dense-truncated-one-bit");
+    let pgen_bytes = variable_width_pgen(&[1], &[&[2]], 9);
+    let pgen = dir.join("bad_one_bit.pgen");
+    let pvar = dir.join("bad_one_bit.pvar");
+    let psam = dir.join("bad_one_bit.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(&pvar, "#CHROM POS ID REF ALT\n1 10 rs1 A G\n");
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+S5
+S6
+S7
+S8
+S9
+",
+    );
+
+    let error = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect_err("truncated 1-bit pgen record should fail");
+
+    assert!(error.to_string().contains("1-bit record is shorter"));
+}
+
+#[test]
 fn plink2_dense_rejects_truncated_fixed_width_records() {
     let dir = unique_dir("plink2-dense-truncated-fixed");
     let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11], 3, 3);

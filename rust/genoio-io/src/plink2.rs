@@ -32,7 +32,25 @@ struct PgenHeader {
 
 #[derive(Debug, Clone)]
 struct PgenDecoderState {
-    previous_non_ld_categories: Option<Vec<u8>>,
+    previous_non_ld_categories: Vec<u8>,
+    has_previous_non_ld: bool,
+    record: Vec<u8>,
+    categories: Vec<u8>,
+    values: Vec<f32>,
+    missing: Vec<bool>,
+}
+
+impl PgenDecoderState {
+    fn new(sample_ct: usize, selected_sample_ct: usize) -> Self {
+        Self {
+            previous_non_ld_categories: Vec::with_capacity(sample_ct),
+            has_previous_non_ld: false,
+            record: Vec::with_capacity(sample_ct.div_ceil(4)),
+            categories: Vec::with_capacity(sample_ct),
+            values: Vec::with_capacity(selected_sample_ct),
+            missing: Vec::with_capacity(selected_sample_ct),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,9 +120,7 @@ pub fn read_plink2_dense_windowed(
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
     let mut file = open_pgen_payload(pgen)?;
-    let mut decoder_state = PgenDecoderState {
-        previous_non_ld_categories: None,
-    };
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::with_capacity(selection.samples.len() * header.variant_ct);
@@ -113,18 +129,18 @@ pub fn read_plink2_dense_windowed(
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
-        let mut decoded_values = if requires_sequential_decode {
-            Some(read_plink2_variant_values(
+        let mut decoded_values = false;
+        if requires_sequential_decode {
+            read_plink2_variant_values(
                 pgen,
                 &mut file,
                 &header,
                 variant_index,
                 &selection.source_indices,
                 &mut decoder_state,
-            )?)
-        } else {
-            None
-        };
+            )?;
+            decoded_values = true;
+        }
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -147,10 +163,7 @@ pub fn read_plink2_dense_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
-        let (current_values, current_missing) = if let Some(decoded_values) = decoded_values.take()
-        {
-            decoded_values
-        } else {
+        if !decoded_values {
             read_plink2_variant_values(
                 pgen,
                 &mut file,
@@ -158,10 +171,13 @@ pub fn read_plink2_dense_windowed(
                 variant_index,
                 &selection.source_indices,
                 &mut decoder_state,
-            )?
-        };
+            )?;
+        }
         let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(&current_values, &current_missing)?)
+            Some(compute_variant_stats(
+                &decoder_state.values,
+                &decoder_state.missing,
+            )?)
         } else {
             None
         };
@@ -183,8 +199,8 @@ pub fn read_plink2_dense_windowed(
             }
         }
         variants.push(variant);
-        variant_major_values.extend(current_values);
-        variant_major_missing.extend(current_missing);
+        variant_major_values.extend_from_slice(&decoder_state.values);
+        variant_major_missing.extend_from_slice(&decoder_state.missing);
     }
 
     let n_samples = selection.samples.len();
@@ -239,9 +255,7 @@ pub fn read_plink2_sparse_windowed(
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
     let mut file = open_pgen_payload(pgen)?;
-    let mut decoder_state = PgenDecoderState {
-        previous_non_ld_categories: None,
-    };
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let n_samples = selection.samples.len();
     let mut indptr = vec![0];
@@ -252,18 +266,18 @@ pub fn read_plink2_sparse_windowed(
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
-        let mut decoded_values = if requires_sequential_decode {
-            Some(read_plink2_variant_values(
+        let mut decoded_values = false;
+        if requires_sequential_decode {
+            read_plink2_variant_values(
                 pgen,
                 &mut file,
                 &header,
                 variant_index,
                 &selection.source_indices,
                 &mut decoder_state,
-            )?)
-        } else {
-            None
-        };
+            )?;
+            decoded_values = true;
+        }
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -286,21 +300,21 @@ pub fn read_plink2_sparse_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
-        let (mut current_values, current_missing) =
-            if let Some(decoded_values) = decoded_values.take() {
-                decoded_values
-            } else {
-                read_plink2_variant_values(
-                    pgen,
-                    &mut file,
-                    &header,
-                    variant_index,
-                    &selection.source_indices,
-                    &mut decoder_state,
-                )?
-            };
+        if !decoded_values {
+            read_plink2_variant_values(
+                pgen,
+                &mut file,
+                &header,
+                variant_index,
+                &selection.source_indices,
+                &mut decoder_state,
+            )?;
+        }
         let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(&current_values, &current_missing)?)
+            Some(compute_variant_stats(
+                &decoder_state.values,
+                &decoder_state.missing,
+            )?)
         } else {
             None
         };
@@ -321,9 +335,9 @@ pub fn read_plink2_sparse_windowed(
                 continue;
             }
         }
-        reject_sparse_missing_values(&current_missing)?;
-        flip_values_to_minor_allele(&mut current_values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+        reject_sparse_missing_values(&decoder_state.missing)?;
+        flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);
     }
 
@@ -363,31 +377,31 @@ fn read_plink2_dense_matrix_only_source_window(
     let n_samples = header.sample_ct;
     let source_indices = (0..n_samples).collect::<Vec<_>>();
     let mut file = open_pgen_payload(pgen)?;
-    let mut decoder_state = PgenDecoderState {
-        previous_non_ld_categories: None,
-    };
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, n_samples);
     let mut variant_major_values = Vec::with_capacity(n_samples * n_variants);
     let mut variant_major_missing = Vec::with_capacity(n_samples * n_variants);
 
     match header.layout {
         PgenLayout::FixedWidth => {
-            for variant_index in window.start..(window.start + n_variants) {
-                let (current_values, current_missing) = read_plink2_variant_values(
+            if n_variants > 0 {
+                seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
+            }
+            for _ in 0..n_variants {
+                read_fixed_width_variant_categories_sequential(
                     pgen,
                     &mut file,
                     &header,
-                    variant_index,
-                    &source_indices,
                     &mut decoder_state,
                 )?;
-                variant_major_values.extend(current_values);
-                variant_major_missing.extend(current_missing);
+                fill_plink2_variant_values(&source_indices, &mut decoder_state);
+                variant_major_values.extend_from_slice(&decoder_state.values);
+                variant_major_missing.extend_from_slice(&decoder_state.missing);
             }
         }
         PgenLayout::VariableWidth => {
             let prefix_end = window.start + n_variants;
             for variant_index in 0..prefix_end {
-                let (current_values, current_missing) = read_plink2_variant_values(
+                read_plink2_variant_values(
                     pgen,
                     &mut file,
                     &header,
@@ -396,8 +410,8 @@ fn read_plink2_dense_matrix_only_source_window(
                     &mut decoder_state,
                 )?;
                 if variant_index >= window.start {
-                    variant_major_values.extend(current_values);
-                    variant_major_missing.extend(current_missing);
+                    variant_major_values.extend_from_slice(&decoder_state.values);
+                    variant_major_missing.extend_from_slice(&decoder_state.missing);
                 }
             }
         }
@@ -433,9 +447,7 @@ fn read_plink2_dense_source_window(
     let mut diagnostics = selection.diagnostics;
     let window_variants = parse_pvar_source_window(pvar, window)?;
     let mut file = open_pgen_payload(pgen)?;
-    let mut decoder_state = PgenDecoderState {
-        previous_non_ld_categories: None,
-    };
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let mut variants = Vec::new();
     let mut variant_major_values =
@@ -445,21 +457,21 @@ fn read_plink2_dense_source_window(
 
     match header.layout {
         PgenLayout::FixedWidth => {
-            // Fixed-width PGEN records are independently addressable; decode
-            // only the exact source variants represented by the requested
-            // unfiltered window.
+            if let Some((first_variant_index, _)) = window_variants.first() {
+                seek_fixed_width_variant_record(pgen, &mut file, &header, *first_variant_index)?;
+            }
             for (variant_index, variant) in window_variants {
-                let (current_values, current_missing) = read_plink2_variant_values(
+                debug_assert!(variant_index < header.variant_ct);
+                read_fixed_width_variant_categories_sequential(
                     pgen,
                     &mut file,
                     &header,
-                    variant_index,
-                    &selection.source_indices,
                     &mut decoder_state,
                 )?;
+                fill_plink2_variant_values(&selection.source_indices, &mut decoder_state);
                 variants.push(variant);
-                variant_major_values.extend(current_values);
-                variant_major_missing.extend(current_missing);
+                variant_major_values.extend_from_slice(&decoder_state.values);
+                variant_major_missing.extend_from_slice(&decoder_state.missing);
             }
         }
         PgenLayout::VariableWidth => {
@@ -469,7 +481,7 @@ fn read_plink2_dense_source_window(
             // earlier non-LD records. Decode the prefix through the requested
             // window to maintain state, but append only requested variants.
             for variant_index in 0..prefix_end {
-                let (current_values, current_missing) = read_plink2_variant_values(
+                read_plink2_variant_values(
                     pgen,
                     &mut file,
                     &header,
@@ -483,8 +495,8 @@ fn read_plink2_dense_source_window(
                 {
                     let (_, variant) = window_iter.next().expect("peeked variant should exist");
                     variants.push(variant);
-                    variant_major_values.extend(current_values);
-                    variant_major_missing.extend(current_missing);
+                    variant_major_values.extend_from_slice(&decoder_state.values);
+                    variant_major_missing.extend_from_slice(&decoder_state.missing);
                 }
             }
         }
@@ -525,9 +537,7 @@ fn read_plink2_sparse_source_window(
     let mut diagnostics = selection.diagnostics;
     let window_variants = parse_pvar_source_window(pvar, window)?;
     let mut file = open_pgen_payload(pgen)?;
-    let mut decoder_state = PgenDecoderState {
-        previous_non_ld_categories: None,
-    };
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let n_samples = selection.samples.len();
     let mut indptr = vec![0];
@@ -539,7 +549,7 @@ fn read_plink2_sparse_source_window(
         PgenLayout::FixedWidth => {
             // Fixed-width records can be decoded by direct source index.
             for (variant_index, mut variant) in window_variants {
-                let (mut current_values, current_missing) = read_plink2_variant_values(
+                read_plink2_variant_values(
                     pgen,
                     &mut file,
                     &header,
@@ -547,9 +557,9 @@ fn read_plink2_sparse_source_window(
                     &selection.source_indices,
                     &mut decoder_state,
                 )?;
-                reject_sparse_missing_values(&current_missing)?;
-                flip_values_to_minor_allele(&mut current_values, &mut variant);
-                append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+                reject_sparse_missing_values(&decoder_state.missing)?;
+                flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
+                append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
                 variants.push(variant);
             }
         }
@@ -559,7 +569,7 @@ fn read_plink2_sparse_source_window(
             // Preserve LD state exactly as dense reads do, then append only
             // requested variants to sparse columns.
             for variant_index in 0..prefix_end {
-                let (mut current_values, current_missing) = read_plink2_variant_values(
+                read_plink2_variant_values(
                     pgen,
                     &mut file,
                     &header,
@@ -572,9 +582,14 @@ fn read_plink2_sparse_source_window(
                     .is_some_and(|(source_index, _)| *source_index == variant_index)
                 {
                     let (_, mut variant) = window_iter.next().expect("peeked variant should exist");
-                    reject_sparse_missing_values(&current_missing)?;
-                    flip_values_to_minor_allele(&mut current_values, &mut variant);
-                    append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+                    reject_sparse_missing_values(&decoder_state.missing)?;
+                    flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
+                    append_sparse_column(
+                        &mut indptr,
+                        &mut indices,
+                        &mut data,
+                        &decoder_state.values,
+                    );
                     variants.push(variant);
                 }
             }
@@ -1117,18 +1132,21 @@ fn read_plink2_variant_values(
     variant_index: usize,
     source_indices: &[usize],
     decoder_state: &mut PgenDecoderState,
-) -> Result<(Vec<f32>, Vec<bool>)> {
-    let categories =
-        read_plink2_variant_categories(path, file, header, variant_index, decoder_state)?;
+) -> Result<()> {
+    read_plink2_variant_categories(path, file, header, variant_index, decoder_state)?;
 
-    let mut current_values = Vec::with_capacity(source_indices.len());
-    let mut current_missing = Vec::with_capacity(source_indices.len());
+    fill_plink2_variant_values(source_indices, decoder_state);
+    Ok(())
+}
+
+fn fill_plink2_variant_values(source_indices: &[usize], decoder_state: &mut PgenDecoderState) {
+    decoder_state.values.clear();
+    decoder_state.missing.clear();
     for source_index in source_indices {
-        let (value, missing) = decode_pgen_code(categories[*source_index]);
-        current_values.push(value);
-        current_missing.push(missing);
+        let (value, missing) = decode_pgen_code(decoder_state.categories[*source_index]);
+        decoder_state.values.push(value);
+        decoder_state.missing.push(missing);
     }
-    Ok((current_values, current_missing))
 }
 
 fn read_plink2_variant_categories(
@@ -1137,10 +1155,10 @@ fn read_plink2_variant_categories(
     header: &PgenHeader,
     variant_index: usize,
     decoder_state: &mut PgenDecoderState,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
     match header.layout {
         PgenLayout::FixedWidth => {
-            read_fixed_width_variant_categories(path, file, header, variant_index)
+            read_fixed_width_variant_categories(path, file, header, variant_index, decoder_state)
         }
         PgenLayout::VariableWidth => {
             read_variable_width_variant_categories(path, file, header, variant_index, decoder_state)
@@ -1153,7 +1171,18 @@ fn read_fixed_width_variant_categories(
     file: &mut File,
     header: &PgenHeader,
     variant_index: usize,
-) -> Result<Vec<u8>> {
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    seek_fixed_width_variant_record(path, file, header, variant_index)?;
+    read_fixed_width_variant_categories_sequential(path, file, header, decoder_state)
+}
+
+fn seek_fixed_width_variant_record(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+) -> Result<()> {
     let payload_offset = variant_index
         .checked_mul(header.bytes_per_variant)
         .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
@@ -1168,14 +1197,28 @@ fn read_fixed_width_variant_categories(
             path: path.to_path_buf(),
             source,
         })?;
-    let mut payload = vec![0_u8; header.bytes_per_variant];
-    file.read_exact(&mut payload)
+    Ok(())
+}
+
+fn read_fixed_width_variant_categories_sequential(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    decoder_state.record.resize(header.bytes_per_variant, 0);
+    file.read_exact(&mut decoder_state.record)
         .map_err(|source| MetadataError::Io {
             path: path.to_path_buf(),
             source,
         })?;
 
-    Ok(decode_packed_categories(&payload, header.sample_ct))
+    decode_packed_categories(
+        &decoder_state.record,
+        header.sample_ct,
+        &mut decoder_state.categories,
+    );
+    Ok(())
 }
 
 fn read_variable_width_variant_categories(
@@ -1184,7 +1227,7 @@ fn read_variable_width_variant_categories(
     header: &PgenHeader,
     variant_index: usize,
     decoder_state: &mut PgenDecoderState,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
     let start = header.record_offsets[variant_index];
     let end = header.record_offsets[variant_index + 1];
     let record_len = usize::try_from(end - start)
@@ -1194,15 +1237,16 @@ fn read_variable_width_variant_categories(
             path: path.to_path_buf(),
             source,
         })?;
-    let mut record = vec![0_u8; record_len];
-    file.read_exact(&mut record)
+    decoder_state.record.resize(record_len, 0);
+    file.read_exact(&mut decoder_state.record)
         .map_err(|source| MetadataError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+    let record = decoder_state.record.as_slice();
     let record_type = header.record_types[variant_index];
     let compression = record_type & 0x07;
-    let categories = match compression {
+    match compression {
         0 => {
             if record.len() < header.bytes_per_variant {
                 return Err(MetadataError::parse(
@@ -1210,56 +1254,92 @@ fn read_variable_width_variant_categories(
                     "pgen uncompressed record is shorter than expected",
                 ));
             }
-            decode_packed_categories(&record[..header.bytes_per_variant], header.sample_ct)
+            decode_packed_categories(
+                &record[..header.bytes_per_variant],
+                header.sample_ct,
+                &mut decoder_state.categories,
+            );
         }
-        1 => decode_one_bit_record(path, &record, header.sample_ct)?,
-        2 | 3 => decode_ld_compressed_record(
+        1 => decode_one_bit_record(
             path,
-            &record,
+            record,
             header.sample_ct,
-            decoder_state
-                .previous_non_ld_categories
-                .as_ref()
-                .ok_or_else(|| {
-                    MetadataError::parse(
-                        path,
-                        "pgen LD-compressed record appears before any non-LD record",
-                    )
-                })?,
-            compression == 3,
+            &mut decoder_state.categories,
         )?,
-        4 => decode_difflist_record(path, &record, header.sample_ct, 0)?,
-        6 => decode_difflist_record(path, &record, header.sample_ct, 2)?,
-        7 => decode_difflist_record(path, &record, header.sample_ct, 3)?,
+        2 | 3 => {
+            if !decoder_state.has_previous_non_ld {
+                return Err(MetadataError::parse(
+                    path,
+                    "pgen LD-compressed record appears before any non-LD record",
+                ));
+            }
+            decode_ld_compressed_record(
+                path,
+                record,
+                header.sample_ct,
+                &decoder_state.previous_non_ld_categories,
+                compression == 3,
+                &mut decoder_state.categories,
+            )?;
+        }
+        4 => decode_difflist_record(
+            path,
+            record,
+            header.sample_ct,
+            0,
+            &mut decoder_state.categories,
+        )?,
+        6 => decode_difflist_record(
+            path,
+            record,
+            header.sample_ct,
+            2,
+            &mut decoder_state.categories,
+        )?,
+        7 => decode_difflist_record(
+            path,
+            record,
+            header.sample_ct,
+            3,
+            &mut decoder_state.categories,
+        )?,
         other => {
             return Err(MetadataError::parse(
                 path,
                 format!("unsupported pgen main-track compression type {other}"),
             ));
         }
-    };
-    if categories.len() != header.sample_ct {
+    }
+    if decoder_state.categories.len() != header.sample_ct {
         return Err(MetadataError::parse(
             path,
             "pgen decoded category count does not match sample count",
         ));
     }
     if !matches!(compression, 2 | 3) {
-        decoder_state.previous_non_ld_categories = Some(categories.clone());
+        decoder_state.previous_non_ld_categories.clear();
+        decoder_state
+            .previous_non_ld_categories
+            .extend_from_slice(&decoder_state.categories);
+        decoder_state.has_previous_non_ld = true;
     }
-    Ok(categories)
+    Ok(())
 }
 
-fn decode_packed_categories(payload: &[u8], sample_ct: usize) -> Vec<u8> {
-    let mut categories = Vec::with_capacity(sample_ct);
+fn decode_packed_categories(payload: &[u8], sample_ct: usize, categories: &mut Vec<u8>) {
+    categories.clear();
     for sample_index in 0..sample_ct {
         let byte = payload[sample_index / 4];
         categories.push((byte >> ((sample_index % 4) * 2)) & 0b11);
     }
-    categories
 }
 
-fn decode_one_bit_record(path: &Path, record: &[u8], sample_ct: usize) -> Result<Vec<u8>> {
+fn decode_one_bit_record(
+    path: &Path,
+    record: &[u8],
+    sample_ct: usize,
+    categories: &mut Vec<u8>,
+) -> Result<()> {
     let common_categories = *record.first().ok_or_else(|| {
         MetadataError::parse(path, "pgen 1-bit record is missing common-category byte")
     })?;
@@ -1285,7 +1365,8 @@ fn decode_one_bit_record(path: &Path, record: &[u8], sample_ct: usize) -> Result
         ));
     }
     let bitarray = &record[1..1 + bitarray_len];
-    let mut categories = vec![low_category; sample_ct];
+    categories.clear();
+    categories.resize(sample_ct, low_category);
     for (sample_index, category) in categories.iter_mut().enumerate() {
         if bit_is_set(bitarray, sample_index) {
             *category = high_category;
@@ -1295,7 +1376,7 @@ fn decode_one_bit_record(path: &Path, record: &[u8], sample_ct: usize) -> Result
     for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
         categories[sample_index] = category;
     }
-    Ok(categories)
+    Ok(())
 }
 
 fn decode_ld_compressed_record(
@@ -1304,22 +1385,24 @@ fn decode_ld_compressed_record(
     sample_ct: usize,
     previous_non_ld_categories: &[u8],
     inverted: bool,
-) -> Result<Vec<u8>> {
+    categories: &mut Vec<u8>,
+) -> Result<()> {
     if previous_non_ld_categories.len() != sample_ct {
         return Err(MetadataError::parse(
             path,
             "pgen LD state length does not match sample count",
         ));
     }
-    let mut categories = previous_non_ld_categories.to_vec();
+    categories.clear();
+    categories.extend_from_slice(previous_non_ld_categories);
     let mut cursor = 0;
     for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
         categories[sample_index] = category;
     }
     if inverted {
-        invert_categories(&mut categories);
+        invert_categories(categories);
     }
-    Ok(categories)
+    Ok(())
 }
 
 fn decode_difflist_record(
@@ -1327,13 +1410,15 @@ fn decode_difflist_record(
     record: &[u8],
     sample_ct: usize,
     base_category: u8,
-) -> Result<Vec<u8>> {
-    let mut categories = vec![base_category; sample_ct];
+    categories: &mut Vec<u8>,
+) -> Result<()> {
+    categories.clear();
+    categories.resize(sample_ct, base_category);
     let mut cursor = 0;
     for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
         categories[sample_index] = category;
     }
-    Ok(categories)
+    Ok(())
 }
 
 fn decode_difflist(
