@@ -1,9 +1,12 @@
 // pattern: Imperative Shell
 
 use std::path::PathBuf;
+use std::slice;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{
+    PyBool, PyByteArray, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
+};
 
 #[pyfunction]
 fn backend_name() -> &'static str {
@@ -46,20 +49,16 @@ fn read_dense(
     members: &Bound<'_, PyDict>,
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
-    let requested_samples = samples_option(options)?;
-    let variant_filter = variants_option(options)?;
-    let variant_window = variant_window_option(options)?;
-    let return_samples = bool_option(options, "return_samples")?;
-    let return_variants = bool_option(options, "return_variants")?;
+    let read_options = read_options(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
             genoio_io::read_vcf_dense_windowed(
                 &path,
-                requested_samples.as_deref(),
-                variant_filter.as_ref(),
-                variant_window,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
             )
         }
         "plink1" => {
@@ -70,9 +69,9 @@ fn read_dense(
                 &bed,
                 &bim,
                 &fam,
-                requested_samples.as_deref(),
-                variant_filter.as_ref(),
-                variant_window,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
             )
         }
         other => {
@@ -83,7 +82,12 @@ fn read_dense(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    dense_to_py(py, output, return_samples, return_variants)
+    dense_to_py(
+        py,
+        output,
+        read_options.return_samples,
+        read_options.return_variants,
+    )
 }
 
 #[pyfunction]
@@ -93,20 +97,16 @@ fn read_sparse(
     members: &Bound<'_, PyDict>,
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
-    let requested_samples = samples_option(options)?;
-    let variant_filter = variants_option(options)?;
-    let variant_window = variant_window_option(options)?;
-    let return_samples = bool_option(options, "return_samples")?;
-    let return_variants = bool_option(options, "return_variants")?;
+    let read_options = read_options(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
             genoio_io::read_vcf_sparse_windowed(
                 &path,
-                requested_samples.as_deref(),
-                variant_filter.as_ref(),
-                variant_window,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
             )
         }
         "plink1" => {
@@ -117,9 +117,9 @@ fn read_sparse(
                 &bed,
                 &bim,
                 &fam,
-                requested_samples.as_deref(),
-                variant_filter.as_ref(),
-                variant_window,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
             )
         }
         other => {
@@ -130,7 +130,12 @@ fn read_sparse(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    sparse_to_py(py, output, return_samples, return_variants)
+    sparse_to_py(
+        py,
+        output,
+        read_options.return_samples,
+        read_options.return_variants,
+    )
 }
 
 #[pyfunction]
@@ -140,20 +145,16 @@ fn read_haplotypes_dense(
     members: &Bound<'_, PyDict>,
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
-    let requested_samples = samples_option(options)?;
-    let variant_filter = variants_option(options)?;
-    let variant_window = variant_window_option(options)?;
-    let return_samples = bool_option(options, "return_samples")?;
-    let return_variants = bool_option(options, "return_variants")?;
+    let read_options = read_options(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
             genoio_io::read_vcf_haplotypes_dense_windowed(
                 &path,
-                requested_samples.as_deref(),
-                variant_filter.as_ref(),
-                variant_window,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
             )
         }
         other => {
@@ -164,7 +165,12 @@ fn read_haplotypes_dense(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    dense_to_py(py, output, return_samples, return_variants)
+    dense_to_py(
+        py,
+        output,
+        read_options.return_samples,
+        read_options.return_variants,
+    )
 }
 
 #[pyfunction]
@@ -174,20 +180,16 @@ fn read_haplotypes_sparse(
     members: &Bound<'_, PyDict>,
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
-    let requested_samples = samples_option(options)?;
-    let variant_filter = variants_option(options)?;
-    let variant_window = variant_window_option(options)?;
-    let return_samples = bool_option(options, "return_samples")?;
-    let return_variants = bool_option(options, "return_variants")?;
+    let read_options = read_options(options)?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
             genoio_io::read_vcf_haplotypes_sparse_windowed(
                 &path,
-                requested_samples.as_deref(),
-                variant_filter.as_ref(),
-                variant_window,
+                read_options.requested_samples.as_deref(),
+                read_options.variant_filter.as_ref(),
+                read_options.variant_window,
             )
         }
         other => {
@@ -198,7 +200,12 @@ fn read_haplotypes_sparse(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    sparse_to_py(py, output, return_samples, return_variants)
+    sparse_to_py(
+        py,
+        output,
+        read_options.return_samples,
+        read_options.return_variants,
+    )
 }
 
 #[pymodule]
@@ -217,6 +224,24 @@ fn member_path(members: &Bound<'_, PyDict>, key: &str) -> PyResult<PathBuf> {
         pyo3::exceptions::PyKeyError::new_err(format!("missing source member: {key}"))
     })?;
     Ok(PathBuf::from(value.extract::<String>()?))
+}
+
+struct ReadOptions {
+    requested_samples: Option<Vec<String>>,
+    variant_filter: Option<genoio_core::VariantFilter>,
+    variant_window: Option<genoio_core::VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+}
+
+fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
+    Ok(ReadOptions {
+        requested_samples: samples_option(options)?,
+        variant_filter: variants_option(options)?,
+        variant_window: variant_window_option(options)?,
+        return_samples: bool_option(options, "return_samples")?,
+        return_variants: bool_option(options, "return_variants")?,
+    })
 }
 
 fn samples_option(options: &Bound<'_, PyDict>) -> PyResult<Option<Vec<String>>> {
@@ -274,50 +299,20 @@ fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
 }
 
 fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResult<Py<PyDict>> {
+    let genoio_core::MetadataOutput {
+        samples,
+        variants,
+        capabilities: source_capabilities,
+    } = output;
     let dict = PyDict::new(py);
-    let samples = PyList::empty(py);
-    for sample in output.samples {
-        let sample_dict = PyDict::new(py);
-        sample_dict.set_item("fid", sample.fid)?;
-        sample_dict.set_item("iid", sample.iid)?;
-        sample_dict.set_item("father", sample.father)?;
-        sample_dict.set_item("mother", sample.mother)?;
-        sample_dict.set_item("sex", sample.sex)?;
-        sample_dict.set_item("phenotype", sample.phenotype)?;
-        sample_dict.set_item("source_sample_index", sample.source_sample_index)?;
-        sample_dict.set_item("haplotype_index", sample.haplotype_index)?;
-        samples.append(sample_dict)?;
-    }
-
-    let variants = PyList::empty(py);
-    for variant in output.variants {
-        let variant_dict = PyDict::new(py);
-        variant_dict.set_item("chrom", variant.chrom)?;
-        variant_dict.set_item("pos", variant.pos)?;
-        variant_dict.set_item("id", variant.id)?;
-        variant_dict.set_item("a0", variant.a0)?;
-        variant_dict.set_item("a1", variant.a1)?;
-        variant_dict.set_item("ref_allele", variant.ref_allele)?;
-        variant_dict.set_item("alt_allele", variant.alt_allele)?;
-        variant_dict.set_item("source_a0", variant.source_a0)?;
-        variant_dict.set_item("source_a1", variant.source_a1)?;
-        variant_dict.set_item("flipped", variant.flipped)?;
-        variant_dict.set_item("qual", variant.qual)?;
-        variant_dict.set_item("af", variant.af)?;
-        variant_dict.set_item("maf", variant.maf)?;
-        variant_dict.set_item("mac", variant.mac)?;
-        variant_dict.set_item("missing_rate", variant.missing_rate)?;
-        variant_dict.set_item("n_called", variant.n_called)?;
-        variants.append(variant_dict)?;
-    }
 
     let capabilities = PyDict::new(py);
-    capabilities.set_item("supports_geno", output.capabilities.supports_geno)?;
-    capabilities.set_item("supports_haplo", output.capabilities.supports_haplo)?;
-    capabilities.set_item("phased", output.capabilities.phased)?;
+    capabilities.set_item("supports_geno", source_capabilities.supports_geno)?;
+    capabilities.set_item("supports_haplo", source_capabilities.supports_haplo)?;
+    capabilities.set_item("phased", source_capabilities.phased)?;
 
-    dict.set_item("samples", samples)?;
-    dict.set_item("variants", variants)?;
+    dict.set_item("samples", sample_records_to_py(py, samples)?)?;
+    dict.set_item("variants", variant_records_to_py(py, variants)?)?;
     dict.set_item("capabilities", capabilities)?;
     Ok(dict.unbind())
 }
@@ -329,9 +324,9 @@ fn dense_to_py(
     return_variants: bool,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("values", output.values)?;
+    dict.set_item("values", f32_vec_to_numpy(py, output.values)?)?;
     dict.set_item("shape", (output.n_samples, output.n_variants))?;
-    dict.set_item("missing_mask", output.missing_mask)?;
+    dict.set_item("missing_mask", bool_vec_to_numpy(py, output.missing_mask)?)?;
     if return_samples {
         dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
     }
@@ -365,9 +360,9 @@ fn sparse_to_py(
     return_variants: bool,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("indptr", output.indptr)?;
-    dict.set_item("indices", output.indices)?;
-    dict.set_item("data", output.data)?;
+    dict.set_item("indptr", usize_vec_to_numpy_i64(py, output.indptr)?)?;
+    dict.set_item("indices", usize_vec_to_numpy_i64(py, output.indices)?)?;
+    dict.set_item("data", f32_vec_to_numpy(py, output.data)?)?;
     dict.set_item("shape", (output.n_rows, output.n_cols))?;
     if return_samples {
         dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
@@ -393,6 +388,44 @@ fn sparse_to_py(
     dict.set_item("diagnostics", diagnostics)?;
 
     Ok(dict.unbind())
+}
+
+fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
+    let bytes = unsafe {
+        slice::from_raw_parts(
+            values.as_ptr().cast::<u8>(),
+            values.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    let buffer = PyByteArray::new(py, bytes);
+    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "float32"))
+}
+
+fn bool_vec_to_numpy(py: Python<'_>, values: Vec<bool>) -> PyResult<Bound<'_, PyAny>> {
+    let bytes = values.into_iter().map(u8::from).collect::<Vec<u8>>();
+    let buffer = PyByteArray::new(py, &bytes);
+    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "bool"))
+}
+
+fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<'_, PyAny>> {
+    let values = values
+        .into_iter()
+        .map(|value| {
+            i64::try_from(value).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "array index exceeds supported NumPy int64 range",
+                )
+            })
+        })
+        .collect::<PyResult<Vec<i64>>>()?;
+    let bytes = unsafe {
+        slice::from_raw_parts(
+            values.as_ptr().cast::<u8>(),
+            values.len() * std::mem::size_of::<i64>(),
+        )
+    };
+    let buffer = PyByteArray::new(py, bytes);
+    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "int64"))
 }
 
 fn sample_records_to_py(

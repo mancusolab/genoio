@@ -277,13 +277,14 @@ fn read_vcf_dense_records<R: Read>(
 
         validate_dense_biallelic_record(path, &record)?;
         let genotypes = record
-            .genotypes()
+            .format(b"GT")
+            .integer()
             .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
         let mut current_values = Vec::with_capacity(selection.source_indices.len());
         let mut current_missing = Vec::with_capacity(selection.source_indices.len());
         for source_index in &selection.source_indices {
             let (value, is_missing) =
-                decode_diploid_gt(path, &record, &genotypes.get(*source_index))?;
+                decode_raw_diploid_gt(path, &record, genotypes[*source_index])?;
             current_values.push(value);
             current_missing.push(is_missing);
         }
@@ -554,13 +555,14 @@ fn read_vcf_sparse_records<R: Read>(
 
         validate_dense_biallelic_record(path, &record)?;
         let genotypes = record
-            .genotypes()
+            .format(b"GT")
+            .integer()
             .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
         let mut current_values = Vec::with_capacity(selection.source_indices.len());
         let mut current_missing = Vec::with_capacity(selection.source_indices.len());
         for source_index in &selection.source_indices {
             let (value, is_missing) =
-                decode_diploid_gt(path, &record, &genotypes.get(*source_index))?;
+                decode_raw_diploid_gt(path, &record, genotypes[*source_index])?;
             current_values.push(value);
             current_missing.push(is_missing);
         }
@@ -773,10 +775,10 @@ fn is_compressed_vcf(path: &Path) -> bool {
         .is_some_and(|extension| matches!(extension, "gz" | "bgz"))
 }
 
-fn decode_diploid_gt(
+fn decode_raw_diploid_gt(
     path: &Path,
     record: &rust_htslib::bcf::Record,
-    genotype: &rust_htslib::bcf::record::Genotype,
+    genotype: &[i32],
 ) -> Result<(f32, bool)> {
     if genotype.len() != 2 {
         return Err(MetadataError::parse(
@@ -790,28 +792,44 @@ fn decode_diploid_gt(
     }
 
     let mut dosage = 0.0;
-    for allele in genotype.iter() {
-        match allele {
-            GenotypeAllele::UnphasedMissing | GenotypeAllele::PhasedMissing => {
-                return Ok((0.0, true));
+    for encoded in genotype {
+        match decode_raw_gt_allele(*encoded) {
+            RawGtAllele::Missing => return Ok((0.0, true)),
+            RawGtAllele::Reference => {}
+            RawGtAllele::Alternate => dosage += 1.0,
+            RawGtAllele::Unsupported(other) => {
+                return Err(MetadataError::parse(
+                    path,
+                    format!(
+                        "vcf record {} has multiallelic GT allele index {other}",
+                        String::from_utf8_lossy(&record.id())
+                    ),
+                ));
             }
-            GenotypeAllele::Unphased(index) | GenotypeAllele::Phased(index) => match index {
-                0 => {}
-                1 => dosage += 1.0,
-                other => {
-                    return Err(MetadataError::parse(
-                        path,
-                        format!(
-                            "vcf record {} has multiallelic GT allele index {other}",
-                            String::from_utf8_lossy(&record.id())
-                        ),
-                    ));
-                }
-            },
         }
     }
 
     Ok((dosage, false))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawGtAllele {
+    Missing,
+    Reference,
+    Alternate,
+    Unsupported(i32),
+}
+
+fn decode_raw_gt_allele(encoded: i32) -> RawGtAllele {
+    match encoded {
+        0 | 1 => RawGtAllele::Missing,
+        value if value > 1 => match (value >> 1) - 1 {
+            0 => RawGtAllele::Reference,
+            1 => RawGtAllele::Alternate,
+            allele => RawGtAllele::Unsupported(allele),
+        },
+        value => RawGtAllele::Unsupported(value),
+    }
 }
 
 struct DecodedDiploidGenotypeRecord {
@@ -825,13 +843,14 @@ fn decode_diploid_genotype_record(
     source_indices: &[usize],
 ) -> Result<DecodedDiploidGenotypeRecord> {
     let genotypes = record
-        .genotypes()
+        .format(b"GT")
+        .integer()
         .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
     let mut values = Vec::with_capacity(source_indices.len());
     let mut missing = Vec::with_capacity(source_indices.len());
 
     for source_index in source_indices {
-        let (value, is_missing) = decode_diploid_gt(path, record, &genotypes.get(*source_index))?;
+        let (value, is_missing) = decode_raw_diploid_gt(path, record, genotypes[*source_index])?;
         values.push(value);
         missing.push(is_missing);
     }

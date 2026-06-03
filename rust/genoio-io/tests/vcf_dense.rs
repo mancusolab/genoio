@@ -143,6 +143,26 @@ fn vcf_dense_rejects_multiallelic_genotype_states() {
 }
 
 #[test]
+fn vcf_dense_rejects_non_diploid_gt_calls() {
+    let dir = unique_dir("vcf-dense-haploid");
+    let path = dir.join("haploid.vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t1
+",
+    );
+
+    let error = genoio_io::read_vcf_dense(&path, None, None).expect_err("haploid GT should fail");
+
+    assert!(error.to_string().contains("non-diploid GT"));
+}
+
+#[test]
 fn vcf_dense_rejects_multi_alt_records_even_when_gt_uses_first_alt() {
     let dir = unique_dir("vcf-dense-multi-alt-record");
     let path = dir.join("multi-alt.vcf");

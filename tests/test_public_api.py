@@ -37,6 +37,7 @@ def test_import_exposes_public_names_without_reference_packages():
         "snp",
         "biallelic",
         "maf",
+        "qual",
         "mac",
         "missing_rate",
         "polymorphic",
@@ -106,6 +107,32 @@ def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_pat
     observed = dataset.read()
 
     np.testing.assert_array_equal(observed, np.array([[0.0, 1.0]], dtype=np.float32))
+
+
+def test_rust_dense_read_returns_numpy_buffers(tmp_path):
+    import genoio
+    import genoio._api as api
+
+    path = write_blocks_vcf(tmp_path)
+    dataset = genoio.open(path)
+    members = {key: str(path) for key, path in dataset.source.members.items()}
+
+    result = api._rust.read_dense(
+        dataset.source.format.value,
+        members,
+        {
+            "samples": None,
+            "variants": None,
+            "variant_window": None,
+            "return_samples": False,
+            "return_variants": False,
+        },
+    )
+
+    assert isinstance(result["values"], np.ndarray)
+    assert result["values"].dtype == np.float32
+    assert isinstance(result["missing_mask"], np.ndarray)
+    assert result["missing_mask"].dtype == np.bool_
 
 
 def test_sparse_default_missing_signature_is_readable():
