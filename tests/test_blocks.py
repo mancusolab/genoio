@@ -179,6 +179,34 @@ def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(
     assert calls[0]["matrix_only"] is False
 
 
+@pytest.mark.parametrize(
+    ("read_options", "bad_member", "match"),
+    [
+        ({"return_samples": True}, ".psam", "too few fields"),
+        ({"return_variants": True}, ".pvar", "invalid position"),
+        ({"samples": ["S1"]}, ".psam", "too few fields"),
+        ({"variants": "chrom"}, ".pvar", "invalid position"),
+    ],
+)
+def test_plink2_blocks_metadata_required_paths_reject_malformed_companion_files(
+    tmp_path, read_options, bad_member, match
+):
+    import genoio
+
+    prefix = write_fixed_width_plink2(tmp_path)
+    if bad_member == ".psam":
+        prefix.with_suffix(".psam").write_text("#FID IID\nF1\n")
+    else:
+        prefix.with_suffix(".pvar").write_text("#CHROM POS ID REF ALT\n1 bad rs1 A G\n")
+    if read_options.get("variants") == "chrom":
+        read_options = {**read_options, "variants": genoio.chrom("1")}
+
+    dataset = genoio.pfile(prefix)
+
+    with pytest.raises(genoio.InvalidSourceError, match=match):
+        list(dataset.blocks(size=1, **read_options))
+
+
 def test_blocks_validate_size(tmp_path):
     import genoio
 

@@ -392,6 +392,55 @@ fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
 }
 
 #[test]
+fn plink2_dense_window_sample_filter_rejects_malformed_psam_even_with_matrix_only_flag() {
+    let dir = unique_dir("plink2-window-sample-filter-malformed-psam");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11, 0x06], 3, 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+    write_text(&psam, "#FID IID\nF1\n");
+    let keep = vec!["S1".to_string()];
+
+    let error = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        Some(&keep),
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect_err("sample-filtered window should parse and reject malformed psam");
+
+    assert!(error.to_string().contains("too few fields"));
+}
+
+#[test]
+fn plink2_dense_window_variant_filter_rejects_malformed_pvar_even_with_matrix_only_flag() {
+    let dir = unique_dir("plink2-window-variant-filter-malformed-pvar");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11, 0x06], 3, 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+    write_text(&pvar, "#CHROM POS ID REF ALT\n1 bad rs1 A G\n");
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "chrom",
+        "params": {"value": "1"}
+    }))
+    .expect("filter should parse");
+
+    let error = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect_err("variant-filtered window should parse and reject malformed pvar");
+
+    assert!(error.to_string().contains("invalid position"));
+}
+
+#[test]
 fn plink2_dense_matrix_only_window_matches_metadata_source_window_values() {
     let dir = unique_dir("plink2-matrix-only-source-window-values");
     let pgen_bytes = variable_width_pgen(
