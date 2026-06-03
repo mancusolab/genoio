@@ -234,6 +234,12 @@ class Dataset:
             "variant_window": variant_window,
             "return_samples": read_options.return_samples,
             "return_variants": read_options.return_variants,
+            "matrix_only": (
+                not read_options.return_samples
+                and not read_options.return_variants
+                and read_options.samples is None
+                and validated_options.variant_filter_ir is None
+            ),
         }
         if validated_options.sparse_format is None:
             rust_result = (

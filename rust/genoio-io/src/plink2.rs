@@ -63,7 +63,15 @@ pub fn read_plink2_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
-    read_plink2_dense_windowed(pgen, pvar, psam, requested_samples, variant_filter, None)
+    read_plink2_dense_windowed(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        None,
+        false,
+    )
 }
 
 /// Read retained PLINK2 hard calls as a dense matrix over an optional block window.
@@ -74,6 +82,7 @@ pub fn read_plink2_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    _matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     // With no variant filter, retained order is identical to source order.
     // This lets block reads avoid full PVAR parsing and full variable-width

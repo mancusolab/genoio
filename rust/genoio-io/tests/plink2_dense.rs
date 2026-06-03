@@ -231,6 +231,7 @@ S3
         None,
         None,
         Some(VariantWindow { start: 0, len: 1 }),
+        false,
     )
     .expect("first window should not parse later pvar records");
 
@@ -252,6 +253,7 @@ fn plink2_dense_window_aligns_variant_metadata_with_source_window() {
         None,
         None,
         Some(VariantWindow { start: 1, len: 2 }),
+        false,
     )
     .expect("window should decode");
 
@@ -306,6 +308,7 @@ S4
         None,
         None,
         Some(VariantWindow { start: 0, len: 1 }),
+        false,
     )
     .expect("first window should not validate later pgen records");
 

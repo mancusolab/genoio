@@ -124,6 +124,7 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
             "variant_window": None,
             "return_samples": False,
             "return_variants": False,
+            "matrix_only": True,
         },
     )
 

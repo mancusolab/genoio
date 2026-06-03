@@ -94,6 +94,7 @@ fn read_dense(
                 read_options.requested_samples.as_deref(),
                 read_options.variant_filter.as_ref(),
                 read_options.variant_window,
+                read_options.matrix_only,
             )
         }
         other => {
@@ -271,6 +272,7 @@ struct ReadOptions {
     variant_window: Option<genoio_core::VariantWindow>,
     return_samples: bool,
     return_variants: bool,
+    matrix_only: bool,
 }
 
 fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
@@ -280,6 +282,7 @@ fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
         variant_window: variant_window_option(options)?,
         return_samples: bool_option(options, "return_samples")?,
         return_variants: bool_option(options, "return_variants")?,
+        matrix_only: required_bool_option(options, "matrix_only")?,
     })
 }
 
@@ -333,6 +336,18 @@ fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
     };
     if value.is_none() {
         return Ok(false);
+    }
+    value.extract::<bool>()
+}
+
+fn required_bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
+    let value = options
+        .get_item(key)?
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("missing option: {key}")))?;
+    if value.is_none() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{key} must be a bool"
+        )));
     }
     value.extract::<bool>()
 }

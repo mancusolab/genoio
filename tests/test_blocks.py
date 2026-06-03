@@ -118,6 +118,67 @@ def test_plink2_blocks_return_samples_keeps_source_order_for_each_block(tmp_path
         assert samples["iid"].to_list() == ["S1", "S3"]
 
 
+def test_plink2_matrix_only_blocks_pass_private_matrix_only_option(tmp_path, monkeypatch):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+    calls = []
+
+    def fake_read_dense_from_rust(self, members, options):
+        calls.append(dict(options))
+        return {
+            "values": [],
+            "shape": (1, 0),
+            "missing_mask": [],
+            "samples": [],
+            "variants": [],
+            "diagnostics": {},
+        }
+
+    monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
+
+    list(dataset.blocks(size=2))
+
+    assert calls
+    assert calls[0]["matrix_only"] is True
+
+
+@pytest.mark.parametrize(
+    "read_options",
+    [
+        {"return_samples": True},
+        {"return_variants": True},
+        {"samples": ["S1"]},
+        {"variants": ["rs1"]},
+    ],
+)
+def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(
+    tmp_path, monkeypatch, read_options
+):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+    calls = []
+
+    def fake_read_dense_from_rust(self, members, options):
+        calls.append(dict(options))
+        return {
+            "values": [],
+            "shape": (1, 0),
+            "missing_mask": [],
+            "samples": [],
+            "variants": [],
+            "diagnostics": {},
+        }
+
+    monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
+
+    list(dataset.blocks(size=2, **read_options))
+
+    assert calls
+    assert calls[0]["matrix_only"] is False
+
+
 def test_blocks_validate_size(tmp_path):
     import genoio
 
