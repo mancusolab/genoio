@@ -240,6 +240,40 @@ def test_plink2_blocks_metadata_required_paths_reject_malformed_companion_files(
         list(dataset.blocks(size=1, **read_options))
 
 
+@pytest.mark.parametrize(
+    ("pvar_text", "match"),
+    [
+        (
+            """\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 bad rs2 C T
+2 30 rs3 G A
+""",
+            "invalid position",
+        ),
+        (
+            """\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+""",
+            "pvar variant count 1",
+        ),
+    ],
+)
+def test_plink2_metadata_blocks_validate_full_pvar_before_first_block_return(
+    tmp_path, pvar_text, match
+):
+    import genoio
+
+    prefix = write_fixed_width_plink2(tmp_path)
+    prefix.with_suffix(".pvar").write_text(pvar_text)
+    dataset = genoio.pfile(prefix)
+
+    with pytest.raises(genoio.InvalidSourceError, match=match):
+        next(dataset.blocks(size=1, return_variants=True))
+
+
 def test_plink2_matrix_only_blocks_reject_bad_variable_width_block_offset(tmp_path):
     import genoio
 

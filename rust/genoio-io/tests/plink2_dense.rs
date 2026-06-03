@@ -273,7 +273,7 @@ S4
 }
 
 #[test]
-fn plink2_dense_window_does_not_parse_pvar_records_after_window() {
+fn plink2_dense_metadata_window_rejects_malformed_pvar_records_after_window() {
     let dir = unique_dir("plink2-window-pvar-prefix");
     let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11], 3, 2);
     let pgen = dir.join("tiny.pgen");
@@ -298,7 +298,7 @@ S3
 ",
     );
 
-    let dense = genoio_io::read_plink2_dense_windowed(
+    let error = genoio_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -307,11 +307,60 @@ S3
         Some(VariantWindow { start: 0, len: 1 }),
         false,
     )
-    .expect("first window should not parse later pvar records");
+    .expect_err("metadata-bearing window should validate later pvar records");
 
+    assert!(error.to_string().contains("invalid position"));
+
+    let dense = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only first window may skip later pvar records");
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs1");
+    assert!(dense.variants.is_empty());
     assert_eq!(dense.values, vec![0.0, 0.0, 2.0]);
+}
+
+#[test]
+fn plink2_dense_metadata_source_windows_reject_missing_later_pvar_records() {
+    let dir = unique_dir("plink2-window-pvar-missing-later");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11, 0x06], 3, 3);
+    let pgen = dir.join("tiny.pgen");
+    let pvar = dir.join("tiny.pvar");
+    let psam = dir.join("tiny.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+    let window = VariantWindow { start: 0, len: 1 };
+
+    let dense_error =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), false)
+            .expect_err("metadata dense window should validate full pvar row count");
+    assert!(dense_error.to_string().contains("pvar variant count 1"));
+
+    let sparse_error =
+        genoio_io::read_plink2_sparse_windowed(&pgen, &pvar, &psam, None, None, Some(window))
+            .expect_err("metadata sparse window should validate full pvar row count");
+    assert!(sparse_error.to_string().contains("pvar variant count 1"));
 }
 
 #[test]

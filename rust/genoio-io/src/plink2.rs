@@ -715,7 +715,7 @@ fn read_plink2_dense_source_window(
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
-    let window_variants = parse_pvar_source_window(pvar, window)?;
+    let window_variants = parse_pvar_source_window(pvar, window, header.variant_ct)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
@@ -836,7 +836,7 @@ fn read_plink2_sparse_source_window(
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
-    let window_variants = parse_pvar_source_window(pvar, window)?;
+    let window_variants = parse_pvar_source_window(pvar, window, header.variant_ct)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
@@ -2237,6 +2237,7 @@ fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
 fn parse_pvar_source_window(
     path: &Path,
     window: VariantWindow,
+    expected_variant_ct: usize,
 ) -> Result<Vec<(usize, VariantRecord)>> {
     let file = File::open(path).map_err(|source| MetadataError::Io {
         path: path.to_path_buf(),
@@ -2271,19 +2272,24 @@ fn parse_pvar_source_window(
             columns = Some(inferred);
             body_started = true;
         }
-        if source_index >= window_end {
-            break;
-        }
-        if source_index >= window.start {
-            let columns = columns
-                .as_ref()
-                .expect("pvar columns should be initialized before parsing body rows");
-            records.push((
-                source_index,
-                parse_pvar_line(path, line_index + 1, columns, trimmed)?,
-            ));
+
+        let columns = columns
+            .as_ref()
+            .expect("pvar columns should be initialized before parsing body rows");
+        let variant = parse_pvar_line(path, line_index + 1, columns, trimmed)?;
+        if source_index >= window.start && source_index < window_end {
+            records.push((source_index, variant));
         }
         source_index += 1;
+    }
+
+    if source_index != expected_variant_ct {
+        return Err(MetadataError::parse(
+            path,
+            format!(
+                "pvar variant count {source_index} does not match pgen variant count {expected_variant_ct}",
+            ),
+        ));
     }
 
     Ok(records)
