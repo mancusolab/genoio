@@ -56,6 +56,7 @@ enum Predicate {
     IdIn(BTreeSet<String>),
     Snp,
     Biallelic,
+    Qual { min: Option<f32>, max: Option<f32> },
     Maf { min: Option<f32>, max: Option<f32> },
     Mac { min: Option<u32>, max: Option<u32> },
     MissingRate { max: f32 },
@@ -222,6 +223,12 @@ impl Predicate {
                 expect_no_params(&params)?;
                 Ok(Self::Biallelic)
             }
+            "qual" => {
+                let min = optional_nonnegative_f32(&params, "min")?;
+                let max = optional_nonnegative_f32(&params, "max")?;
+                validate_range("qual", min, max)?;
+                Ok(Self::Qual { min, max })
+            }
             "maf" => {
                 let min = optional_rate(&params, "min")?;
                 let max = optional_rate(&params, "max")?;
@@ -257,6 +264,10 @@ impl Predicate {
             Self::IdIn(values) => Some(values.contains(&variant.id)),
             Self::Snp => Some(is_snp(variant)),
             Self::Biallelic => Some(is_biallelic(variant)),
+            Self::Qual { min, max } => Some(variant.qual.is_some_and(|qual| {
+                min.is_none_or(|threshold| qual >= threshold)
+                    && max.is_none_or(|threshold| qual <= threshold)
+            })),
             Self::Maf { .. } | Self::Mac { .. } | Self::MissingRate { .. } | Self::Polymorphic => {
                 None
             }
@@ -265,9 +276,12 @@ impl Predicate {
 
     fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
         match self {
-            Self::Chrom(_) | Self::Region { .. } | Self::IdIn(_) | Self::Snp | Self::Biallelic => {
-                self.metadata_decision(variant) == Some(true)
-            }
+            Self::Chrom(_)
+            | Self::Region { .. }
+            | Self::IdIn(_)
+            | Self::Snp
+            | Self::Biallelic
+            | Self::Qual { .. } => self.metadata_decision(variant) == Some(true),
             Self::Maf { min, max } => stats.and_then(|stats| stats.maf).is_some_and(|maf| {
                 min.is_none_or(|threshold| maf >= f64::from(threshold))
                     && max.is_none_or(|threshold| maf <= f64::from(threshold))
@@ -477,6 +491,25 @@ fn value_to_rate(key: &str, value: &Value) -> Result<f32, MetadataError> {
         ));
     }
     Ok(number as f32)
+}
+
+fn optional_nonnegative_f32(params: &Value, key: &str) -> Result<Option<f32>, MetadataError> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    let number = value.as_f64().ok_or_else(|| {
+        MetadataError::parse(
+            "<filter>",
+            format!("{key} must be a non-negative finite number"),
+        )
+    })?;
+    if !number.is_finite() || number < 0.0 {
+        return Err(MetadataError::parse(
+            "<filter>",
+            format!("{key} must be a non-negative finite number"),
+        ));
+    }
+    Ok(Some(number as f32))
 }
 
 fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, MetadataError> {

@@ -12,7 +12,7 @@ from ._errors import (
     UnsupportedFormatError,
     UnsupportedRepresentation,
 )
-from ._filters import biallelic, chrom, id_in, mac, maf, missing_rate, polymorphic, region, snp
+from ._filters import biallelic, chrom, id_in, mac, maf, missing_rate, polymorphic, qual, region, snp
 
 __all__ = [
     "Dataset",
@@ -26,6 +26,7 @@ __all__ = [
     "snp",
     "biallelic",
     "maf",
+    "qual",
     "mac",
     "missing_rate",
     "polymorphic",

@@ -26,6 +26,7 @@ pub struct VariantRecord {
     pub source_a0: String,
     pub source_a1: String,
     pub flipped: bool,
+    pub qual: Option<f32>,
     pub af: Option<f32>,
     pub maf: Option<f32>,
     pub mac: Option<u32>,

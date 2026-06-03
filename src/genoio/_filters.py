@@ -93,6 +93,10 @@ def maf(*, min: float | None = None, max: float | None = None) -> FilterExpr:
     return PredicateExpr("maf", _validate_float_range("maf", min=min, max=max))
 
 
+def qual(*, min: float | None = None, max: float | None = None) -> FilterExpr:
+    return PredicateExpr("qual", _validate_nonnegative_float_range("qual", min=min, max=max))
+
+
 def mac(*, min: int | None = None, max: int | None = None) -> FilterExpr:
     return PredicateExpr("mac", _validate_int_range("mac", min=min, max=max))
 
@@ -149,6 +153,18 @@ def _validate_int_range(name: str, *, min: int | None, max: int | None) -> tuple
     return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)
 
 
+def _validate_nonnegative_float_range(
+    name: str, *, min: float | None, max: float | None
+) -> tuple[tuple[str, ParamValue], ...]:
+    if min is None and max is None:
+        raise InvalidOptionError(f"{name} requires at least one threshold")
+    min_value = None if min is None else _validate_nonnegative_float(f"{name} min", min)
+    max_value = None if max is None else _validate_nonnegative_float(f"{name} max", max)
+    if min_value is not None and max_value is not None and min_value > max_value:
+        raise InvalidOptionError(f"{name} min must be <= max")
+    return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)
+
+
 def _validate_rate(name: str, value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise InvalidOptionError(f"{name} must be a number between 0 and 1")
@@ -156,6 +172,15 @@ def _validate_rate(name: str, value: float) -> float:
     lower, upper = _GENOTYPE_RATE_RANGE
     if not math.isfinite(normalized) or normalized < lower or normalized > upper:
         raise InvalidOptionError(f"{name} must be between 0 and 1")
+    return normalized
+
+
+def _validate_nonnegative_float(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise InvalidOptionError(f"{name} must be a non-negative number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0.0:
+        raise InvalidOptionError(f"{name} must be a non-negative number")
     return normalized
 
 

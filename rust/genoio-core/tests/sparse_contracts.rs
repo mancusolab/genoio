@@ -25,6 +25,7 @@ fn variant(id: &str) -> VariantRecord {
         source_a0: "A".to_string(),
         source_a1: "G".to_string(),
         flipped: false,
+        qual: None,
         af: None,
         maf: None,
         mac: None,

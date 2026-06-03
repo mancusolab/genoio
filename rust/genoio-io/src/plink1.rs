@@ -428,6 +428,7 @@ fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<Variant
         source_a0: a0,
         source_a1: a1,
         flipped: false,
+        qual: None,
         af: None,
         maf: None,
         mac: None,

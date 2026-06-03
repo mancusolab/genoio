@@ -726,12 +726,17 @@ fn variant_record_from_record(
         source_a0: ref_allele,
         source_a1: first_alt,
         flipped: false,
+        qual: finite_qual(record.qual()),
         af: None,
         maf: None,
         mac: None,
         missing_rate: None,
         n_called: None,
     })
+}
+
+fn finite_qual(qual: f32) -> Option<f32> {
+    qual.is_finite().then_some(qual)
 }
 
 fn reject_unindexed_compressed_region(

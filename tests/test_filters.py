@@ -15,9 +15,9 @@ def write_filter_vcf(tmp_path: Path) -> Path:
 ##contig=<ID=2>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
-1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
-1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/0\t./.\t0/0
-2\t30\tindel1\tAT\tA\t.\tPASS\t.\tGT\t0/1\t0/0\t0/0
+1\t10\trs1\tA\tG\t30\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t20\trs2\tC\tT\t10\tPASS\t.\tGT\t0/0\t./.\t0/0
+2\t30\tindel1\tAT\tA\t40\tPASS\t.\tGT\t0/1\t0/0\t0/0
 1\t40\trs4\tG\tA\t.\tPASS\t.\tGT\t./.\t./.\t./.
 """
     )
@@ -62,6 +62,10 @@ def test_filter_expressions_are_frozen_composable_and_json_serializable():
         lambda genoio: genoio.maf(min=0.4, max=0.2),
         lambda genoio: genoio.maf(min=float("nan")),
         lambda genoio: genoio.maf(max=float("nan")),
+        lambda genoio: genoio.qual(),
+        lambda genoio: genoio.qual(min=-1),
+        lambda genoio: genoio.qual(max=float("nan")),
+        lambda genoio: genoio.qual(min=40, max=20),
         lambda genoio: genoio.mac(min=-1),
         lambda genoio: genoio.missing_rate(float("nan")),
         lambda genoio: genoio.missing_rate(1.1),
@@ -114,6 +118,28 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
     assert variants["missing_rate"].to_list() == [0.0]
     assert variants["n_called"].to_list() == [3]
     np.testing.assert_array_equal(G, np.array([[0.0], [1.0], [2.0]], dtype=np.float32))
+
+
+def test_qual_filter_matches_fixture_reference_results(tmp_path):
+    import genoio
+
+    dataset = genoio.open(write_filter_vcf(tmp_path))
+
+    G, variants = dataset.read(variants=genoio.qual(min=20) & genoio.biallelic(), return_variants=True)
+
+    assert variants["id"].to_list() == ["rs1", "indel1"]
+    assert variants["qual"].to_list() == [30.0, 40.0]
+    np.testing.assert_array_equal(
+        G,
+        np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
 
 
 def test_biallelic_filter_matches_fixture_reference_results(tmp_path):

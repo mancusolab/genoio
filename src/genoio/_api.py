@@ -170,6 +170,8 @@ class Dataset:
             "samples": None if samples is None else list(samples),
             "variants": validated_options.variant_filter_ir,
             "variant_window": variant_window,
+            "return_samples": return_samples,
+            "return_variants": return_variants,
         }
         if validated_options.sparse_format is None:
             rust_result = (
@@ -198,8 +200,8 @@ class Dataset:
                 dtype=validated_options.dtype,
                 sparse_format=validated_options.sparse_format,
             )
-        sample_metadata = samples_frame(rust_result["samples"])
-        variant_metadata = variants_frame(rust_result["variants"])
+        sample_metadata = samples_frame(rust_result["samples"]) if return_samples else None
+        variant_metadata = variants_frame(rust_result["variants"]) if return_variants else None
         return read_result_tuple(
             genotype_matrix,
             sample_metadata,

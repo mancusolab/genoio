@@ -100,6 +100,7 @@ fn vcf_dense_contract_validates_shape_and_metadata_lengths() {
         source_a0: "A".to_string(),
         source_a1: "G".to_string(),
         flipped: false,
+        qual: None,
         af: None,
         maf: None,
         mac: None,

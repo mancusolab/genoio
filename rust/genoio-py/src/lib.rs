@@ -49,6 +49,8 @@ fn read_dense(
     let requested_samples = samples_option(options)?;
     let variant_filter = variants_option(options)?;
     let variant_window = variant_window_option(options)?;
+    let return_samples = bool_option(options, "return_samples")?;
+    let return_variants = bool_option(options, "return_variants")?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
@@ -81,7 +83,7 @@ fn read_dense(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    dense_to_py(py, output)
+    dense_to_py(py, output, return_samples, return_variants)
 }
 
 #[pyfunction]
@@ -94,6 +96,8 @@ fn read_sparse(
     let requested_samples = samples_option(options)?;
     let variant_filter = variants_option(options)?;
     let variant_window = variant_window_option(options)?;
+    let return_samples = bool_option(options, "return_samples")?;
+    let return_variants = bool_option(options, "return_variants")?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
@@ -126,7 +130,7 @@ fn read_sparse(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    sparse_to_py(py, output)
+    sparse_to_py(py, output, return_samples, return_variants)
 }
 
 #[pyfunction]
@@ -139,6 +143,8 @@ fn read_haplotypes_dense(
     let requested_samples = samples_option(options)?;
     let variant_filter = variants_option(options)?;
     let variant_window = variant_window_option(options)?;
+    let return_samples = bool_option(options, "return_samples")?;
+    let return_variants = bool_option(options, "return_variants")?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
@@ -158,7 +164,7 @@ fn read_haplotypes_dense(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    dense_to_py(py, output)
+    dense_to_py(py, output, return_samples, return_variants)
 }
 
 #[pyfunction]
@@ -171,6 +177,8 @@ fn read_haplotypes_sparse(
     let requested_samples = samples_option(options)?;
     let variant_filter = variants_option(options)?;
     let variant_window = variant_window_option(options)?;
+    let return_samples = bool_option(options, "return_samples")?;
+    let return_variants = bool_option(options, "return_variants")?;
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
@@ -190,7 +198,7 @@ fn read_haplotypes_sparse(
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-    sparse_to_py(py, output)
+    sparse_to_py(py, output, return_samples, return_variants)
 }
 
 #[pymodule]
@@ -255,6 +263,16 @@ fn variant_window_option(
     Ok(Some(genoio_core::VariantWindow { start, len }))
 }
 
+fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
+    let Some(value) = options.get_item(key)? else {
+        return Ok(false);
+    };
+    if value.is_none() {
+        return Ok(false);
+    }
+    value.extract::<bool>()
+}
+
 fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     let samples = PyList::empty(py);
@@ -284,6 +302,7 @@ fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResu
         variant_dict.set_item("source_a0", variant.source_a0)?;
         variant_dict.set_item("source_a1", variant.source_a1)?;
         variant_dict.set_item("flipped", variant.flipped)?;
+        variant_dict.set_item("qual", variant.qual)?;
         variant_dict.set_item("af", variant.af)?;
         variant_dict.set_item("maf", variant.maf)?;
         variant_dict.set_item("mac", variant.mac)?;
@@ -303,13 +322,22 @@ fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResu
     Ok(dict.unbind())
 }
 
-fn dense_to_py(py: Python<'_>, output: genoio_core::DenseGenotypeMatrix) -> PyResult<Py<PyDict>> {
+fn dense_to_py(
+    py: Python<'_>,
+    output: genoio_core::DenseGenotypeMatrix,
+    return_samples: bool,
+    return_variants: bool,
+) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("values", output.values)?;
     dict.set_item("shape", (output.n_samples, output.n_variants))?;
     dict.set_item("missing_mask", output.missing_mask)?;
-    dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
-    dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+    if return_samples {
+        dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
+    }
+    if return_variants {
+        dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+    }
 
     let diagnostics = PyDict::new(py);
     diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
@@ -330,14 +358,23 @@ fn dense_to_py(py: Python<'_>, output: genoio_core::DenseGenotypeMatrix) -> PyRe
     Ok(dict.unbind())
 }
 
-fn sparse_to_py(py: Python<'_>, output: genoio_core::SparseGenotypeMatrix) -> PyResult<Py<PyDict>> {
+fn sparse_to_py(
+    py: Python<'_>,
+    output: genoio_core::SparseGenotypeMatrix,
+    return_samples: bool,
+    return_variants: bool,
+) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("indptr", output.indptr)?;
     dict.set_item("indices", output.indices)?;
     dict.set_item("data", output.data)?;
     dict.set_item("shape", (output.n_rows, output.n_cols))?;
-    dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
-    dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+    if return_samples {
+        dict.set_item("samples", sample_records_to_py(py, output.samples)?)?;
+    }
+    if return_variants {
+        dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+    }
 
     let diagnostics = PyDict::new(py);
     diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
@@ -395,6 +432,7 @@ fn variant_records_to_py(
         variant_dict.set_item("source_a0", variant.source_a0)?;
         variant_dict.set_item("source_a1", variant.source_a1)?;
         variant_dict.set_item("flipped", variant.flipped)?;
+        variant_dict.set_item("qual", variant.qual)?;
         variant_dict.set_item("af", variant.af)?;
         variant_dict.set_item("maf", variant.maf)?;
         variant_dict.set_item("mac", variant.mac)?;

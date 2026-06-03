@@ -10,6 +10,7 @@ fn variant(id: &str, chrom: &str, pos: u32, a0: &str, a1: &str) -> genoio_core::
         source_a0: a0.to_string(),
         source_a1: a1.to_string(),
         flipped: false,
+        qual: None,
         af: None,
         maf: None,
         mac: None,
@@ -85,6 +86,30 @@ fn genotype_predicates_are_not_used_as_metadata_drop_decisions() {
         filter.metadata_decision(&variant("rs2", "2", 20, "C", "T")),
         Some(false)
     );
+}
+
+#[test]
+fn qual_predicate_uses_metadata_drop_decisions() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "qual",
+        "params": {"min": 20.0, "max": 40.0}
+    }))
+    .expect("filter IR should deserialize");
+
+    let mut low = variant("low", "1", 10, "A", "G");
+    low.qual = Some(10.0);
+    assert_eq!(filter.metadata_decision(&low), Some(false));
+    assert!(!filter.evaluate(&low, None));
+
+    let mut retained = variant("retained", "1", 20, "A", "G");
+    retained.qual = Some(30.0);
+    assert_eq!(filter.metadata_decision(&retained), Some(true));
+    assert!(filter.evaluate(&retained, None));
+
+    let missing = variant("missing", "1", 30, "A", "G");
+    assert_eq!(filter.metadata_decision(&missing), Some(false));
+    assert!(!filter.evaluate(&missing, None));
 }
 
 #[test]

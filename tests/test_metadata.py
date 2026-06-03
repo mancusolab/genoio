@@ -31,6 +31,7 @@ def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
         "source_a0",
         "source_a1",
         "flipped",
+        "qual",
         "af",
         "maf",
         "mac",
@@ -43,6 +44,7 @@ def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
         ("2", 30, "indel1", "AT", "A", "AT", "A"),
     ]
     assert variants["flipped"].to_list() == [False, False, False]
+    assert variants["qual"].to_list() == [None, None, None]
     assert variants["af"].to_list() == [None, None, None]
 
 

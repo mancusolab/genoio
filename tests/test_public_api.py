@@ -78,6 +78,36 @@ def test_dataset_read_recognizes_sparse_options_and_validates_missing_policy(tmp
         dataset.read(sparse="csc", missing="nan")
 
 
+def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_path):
+    import genoio
+    import genoio._api as api
+
+    source_path = tmp_path / "cohort.vcf"
+    source_path.touch()
+    dataset = genoio.open(source_path)
+
+    def fake_read_dense(format, members, options):
+        assert options["return_samples"] is False
+        assert options["return_variants"] is False
+        return {
+            "values": [0.0, 1.0],
+            "shape": (1, 2),
+            "missing_mask": [False, False],
+            "diagnostics": {},
+        }
+
+    def fail_frame_assembly(records):
+        raise AssertionError("metadata frames should not be assembled for matrix-only reads")
+
+    monkeypatch.setattr(api._rust, "read_dense", fake_read_dense)
+    monkeypatch.setattr(api, "samples_frame", fail_frame_assembly)
+    monkeypatch.setattr(api, "variants_frame", fail_frame_assembly)
+
+    observed = dataset.read()
+
+    np.testing.assert_array_equal(observed, np.array([[0.0, 1.0]], dtype=np.float32))
+
+
 def test_sparse_default_missing_signature_is_readable():
     import genoio
 
