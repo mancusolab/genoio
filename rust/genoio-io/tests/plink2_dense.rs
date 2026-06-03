@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use genoio_core::VariantWindow;
+
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -192,6 +194,89 @@ S4
             false, false, false, true, false, false, false, false,
         ]
     );
+}
+
+#[test]
+fn plink2_dense_window_does_not_parse_pvar_records_after_window() {
+    let dir = unique_dir("plink2-window-pvar-prefix");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11], 3, 2);
+    let pgen = dir.join("tiny.pgen");
+    let pvar = dir.join("tiny.pvar");
+    let psam = dir.join("tiny.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 bad rs2 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+
+    let dense = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("first window should not parse later pvar records");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(dense.values, vec![0.0, 0.0, 2.0]);
+}
+
+#[test]
+fn plink2_dense_window_does_not_validate_variable_records_after_window() {
+    let dir = unique_dir("plink2-window-pgen-prefix");
+    let pgen_bytes = variable_width_pgen(&[0, 5], &[&[0xe4], &[0]], 4);
+    let pgen = dir.join("variable.pgen");
+    let pvar = dir.join("variable.pvar");
+    let psam = dir.join("variable.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    );
+
+    let dense = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("first window should not validate later pgen records");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
 }
 
 #[test]

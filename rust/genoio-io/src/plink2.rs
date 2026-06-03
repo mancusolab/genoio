@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use genoio_core::{
@@ -72,6 +72,10 @@ pub fn read_plink2_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    if let (None, Some(window)) = (variant_filter, variant_window) {
+        return read_plink2_dense_source_window(pgen, pvar, psam, requested_samples, window);
+    }
+
     let header = read_supported_pgen_header(pgen)?;
     let all_samples = parse_psam(psam)?;
     let source_variants = parse_pvar(pvar)?;
@@ -196,6 +200,10 @@ pub fn read_plink2_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    if let (None, Some(window)) = (variant_filter, variant_window) {
+        return read_plink2_sparse_source_window(pgen, pvar, psam, requested_samples, window);
+    }
+
     let header = read_supported_pgen_header(pgen)?;
     let all_samples = parse_psam(psam)?;
     let source_variants = parse_pvar(pvar)?;
@@ -300,6 +308,175 @@ pub fn read_plink2_sparse_windowed(
     )
 }
 
+fn read_plink2_dense_source_window(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    window: VariantWindow,
+) -> Result<DenseGenotypeMatrix> {
+    let decode_variant_ct = window.start.saturating_add(window.len);
+    let header = read_supported_pgen_header_prefix(pgen, decode_variant_ct)?;
+    let all_samples = parse_psam(psam)?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let mut diagnostics = selection.diagnostics;
+    let window_variants = parse_pvar_source_window(pvar, window)?;
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState {
+        previous_non_ld_categories: None,
+    };
+
+    let mut variants = Vec::new();
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * window_variants.len());
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * window_variants.len());
+
+    match header.layout {
+        PgenLayout::FixedWidth => {
+            for (variant_index, variant) in window_variants {
+                let (current_values, current_missing) = read_plink2_variant_values(
+                    pgen,
+                    &mut file,
+                    &header,
+                    variant_index,
+                    &selection.source_indices,
+                    &mut decoder_state,
+                )?;
+                variants.push(variant);
+                variant_major_values.extend(current_values);
+                variant_major_missing.extend(current_missing);
+            }
+        }
+        PgenLayout::VariableWidth => {
+            let mut window_iter = window_variants.into_iter().peekable();
+            let prefix_end = header.record_types.len();
+            for variant_index in 0..prefix_end {
+                let (current_values, current_missing) = read_plink2_variant_values(
+                    pgen,
+                    &mut file,
+                    &header,
+                    variant_index,
+                    &selection.source_indices,
+                    &mut decoder_state,
+                )?;
+                if window_iter
+                    .peek()
+                    .is_some_and(|(source_index, _)| *source_index == variant_index)
+                {
+                    let (_, variant) = window_iter.next().expect("peeked variant should exist");
+                    variants.push(variant);
+                    variant_major_values.extend(current_values);
+                    variant_major_missing.extend(current_missing);
+                }
+            }
+        }
+    }
+
+    let n_samples = selection.samples.len();
+    let n_variants = variants.len();
+    diagnostics.candidate_variants = n_variants;
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+fn read_plink2_sparse_source_window(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    window: VariantWindow,
+) -> Result<SparseGenotypeMatrix> {
+    let decode_variant_ct = window.start.saturating_add(window.len);
+    let header = read_supported_pgen_header_prefix(pgen, decode_variant_ct)?;
+    let all_samples = parse_psam(psam)?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let mut diagnostics = selection.diagnostics;
+    let window_variants = parse_pvar_source_window(pvar, window)?;
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState {
+        previous_non_ld_categories: None,
+    };
+
+    let n_samples = selection.samples.len();
+    let mut indptr = vec![0];
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    let mut variants = Vec::new();
+
+    match header.layout {
+        PgenLayout::FixedWidth => {
+            for (variant_index, mut variant) in window_variants {
+                let (mut current_values, current_missing) = read_plink2_variant_values(
+                    pgen,
+                    &mut file,
+                    &header,
+                    variant_index,
+                    &selection.source_indices,
+                    &mut decoder_state,
+                )?;
+                reject_sparse_missing_values(&current_missing)?;
+                flip_values_to_minor_allele(&mut current_values, &mut variant);
+                append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+                variants.push(variant);
+            }
+        }
+        PgenLayout::VariableWidth => {
+            let mut window_iter = window_variants.into_iter().peekable();
+            let prefix_end = header.record_types.len();
+            for variant_index in 0..prefix_end {
+                let (mut current_values, current_missing) = read_plink2_variant_values(
+                    pgen,
+                    &mut file,
+                    &header,
+                    variant_index,
+                    &selection.source_indices,
+                    &mut decoder_state,
+                )?;
+                if window_iter
+                    .peek()
+                    .is_some_and(|(source_index, _)| *source_index == variant_index)
+                {
+                    let (_, mut variant) = window_iter.next().expect("peeked variant should exist");
+                    reject_sparse_missing_values(&current_missing)?;
+                    flip_values_to_minor_allele(&mut current_values, &mut variant);
+                    append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+                    variants.push(variant);
+                }
+            }
+        }
+    }
+
+    let n_variants = variants.len();
+    diagnostics.candidate_variants = n_variants;
+    diagnostics.retained_variants = n_variants;
+    SparseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        indptr,
+        indices,
+        data,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
 fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
     let mut file = File::open(path).map_err(|source| MetadataError::Io {
         path: path.to_path_buf(),
@@ -340,6 +517,73 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
         PGEN_MODE_VARIABLE_WIDTH => {
             let (record_types, record_offsets) =
                 read_variable_width_header_body(path, &mut file, variant_ct, header[11])?;
+            Ok(PgenHeader {
+                layout: PgenLayout::VariableWidth,
+                variant_ct,
+                sample_ct,
+                bytes_per_variant,
+                record_types,
+                record_offsets,
+            })
+        }
+        mode => Err(MetadataError::parse(
+            path,
+            format!(
+                "unsupported pgen mode 0x{mode:02x}; only fixed-width and variable-width biallelic hardcalls are supported"
+            ),
+        )),
+    }
+}
+
+fn read_supported_pgen_header_prefix(
+    path: &Path,
+    requested_variant_ct: usize,
+) -> Result<PgenHeader> {
+    let mut file = File::open(path).map_err(|source| MetadataError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut header = [0_u8; PGEN_HEADER_LEN as usize];
+    file.read_exact(&mut header)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if header[0..2] != PGEN_MAGIC {
+        return Err(MetadataError::parse(path, "invalid pgen magic bytes"));
+    }
+    let variant_ct = usize::try_from(u32::from_le_bytes(header[3..7].try_into().unwrap()))
+        .map_err(|_| MetadataError::parse(path, "pgen variant count is out of range"))?;
+    let sample_ct = usize::try_from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
+        .map_err(|_| MetadataError::parse(path, "pgen sample count is out of range"))?;
+    let bytes_per_variant = sample_ct.div_ceil(4);
+    let prefix_variant_ct = requested_variant_ct.min(variant_ct);
+    match header[2] {
+        PGEN_MODE_FIXED_WIDTH_HARDCALLS => {
+            if header[11] != 0 {
+                return Err(MetadataError::parse(
+                    path,
+                    "unsupported pgen header flags; only fixed-width biallelic hardcalls without header extensions are supported",
+                ));
+            }
+            validate_fixed_width_pgen_payload_len(path, &file, variant_ct, bytes_per_variant)?;
+            Ok(PgenHeader {
+                layout: PgenLayout::FixedWidth,
+                variant_ct,
+                sample_ct,
+                bytes_per_variant,
+                record_types: Vec::new(),
+                record_offsets: Vec::new(),
+            })
+        }
+        PGEN_MODE_VARIABLE_WIDTH => {
+            let (record_types, record_offsets) = read_variable_width_header_body_prefix(
+                path,
+                &mut file,
+                variant_ct,
+                header[11],
+                prefix_variant_ct,
+            )?;
             Ok(PgenHeader {
                 layout: PgenLayout::VariableWidth,
                 variant_ct,
@@ -497,6 +741,143 @@ fn read_variable_width_header_body(
     Ok((record_types, record_offsets))
 }
 
+fn read_variable_width_header_body_prefix(
+    path: &Path,
+    file: &mut File,
+    variant_ct: usize,
+    header_format: u8,
+    prefix_variant_ct: usize,
+) -> Result<(Vec<u8>, Vec<u64>)> {
+    let type_length_format = header_format & 0x0f;
+    let type_width_bits = match type_length_format {
+        0..=3 => 4,
+        4..=7 => 8,
+        other => {
+            return Err(MetadataError::parse(
+                path,
+                format!("unsupported pgen variant-record type/length format {other}"),
+            ));
+        }
+    };
+    let length_width = usize::from((type_length_format & 0x03) + 1);
+    let allele_count_format = (header_format >> 4) & 0x03;
+    if allele_count_format != 0 {
+        return Err(MetadataError::parse(
+            path,
+            "unsupported pgen allele-count table; multiallelic PGEN decode is not implemented",
+        ));
+    }
+
+    let block_ct = variant_ct.div_ceil(PGEN_VARIANT_BLOCK_SIZE);
+    let mut block_offsets = Vec::with_capacity(block_ct);
+    for _ in 0..block_ct {
+        let mut bytes = [0_u8; 8];
+        file.read_exact(&mut bytes)
+            .map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        block_offsets.push(u64::from_le_bytes(bytes));
+    }
+
+    let prefix_block_ct = prefix_variant_ct.div_ceil(PGEN_VARIANT_BLOCK_SIZE);
+    let mut record_types = Vec::with_capacity(prefix_variant_ct);
+    let mut record_offsets = Vec::with_capacity(prefix_variant_ct.saturating_add(1));
+    for (block_index, block_offset) in block_offsets
+        .iter()
+        .take(prefix_block_ct)
+        .copied()
+        .enumerate()
+    {
+        let block_variant_ct = block_variant_count(variant_ct, block_index);
+        let block_start = block_index * PGEN_VARIANT_BLOCK_SIZE;
+        let needed_in_block = prefix_variant_ct
+            .saturating_sub(block_start)
+            .min(block_variant_ct);
+        read_variable_record_type_prefix(
+            path,
+            file,
+            type_width_bits,
+            block_variant_ct,
+            needed_in_block,
+            &mut record_types,
+        )?;
+        if record_offsets.is_empty() {
+            record_offsets.push(block_offset);
+        }
+        let mut offset = block_offset;
+        for _ in 0..needed_in_block {
+            let mut bytes = [0_u8; 4];
+            file.read_exact(&mut bytes[..length_width])
+                .map_err(|source| MetadataError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            offset = offset
+                .checked_add(u64::from(u32::from_le_bytes(bytes)))
+                .ok_or_else(|| MetadataError::parse(path, "pgen record offset is out of range"))?;
+            record_offsets.push(offset);
+        }
+        let remaining_lengths = block_variant_ct - needed_in_block;
+        skip_bytes(path, file, remaining_lengths * length_width)?;
+    }
+    for record_type in &record_types {
+        validate_supported_variable_record_type(path, *record_type)?;
+    }
+    Ok((record_types, record_offsets))
+}
+
+fn read_variable_record_type_prefix(
+    path: &Path,
+    file: &mut File,
+    type_width_bits: usize,
+    block_variant_ct: usize,
+    needed_in_block: usize,
+    record_types: &mut Vec<u8>,
+) -> Result<()> {
+    if type_width_bits == 8 {
+        let mut types = vec![0_u8; needed_in_block];
+        file.read_exact(&mut types)
+            .map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        record_types.extend(types);
+        skip_bytes(path, file, block_variant_ct - needed_in_block)?;
+        return Ok(());
+    }
+
+    let packed_needed = needed_in_block.div_ceil(2);
+    let mut packed_types = vec![0_u8; packed_needed];
+    file.read_exact(&mut packed_types)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    for variant_in_block in 0..needed_in_block {
+        let byte = packed_types[variant_in_block / 2];
+        let record_type = if variant_in_block % 2 == 0 {
+            byte & 0x0f
+        } else {
+            byte >> 4
+        };
+        record_types.push(record_type);
+    }
+    skip_bytes(path, file, block_variant_ct.div_ceil(2) - packed_needed)?;
+    Ok(())
+}
+
+fn skip_bytes(path: &Path, file: &mut File, len: usize) -> Result<()> {
+    let offset =
+        i64::try_from(len).map_err(|_| MetadataError::parse(path, "pgen skip is out of range"))?;
+    file.seek(SeekFrom::Current(offset))
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
 fn block_variant_count(variant_ct: usize, block_index: usize) -> usize {
     let block_start = block_index * PGEN_VARIANT_BLOCK_SIZE;
     (variant_ct - block_start).min(PGEN_VARIANT_BLOCK_SIZE)
@@ -564,21 +945,26 @@ fn validate_plink2_dimensions(
     sample_ct: usize,
     variant_ct: usize,
 ) -> Result<()> {
-    if header.sample_ct != sample_ct {
-        return Err(MetadataError::parse(
-            path,
-            format!(
-                "pgen sample count {} does not match psam sample count {sample_ct}",
-                header.sample_ct
-            ),
-        ));
-    }
+    validate_plink2_sample_count(path, header, sample_ct)?;
     if header.variant_ct != variant_ct {
         return Err(MetadataError::parse(
             path,
             format!(
                 "pgen variant count {} does not match pvar variant count {variant_ct}",
                 header.variant_ct
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plink2_sample_count(path: &Path, header: &PgenHeader, sample_ct: usize) -> Result<()> {
+    if header.sample_ct != sample_ct {
+        return Err(MetadataError::parse(
+            path,
+            format!(
+                "pgen sample count {} does not match psam sample count {sample_ct}",
+                header.sample_ct
             ),
         ));
     }
@@ -1114,6 +1500,58 @@ fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
         .skip(body_start)
         .map(|(index, line)| parse_pvar_line(path, index + 1, &columns, line))
         .collect()
+}
+
+fn parse_pvar_source_window(
+    path: &Path,
+    window: VariantWindow,
+) -> Result<Vec<(usize, VariantRecord)>> {
+    let file = File::open(path).map_err(|source| MetadataError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let reader = BufReader::new(file);
+    let mut columns = None;
+    let mut body_started = false;
+    let mut source_index = 0_usize;
+    let window_end = window.start.saturating_add(window.len);
+    let mut records = Vec::with_capacity(window.len);
+
+    for (line_index, line_result) in reader.lines().enumerate() {
+        let line = line_result.map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("##") {
+            continue;
+        }
+        if trimmed.starts_with("#CHROM") {
+            columns = Some(parse_pvar_header(trimmed)?);
+            body_started = true;
+            continue;
+        }
+        if !body_started {
+            let (inferred, _) = infer_pvar_header(path, Some(trimmed))?;
+            columns = Some(inferred);
+            body_started = true;
+        }
+        if source_index >= window_end {
+            break;
+        }
+        if source_index >= window.start {
+            let columns = columns
+                .as_ref()
+                .expect("pvar columns should be initialized before parsing body rows");
+            records.push((
+                source_index,
+                parse_pvar_line(path, line_index + 1, columns, trimmed)?,
+            ));
+        }
+        source_index += 1;
+    }
+
+    Ok(records)
 }
 
 #[derive(Debug, Clone, Copy)]
