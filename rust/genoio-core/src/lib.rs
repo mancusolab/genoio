@@ -20,8 +20,8 @@ pub use dense::{
 };
 pub use error::MetadataError;
 pub use filter::{
-    attach_variant_stats, compute_variant_stats, PartialFilterDecision, RegionPredicate,
-    VariantFilter, VariantStats, VariantWindow,
+    attach_variant_stats, compute_variant_stats, variant_stats_from_counts, PartialFilterDecision,
+    RegionPredicate, VariantFilter, VariantStats, VariantWindow,
 };
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 pub use sparse::{

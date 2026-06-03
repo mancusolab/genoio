@@ -1,9 +1,13 @@
+# pattern: Imperative Shell
+
 import json
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
+
+from test_dense_read import write_fixed_width_plink2
 
 
 def write_filter_vcf(tmp_path: Path) -> Path:
@@ -174,6 +178,27 @@ def test_mac_filter_matches_called_genotype_reference_results(tmp_path):
     assert variants["mac"].to_list() == [1]
     assert variants["n_called"].to_list() == [3]
     np.testing.assert_array_equal(G, np.array([[1.0], [0.0], [0.0]], dtype=np.float32))
+
+
+def test_plink2_genotype_filters_attach_public_stats(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    G, variants = dataset.read(
+        variants=genoio.maf(min=0.2) & genoio.missing_rate(0.5),
+        return_variants=True,
+    )
+
+    assert variants["id"].to_list() == ["rs1", "rs2", "rs3"]
+    assert variants["maf"].to_list() == [0.5, pytest.approx(1.0 / 3.0), 0.5]
+    assert variants["mac"].to_list() == [2, 2, 3]
+    assert variants["missing_rate"].to_list() == [pytest.approx(1.0 / 3.0), 0.0, 0.0]
+    assert variants["n_called"].to_list() == [2, 3, 3]
+    np.testing.assert_array_equal(
+        G,
+        np.array([[0.0, 1.0, 2.0], [np.nan, 0.0, 1.0], [2.0, 1.0, 0.0]], dtype=np.float32),
+    )
 
 
 def test_polymorphic_filter_matches_called_genotype_reference_results(tmp_path):

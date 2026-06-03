@@ -5,11 +5,11 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
+    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
-    VariantRecord, VariantWindow,
+    transpose_variant_major_to_sample_major, variant_stats_from_counts, DenseGenotypeMatrix,
+    MetadataError, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -117,6 +117,29 @@ impl PackedGenotypes {
             values.push(value);
             missing.push(is_missing);
         }
+    }
+
+    fn stats_for_selected(&self, source_indices: &[usize]) -> Result<genoio_core::VariantStats> {
+        let mut hom_ref_count = 0_u64;
+        let mut het_count = 0_u64;
+        let mut hom_alt_count = 0_u64;
+        let mut missing_count = 0_u64;
+        for source_index in source_indices {
+            if *source_index >= self.sample_ct {
+                return Err(MetadataError::parse(
+                    "<plink2>",
+                    "selected sample index is outside pgen sample count",
+                ));
+            }
+            match self.get(*source_index) {
+                0 => hom_ref_count += 1,
+                1 => het_count += 1,
+                2 => hom_alt_count += 1,
+                3 => missing_count += 1,
+                _ => unreachable!("two-bit PGEN code should be masked"),
+            }
+        }
+        variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
     }
 
     fn mask_unused_slots(&mut self) {
@@ -336,17 +359,16 @@ pub fn read_plink2_dense_windowed(
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
-        let mut decoded_values = false;
+        let mut decoded_packed = false;
         if requires_sequential_decode {
-            read_plink2_variant_values(
+            read_plink2_variant_packed(
                 pgen,
                 &mut file,
                 &header,
                 variant_index,
-                &selection.source_indices,
                 &mut decoder_state,
             )?;
-            decoded_values = true;
+            decoded_packed = true;
         }
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
@@ -370,21 +392,21 @@ pub fn read_plink2_dense_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
-        if !decoded_values {
-            read_plink2_variant_values(
+        if !decoded_packed {
+            read_plink2_variant_packed(
                 pgen,
                 &mut file,
                 &header,
                 variant_index,
-                &selection.source_indices,
                 &mut decoder_state,
             )?;
         }
         let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(
-                &decoder_state.values,
-                &decoder_state.missing,
-            )?)
+            Some(
+                decoder_state
+                    .packed
+                    .stats_for_selected(&selection.source_indices)?,
+            )
         } else {
             None
         };
@@ -405,6 +427,11 @@ pub fn read_plink2_dense_windowed(
                 continue;
             }
         }
+        decoder_state.packed.expand_selected(
+            &selection.source_indices,
+            &mut decoder_state.values,
+            &mut decoder_state.missing,
+        );
         variants.push(variant);
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
@@ -473,17 +500,16 @@ pub fn read_plink2_sparse_windowed(
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
-        let mut decoded_values = false;
+        let mut decoded_packed = false;
         if requires_sequential_decode {
-            read_plink2_variant_values(
+            read_plink2_variant_packed(
                 pgen,
                 &mut file,
                 &header,
                 variant_index,
-                &selection.source_indices,
                 &mut decoder_state,
             )?;
-            decoded_values = true;
+            decoded_packed = true;
         }
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
@@ -507,21 +533,21 @@ pub fn read_plink2_sparse_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
-        if !decoded_values {
-            read_plink2_variant_values(
+        if !decoded_packed {
+            read_plink2_variant_packed(
                 pgen,
                 &mut file,
                 &header,
                 variant_index,
-                &selection.source_indices,
                 &mut decoder_state,
             )?;
         }
         let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(
-                &decoder_state.values,
-                &decoder_state.missing,
-            )?)
+            Some(
+                decoder_state
+                    .packed
+                    .stats_for_selected(&selection.source_indices)?,
+            )
         } else {
             None
         };
@@ -542,6 +568,11 @@ pub fn read_plink2_sparse_windowed(
                 continue;
             }
         }
+        decoder_state.packed.expand_selected(
+            &selection.source_indices,
+            &mut decoder_state.values,
+            &mut decoder_state.missing,
+        );
         reject_sparse_missing_values(&decoder_state.missing)?;
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
@@ -1943,6 +1974,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 3, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn packed_genotypes_stats_for_selected_matches_expanded_stats() {
+        let mut packed = PackedGenotypes::default();
+        packed.resize(8);
+        for (sample_index, category) in [0, 1, 2, 3, 2, 0, 1, 3].into_iter().enumerate() {
+            packed.set(sample_index, category);
+        }
+
+        for source_indices in [&[0, 1, 2, 3, 4, 5, 6, 7][..], &[7, 3][..], &[][..]] {
+            let mut values = Vec::new();
+            let mut missing = Vec::new();
+            packed.expand_selected(source_indices, &mut values, &mut missing);
+
+            let expected = genoio_core::compute_variant_stats(&values, &missing)
+                .expect("expanded stats should compute");
+            let actual = packed
+                .stats_for_selected(source_indices)
+                .expect("packed stats should compute");
+
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

@@ -373,24 +373,55 @@ pub fn compute_variant_stats(
         ));
     }
 
-    let mut allele_count = 0_u64;
-    let mut n_called = 0_u64;
+    let mut hom_ref_count = 0_u64;
+    let mut het_count = 0_u64;
+    let mut hom_alt_count = 0_u64;
+    let mut missing_count = 0_u64;
     for (value, missing) in values.iter().zip(missing_mask) {
         if *missing {
+            missing_count += 1;
             continue;
         }
-        allele_count += discrete_allele_count(*value)?;
-        n_called += 1;
+        match discrete_allele_count(*value)? {
+            0 => hom_ref_count += 1,
+            1 => het_count += 1,
+            2 => hom_alt_count += 1,
+            _ => unreachable!("discrete allele count is bounded by validation"),
+        }
     }
-    let n_called = u32::try_from(n_called).map_err(|_| {
+
+    variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
+}
+
+/// Compute variant statistics from hard-call category counts.
+pub fn variant_stats_from_counts(
+    hom_ref_count: u64,
+    het_count: u64,
+    hom_alt_count: u64,
+    missing_count: u64,
+) -> Result<VariantStats, MetadataError> {
+    let called_count = hom_ref_count
+        .checked_add(het_count)
+        .and_then(|count| count.checked_add(hom_alt_count))
+        .ok_or_else(|| {
+            MetadataError::parse(
+                "<filter>",
+                "called genotype count exceeds supported metadata range",
+            )
+        })?;
+    let total = called_count.checked_add(missing_count).ok_or_else(|| {
+        MetadataError::parse(
+            "<filter>",
+            "genotype count exceeds supported metadata range",
+        )
+    })?;
+    let n_called = u32::try_from(called_count).map_err(|_| {
         MetadataError::parse(
             "<filter>",
             "called genotype count exceeds supported metadata range",
         )
     })?;
 
-    let total = values.len();
-    let missing_count = total - usize::try_from(n_called).unwrap_or(usize::MAX);
     let missing_rate = if total == 0 {
         0.0
     } else {
@@ -407,6 +438,13 @@ pub fn compute_variant_stats(
         });
     }
 
+    let allele_count = het_count
+        .checked_add(hom_alt_count.checked_mul(2).ok_or_else(|| {
+            MetadataError::parse("<filter>", "allele count exceeds supported metadata range")
+        })?)
+        .ok_or_else(|| {
+            MetadataError::parse("<filter>", "allele count exceeds supported metadata range")
+        })?;
     let called_alleles = 2_u64 * u64::from(n_called);
     let af = allele_count as f64 / called_alleles as f64;
     let maf = af.min(1.0 - af);
