@@ -487,7 +487,12 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
         }
         let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         reject_sparse_missing_values(&decoded.haplotype_missing)?;
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoded.haplotype_values);
+        append_sparse_column(
+            &mut indptr,
+            &mut indices,
+            &mut data,
+            &decoded.haplotype_values,
+        );
         variants.push(variant);
     }
 
@@ -914,7 +919,10 @@ fn decode_phased_diploid_gt(
     Ok((values, missing))
 }
 
-fn haplotype_sample_records(samples: &[SampleRecord], source_indices: &[usize]) -> Vec<SampleRecord> {
+fn haplotype_sample_records(
+    samples: &[SampleRecord],
+    source_indices: &[usize],
+) -> Vec<SampleRecord> {
     let mut haplotype_samples = Vec::with_capacity(samples.len() * 2);
     for (sample, source_index) in samples.iter().zip(source_indices) {
         for haplotype_index in 0..2 {

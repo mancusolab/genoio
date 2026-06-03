@@ -341,9 +341,7 @@ def _validate_kind(kind: str) -> None:
 
 def _reject_deferred_plink2_decode(source_format: str) -> None:
     if source_format == "plink2":
-        raise UnsupportedFormatError(
-            "PLINK2 decode is deferred pending docs/plink2-parser-strategy.md"
-        )
+        raise UnsupportedFormatError("PLINK2 decode is deferred pending docs/plink2-parser-strategy.md")
 
 
 def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:
@@ -418,11 +416,7 @@ def _normalize_dtype(dtype: Any) -> np.dtype[Any]:
 
 
 def _validate_missing_dtype_compatibility(missing: str, dtype: np.dtype[Any]) -> None:
-    if (
-        isinstance(missing, str)
-        and missing in {"nan", "impute"}
-        and not np.issubdtype(dtype, np.floating)
-    ):
+    if isinstance(missing, str) and missing in {"nan", "impute"} and not np.issubdtype(dtype, np.floating):
         raise InvalidOptionError(f'missing="{missing}" requires a floating dtype')
 
 

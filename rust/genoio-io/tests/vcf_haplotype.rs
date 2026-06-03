@@ -4,10 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn unique_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "genoio-{name}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("genoio-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("test temp dir should be created");
     dir
@@ -92,8 +89,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     fs::write(&path, phased_vcf()).expect("fixture should be written");
     let samples = vec!["S2".to_string()];
 
-    let haplotypes =
-        genoio_io::read_vcf_haplotypes_dense(&path, Some(&samples), None).expect("haplotypes should decode");
+    let haplotypes = genoio_io::read_vcf_haplotypes_dense(&path, Some(&samples), None)
+        .expect("haplotypes should decode");
 
     assert_eq!(haplotypes.n_samples, 2);
     assert_eq!(

@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check src tests
+        language: system
+        pass_filenames: false
+        types_or: [python, pyi]
+
+      - id: ruff-format
+        name: ruff format check
+        entry: ruff format --check src tests
+        language: system
+        pass_filenames: false
+        types_or: [python, pyi]
+
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+        language: system
+        pass_filenames: false
+        types_or: [rust]
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: env CC=clang AR=ar cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        types_or: [rust]

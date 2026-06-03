@@ -129,36 +129,24 @@ def _validate_region(value: str) -> None:
         raise InvalidOptionError(f"invalid region coordinates: {value!r}; expected 1-based start <= end")
 
 
-def _validate_float_range(
-    name: str, *, min: float | None, max: float | None
-) -> tuple[tuple[str, ParamValue], ...]:
+def _validate_float_range(name: str, *, min: float | None, max: float | None) -> tuple[tuple[str, ParamValue], ...]:
     if min is None and max is None:
         raise InvalidOptionError(f"{name} requires at least one threshold")
     min_value = None if min is None else _validate_rate(f"{name} min", min)
     max_value = None if max is None else _validate_rate(f"{name} max", max)
     if min_value is not None and max_value is not None and min_value > max_value:
         raise InvalidOptionError(f"{name} min must be <= max")
-    return tuple(
-        (key, value)
-        for key, value in (("min", min_value), ("max", max_value))
-        if value is not None
-    )
+    return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)
 
 
-def _validate_int_range(
-    name: str, *, min: int | None, max: int | None
-) -> tuple[tuple[str, ParamValue], ...]:
+def _validate_int_range(name: str, *, min: int | None, max: int | None) -> tuple[tuple[str, ParamValue], ...]:
     if min is None and max is None:
         raise InvalidOptionError(f"{name} requires at least one threshold")
     min_value = None if min is None else _validate_nonnegative_int(f"{name} min", min)
     max_value = None if max is None else _validate_nonnegative_int(f"{name} max", max)
     if min_value is not None and max_value is not None and min_value > max_value:
         raise InvalidOptionError(f"{name} min must be <= max")
-    return tuple(
-        (key, value)
-        for key, value in (("min", min_value), ("max", max_value))
-        if value is not None
-    )
+    return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)
 
 
 def _validate_rate(name: str, value: float) -> float:

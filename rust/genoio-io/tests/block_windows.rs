@@ -80,7 +80,14 @@ fn vcf_dense_window_uses_retained_variant_order_after_filters() {
     )
     .expect("windowed vcf should decode");
 
-    assert_eq!(block.variants.iter().map(|variant| variant.id.as_str()).collect::<Vec<_>>(), vec!["rs2", "rs4"]);
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs2", "rs4"]
+    );
     assert_eq!(block.values, vec![1.0, 0.0, 2.0, 0.0]);
 }
 
@@ -105,6 +112,13 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
     )
     .expect("windowed plink should decode");
 
-    assert_eq!(block.variants.iter().map(|variant| variant.id.as_str()).collect::<Vec<_>>(), vec!["rs2", "rs4"]);
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs2", "rs4"]
+    );
     assert_eq!(block.values, vec![0.0, 2.0, 0.0, 2.0]);
 }

@@ -234,7 +234,9 @@ fn variants_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
-fn variant_window_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::VariantWindow>> {
+fn variant_window_option(
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Option<genoio_core::VariantWindow>> {
     let Some(value) = options.get_item("variant_window")? else {
         return Ok(None);
     };

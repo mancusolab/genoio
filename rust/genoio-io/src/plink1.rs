@@ -238,7 +238,7 @@ pub fn read_plink1_sparse_windowed(
 
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    Ok(SparseGenotypeMatrix::new(
+    SparseGenotypeMatrix::new(
         n_samples,
         n_variants,
         indptr,
@@ -247,7 +247,7 @@ pub fn read_plink1_sparse_windowed(
         selection.samples,
         variants,
         diagnostics,
-    )?)
+    )
 }
 
 fn open_bed_file(path: &Path) -> Result<File> {

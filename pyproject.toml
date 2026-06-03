@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "maturin>=1.10,<2",
+    "pre-commit",
     "pytest",
     "ruff",
 ]

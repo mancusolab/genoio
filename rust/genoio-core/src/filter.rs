@@ -276,7 +276,9 @@ impl Predicate {
                 min.is_none_or(|threshold| mac >= threshold)
                     && max.is_none_or(|threshold| mac <= threshold)
             }),
-            Self::MissingRate { max } => stats.is_some_and(|stats| stats.missing_rate <= f64::from(*max)),
+            Self::MissingRate { max } => {
+                stats.is_some_and(|stats| stats.missing_rate <= f64::from(*max))
+            }
             Self::Polymorphic => stats.is_some_and(|stats| stats.polymorphic),
         }
     }

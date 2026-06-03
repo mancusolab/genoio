@@ -15,6 +15,10 @@ pub struct SparseGenotypeMatrix {
 }
 
 impl SparseGenotypeMatrix {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors validated CSC matrix fields"
+    )]
     pub fn new(
         n_rows: usize,
         n_cols: usize,

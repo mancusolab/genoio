@@ -127,7 +127,8 @@ fn genotype_stats_preserve_integer_mac_beyond_f32_exact_range() {
     let values = vec![1.0_f32; n_called];
     let missing = vec![false; n_called];
 
-    let stats = genoio_core::compute_variant_stats(&values, &missing).expect("stats should compute");
+    let stats =
+        genoio_core::compute_variant_stats(&values, &missing).expect("stats should compute");
 
     assert_eq!(stats.n_called, u32::try_from(n_called).unwrap());
     assert_eq!(stats.mac, Some(u32::try_from(n_called).unwrap()));
