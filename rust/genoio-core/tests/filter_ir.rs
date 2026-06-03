@@ -89,6 +89,60 @@ fn genotype_predicates_are_not_used_as_metadata_drop_decisions() {
 }
 
 #[test]
+fn partial_filter_decision_accepts_metadata_true_or_without_genotypes() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "or",
+        "left": {"op": "predicate", "name": "qual", "params": {"min": 20.0}},
+        "right": {"op": "predicate", "name": "maf", "params": {"max": 0.05}}
+    }))
+    .expect("filter IR should deserialize");
+
+    let mut high_qual = variant("high_qual", "1", 10, "A", "G");
+    high_qual.qual = Some(30.0);
+
+    assert_eq!(
+        filter.partial_decision(&high_qual),
+        genoio_core::PartialFilterDecision::Accept
+    );
+}
+
+#[test]
+fn partial_filter_decision_rejects_metadata_false_and_without_genotypes() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "qual", "params": {"min": 20.0}},
+        "right": {"op": "predicate", "name": "maf", "params": {"max": 0.05}}
+    }))
+    .expect("filter IR should deserialize");
+
+    let mut low_qual = variant("low_qual", "1", 10, "A", "G");
+    low_qual.qual = Some(10.0);
+
+    assert_eq!(
+        filter.partial_decision(&low_qual),
+        genoio_core::PartialFilterDecision::Reject
+    );
+}
+
+#[test]
+fn partial_filter_decision_requests_genotypes_when_metadata_cannot_decide() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "or",
+        "left": {"op": "predicate", "name": "qual", "params": {"min": 20.0}},
+        "right": {"op": "predicate", "name": "maf", "params": {"max": 0.05}}
+    }))
+    .expect("filter IR should deserialize");
+
+    let mut low_qual = variant("low_qual", "1", 10, "A", "G");
+    low_qual.qual = Some(10.0);
+
+    assert_eq!(
+        filter.partial_decision(&low_qual),
+        genoio_core::PartialFilterDecision::NeedGenotypes
+    );
+}
+
+#[test]
 fn qual_predicate_uses_metadata_drop_decisions() {
     let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
         "op": "predicate",

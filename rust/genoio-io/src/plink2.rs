@@ -8,8 +8,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
-    VariantWindow,
+    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -113,24 +113,27 @@ pub fn read_plink2_dense_windowed(
         } else {
             None
         };
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         let (current_values, current_missing) = if let Some(decoded_values) = decoded_values.take()
         {
@@ -145,19 +148,21 @@ pub fn read_plink2_dense_windowed(
                 &mut decoder_state,
             )?
         };
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
@@ -247,24 +252,27 @@ pub fn read_plink2_sparse_windowed(
         } else {
             None
         };
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         let (mut current_values, current_missing) =
             if let Some(decoded_values) = decoded_values.take() {
@@ -279,19 +287,21 @@ pub fn read_plink2_sparse_windowed(
                     &mut decoder_state,
                 )?
             };
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;

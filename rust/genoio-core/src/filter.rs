@@ -17,6 +17,17 @@ pub struct VariantFilter {
     expr: Expr,
 }
 
+/// Metadata-only filter decision before genotype values are decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialFilterDecision {
+    /// Metadata proves the variant passes the full expression.
+    Accept,
+    /// Metadata proves the variant fails the full expression.
+    Reject,
+    /// Genotype values and derived statistics are needed to decide.
+    NeedGenotypes,
+}
+
 /// Concrete 1-based inclusive genomic region suitable for reader pushdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionPredicate {
@@ -120,6 +131,14 @@ impl VariantFilter {
         self.expr.metadata_decision(variant)
     }
 
+    /// Partially evaluate the filter using metadata available before GT decode.
+    ///
+    /// This preserves boolean semantics while letting readers avoid genotype
+    /// statistics whenever metadata alone proves an accept or reject decision.
+    pub fn partial_decision(&self, variant: &VariantRecord) -> PartialFilterDecision {
+        self.expr.partial_decision(variant)
+    }
+
     /// Evaluate the complete filter against metadata and optional statistics.
     pub fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
         self.expr.evaluate(variant, stats)
@@ -182,6 +201,14 @@ impl Expr {
                 _ => None,
             },
             Self::Not(expr) => expr.metadata_decision(variant).map(|decision| !decision),
+        }
+    }
+
+    fn partial_decision(&self, variant: &VariantRecord) -> PartialFilterDecision {
+        match self.metadata_decision(variant) {
+            Some(true) => PartialFilterDecision::Accept,
+            Some(false) => PartialFilterDecision::Reject,
+            None => PartialFilterDecision::NeedGenotypes,
         }
     }
 

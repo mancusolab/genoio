@@ -6,8 +6,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
-    VariantRecord, VariantWindow,
+    PartialFilterDecision, RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantRecord, VariantWindow,
 };
 use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
 
@@ -274,27 +274,30 @@ fn read_vcf_dense_records<R: Read>(
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    break;
+                }
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                break;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
         let genotypes = record
@@ -310,19 +313,21 @@ fn read_vcf_dense_records<R: Read>(
             current_missing.push(is_missing);
         }
 
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             if variant_window.is_some_and(|window| window.is_past(retained_index)) {
                 break;
             }
@@ -383,43 +388,48 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    break;
+                }
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                break;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             let decoded = decode_diploid_genotype_record(path, &record, &selection.source_indices)?;
             Some(compute_variant_stats(&decoded.values, &decoded.missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             if variant_window.is_some_and(|window| window.is_past(retained_index)) {
                 break;
             }
@@ -485,40 +495,45 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             let decoded = decode_diploid_genotype_record(path, &record, &selection.source_indices)?;
             Some(compute_variant_stats(&decoded.values, &decoded.missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
@@ -579,24 +594,27 @@ fn read_vcf_sparse_records<R: Read>(
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
         let genotypes = record
@@ -612,19 +630,21 @@ fn read_vcf_sparse_records<R: Read>(
             current_missing.push(is_missing);
         }
 
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;

@@ -49,6 +49,20 @@ fn write_vcf_with_invalid_record_after_first(path: &Path) {
     );
 }
 
+fn write_vcf_with_metadata_accepted_invalid_first_record(path: &Path) {
+    write_text(
+        path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\tmetadata_passes\tA\tG,T\t30\tPASS\t.\tGT\t0/0\t1/2
+1\t20\tstats_pass\tC\tT\t10\tPASS\t.\tGT\t0/1\t1/1
+",
+    );
+}
+
 fn write_plink_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let bed = dir.join("tiny.bed");
     let bim = dir.join("tiny.bim");
@@ -155,6 +169,39 @@ fn vcf_dense_window_uses_retained_variant_order_after_filters() {
         vec!["rs2", "rs4"]
     );
     assert_eq!(block.values, vec![1.0, 0.0, 2.0, 0.0]);
+}
+
+#[test]
+fn vcf_dense_window_skips_pre_window_metadata_accepted_genotypes() {
+    let dir = unique_dir("vcf-partial-filter-window");
+    let path = dir.join("blocks.vcf");
+    write_vcf_with_metadata_accepted_invalid_first_record(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "or",
+        "left": {"op": "predicate", "name": "qual", "params": {"min": 20.0}},
+        "right": {"op": "predicate", "name": "maf", "params": {"min": 0.1}}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_vcf_dense_windowed(
+        &path,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 1, len: 1 }),
+    )
+    .expect("windowed vcf should skip pre-window metadata-accepted genotypes");
+
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stats_pass"]
+    );
+    assert_eq!(block.values, vec![1.0, 2.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 2);
+    assert_eq!(block.diagnostics.retained_variants, 1);
 }
 
 #[test]

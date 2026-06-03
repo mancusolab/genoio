@@ -8,8 +8,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
-    VariantWindow,
+    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -73,24 +73,27 @@ pub fn read_plink1_dense_windowed(
     let mut retained_index = 0_usize;
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         // PLINK1 BED is variant-major and fixed-width, so random access by
         // source variant index is cheap once BIM/FAM metadata has been parsed.
@@ -102,19 +105,21 @@ pub fn read_plink1_dense_windowed(
             &selection.source_indices,
         )?;
 
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
@@ -191,24 +196,27 @@ pub fn read_plink1_sparse_windowed(
     let mut retained_index = 0_usize;
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
-        if variant_filter.and_then(|filter| filter.metadata_decision(&variant)) == Some(false) {
-            diagnostics.dropped_metadata_variants += 1;
-            continue;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
-        let requires_stats = variant_filter.is_some_and(VariantFilter::requires_genotype_stats);
-        if !requires_stats {
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
-        }
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         let (mut current_values, current_missing) = read_plink1_variant_values(
             bed,
@@ -217,19 +225,21 @@ pub fn read_plink1_sparse_windowed(
             bytes_per_variant,
             &selection.source_indices,
         )?;
-        let stats = if requires_stats {
+        let stats = if needs_genotype_decision {
             Some(compute_variant_stats(&current_values, &current_missing)?)
         } else {
             None
         };
-        if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref())) {
+        if needs_genotype_decision
+            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
+        {
             diagnostics.dropped_genotype_variants += 1;
             continue;
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        if requires_stats {
+        if needs_genotype_decision {
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
