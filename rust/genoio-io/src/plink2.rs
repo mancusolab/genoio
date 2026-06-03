@@ -42,7 +42,22 @@ impl PackedGenotypes {
 
     fn resize(&mut self, sample_ct: usize) {
         self.sample_ct = sample_ct;
-        self.words.resize(sample_ct.div_ceil(Self::SAMPLES_PER_WORD), 0);
+        self.words
+            .resize(sample_ct.div_ceil(Self::SAMPLES_PER_WORD), 0);
+        self.mask_unused_slots();
+    }
+
+    fn load_pgen_payload(&mut self, payload: &[u8], sample_ct: usize) {
+        self.resize(sample_ct);
+        for (word_index, word) in self.words.iter_mut().enumerate() {
+            let start = word_index * 8;
+            let end = payload.len().min(start + 8);
+            let mut bytes = [0_u8; 8];
+            if start < end {
+                bytes[..end - start].copy_from_slice(&payload[start..end]);
+            }
+            *word = u64::from_le_bytes(bytes);
+        }
         self.mask_unused_slots();
     }
 
@@ -122,6 +137,7 @@ struct PgenDecoderState {
     has_previous_non_ld: bool,
     record: Vec<u8>,
     categories: Vec<u8>,
+    packed: PackedGenotypes,
     values: Vec<f32>,
     missing: Vec<bool>,
 }
@@ -133,6 +149,7 @@ impl PgenDecoderState {
             has_previous_non_ld: false,
             record: Vec::with_capacity(sample_ct.div_ceil(4)),
             categories: Vec::with_capacity(sample_ct),
+            packed: PackedGenotypes::default(),
             values: Vec::with_capacity(selected_sample_ct),
             missing: Vec::with_capacity(selected_sample_ct),
         }
@@ -495,13 +512,17 @@ fn read_plink2_dense_matrix_only_source_window(
                 seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
             }
             for variant_index in 0..n_variants {
-                read_fixed_width_variant_categories_sequential(
+                read_fixed_width_variant_packed_sequential(
                     pgen,
                     &mut file,
                     &header,
                     &mut decoder_state,
                 )?;
-                fill_plink2_variant_values(&source_indices, &mut decoder_state);
+                decoder_state.packed.expand_selected(
+                    &source_indices,
+                    &mut decoder_state.values,
+                    &mut decoder_state.missing,
+                );
                 append_variant_to_sample_major(
                     &decoder_state.values,
                     &decoder_state.missing,
@@ -582,13 +603,17 @@ fn read_plink2_dense_source_window(
                 window_variants.into_iter().enumerate()
             {
                 debug_assert!(source_variant_index < header.variant_ct);
-                read_fixed_width_variant_categories_sequential(
+                read_fixed_width_variant_packed_sequential(
                     pgen,
                     &mut file,
                     &header,
                     &mut decoder_state,
                 )?;
-                fill_plink2_variant_values(&selection.source_indices, &mut decoder_state);
+                decoder_state.packed.expand_selected(
+                    &selection.source_indices,
+                    &mut decoder_state.values,
+                    &mut decoder_state.missing,
+                );
                 variants.push(variant);
                 append_variant_to_sample_major(
                     &decoder_state.values,
@@ -1261,9 +1286,26 @@ fn read_plink2_variant_values(
     source_indices: &[usize],
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
-    read_plink2_variant_categories(path, file, header, variant_index, decoder_state)?;
-
-    fill_plink2_variant_values(source_indices, decoder_state);
+    match header.layout {
+        PgenLayout::FixedWidth => {
+            read_fixed_width_variant_packed(path, file, header, variant_index, decoder_state)?;
+            decoder_state.packed.expand_selected(
+                source_indices,
+                &mut decoder_state.values,
+                &mut decoder_state.missing,
+            );
+        }
+        PgenLayout::VariableWidth => {
+            read_variable_width_variant_categories(
+                path,
+                file,
+                header,
+                variant_index,
+                decoder_state,
+            )?;
+            fill_plink2_variant_values(source_indices, decoder_state);
+        }
+    }
     Ok(())
 }
 
@@ -1277,24 +1319,7 @@ fn fill_plink2_variant_values(source_indices: &[usize], decoder_state: &mut Pgen
     }
 }
 
-fn read_plink2_variant_categories(
-    path: &Path,
-    file: &mut File,
-    header: &PgenHeader,
-    variant_index: usize,
-    decoder_state: &mut PgenDecoderState,
-) -> Result<()> {
-    match header.layout {
-        PgenLayout::FixedWidth => {
-            read_fixed_width_variant_categories(path, file, header, variant_index, decoder_state)
-        }
-        PgenLayout::VariableWidth => {
-            read_variable_width_variant_categories(path, file, header, variant_index, decoder_state)
-        }
-    }
-}
-
-fn read_fixed_width_variant_categories(
+fn read_fixed_width_variant_packed(
     path: &Path,
     file: &mut File,
     header: &PgenHeader,
@@ -1302,7 +1327,7 @@ fn read_fixed_width_variant_categories(
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
     seek_fixed_width_variant_record(path, file, header, variant_index)?;
-    read_fixed_width_variant_categories_sequential(path, file, header, decoder_state)
+    read_fixed_width_variant_packed_sequential(path, file, header, decoder_state)
 }
 
 fn seek_fixed_width_variant_record(
@@ -1328,7 +1353,7 @@ fn seek_fixed_width_variant_record(
     Ok(())
 }
 
-fn read_fixed_width_variant_categories_sequential(
+fn read_fixed_width_variant_packed_sequential(
     path: &Path,
     file: &mut File,
     header: &PgenHeader,
@@ -1341,11 +1366,9 @@ fn read_fixed_width_variant_categories_sequential(
             source,
         })?;
 
-    decode_packed_categories(
-        &decoder_state.record,
-        header.sample_ct,
-        &mut decoder_state.categories,
-    );
+    decoder_state
+        .packed
+        .load_pgen_payload(&decoder_state.record, header.sample_ct);
     Ok(())
 }
 
@@ -1764,12 +1787,37 @@ mod tests {
         copy.invert_0_2();
 
         assert_eq!(
-            (0..5).map(|sample_index| copy.get(sample_index)).collect::<Vec<_>>(),
+            (0..5)
+                .map(|sample_index| copy.get(sample_index))
+                .collect::<Vec<_>>(),
             vec![2, 1, 0, 3, 3]
         );
         assert_eq!(
-            (0..5).map(|sample_index| source.get(sample_index)).collect::<Vec<_>>(),
+            (0..5)
+                .map(|sample_index| source.get(sample_index))
+                .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 3]
+        );
+    }
+
+    #[test]
+    fn packed_genotypes_loads_pgen_payload_and_masks_unused_trailing_slots() {
+        let mut packed = PackedGenotypes::default();
+        packed.load_pgen_payload(&[0b1110_0100, 0xff], 5);
+
+        assert_eq!(
+            (0..5)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 3]
+        );
+
+        packed.resize(8);
+        assert_eq!(
+            (0..8)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 3, 0, 0, 0]
         );
     }
 }
