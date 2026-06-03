@@ -3,7 +3,8 @@
 ## Provenance
 
 - Date: 2026-06-03 11:14:36 HST
-- Base/head reviewed: `7c443b988b31f939b58e37cb7663fd0c327b4b0e..7cd69b66edf937585f4c8caec0f0fde19bf7900f`
+- Code range tested: `7c443b988b31f939b58e37cb7663fd0c327b4b0e..7cd69b66edf937585f4c8caec0f0fde19bf7900f`
+- Evidence artifact recorded at: `a8e93486eceffac1518e9ae7a0faa8d0704b103e`
 - Evidence type: mutation/regression evidence for the behavior-changing packed PLINK2 decoder rewrite.
 - Toolchain note: commands use `env CC=clang AR=ar` because the active shell environment points Cargo's default `AR` at a missing `arm64-apple-darwin20.0.0-ar`.
 
