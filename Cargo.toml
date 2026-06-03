@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "rust/genoio-core",
+    "rust/genoio-io",
+    "rust/genoio-py",
+]
+default-members = [
+    "rust/genoio-core",
+    "rust/genoio-io",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"

@@ -15,6 +15,36 @@
 - `.pvar` handling: local fixture has `chr22_hg38.pvar.zst`; `zstd` was available
   at `/Users/nicholas/micromamba/bin/zstd`.
 
+## TDD Evidence
+
+Task 1 introduced behavior-changing benchmark CLI coverage.
+
+Red command:
+
+```bash
+pytest -q tests/test_benchmark_plink2_cli.py
+```
+
+Red result before implementation: failed because `--scenario` was unrecognized
+and `scripts/benchmark_plink2.py` did not expose `read_genoio_matrix_only`.
+
+Green command:
+
+```bash
+pytest -q tests/test_benchmark_plink2_cli.py
+```
+
+Green result after implementation: `3 passed`.
+
+Task 2 added PLINK2 public contract tests only. The new Python and Rust tests
+passed against the existing implementation, so no production parser change was
+required. The Rust contract-test run initially needed an explicit toolchain
+environment because `ar` was not otherwise available:
+
+```bash
+env CC=clang AR=ar cargo test
+```
+
 ## Matrix-Only With pgenlib Comparison
 
 Command:
