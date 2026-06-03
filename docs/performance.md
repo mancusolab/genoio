@@ -12,7 +12,7 @@ first 1,000 variants and constructs a dense `float32` matrix with shape
 |---|---:|---:|---|
 | VCF vs `cyvcf2` | 0.1064 s | 0.2383 s | genoio 2.24x faster |
 | PLINK1 vs `pandas_plink` | 0.3968 s | 2.4382 s | genoio 6.15x faster |
-| PLINK2 matrix-only vs `pgenlib` | 0.0220 s | 0.0074 s | `pgenlib` 2.97x faster |
+| PLINK2 matrix-only vs `pgenlib` | 0.0178 s | 0.0068 s | `pgenlib` 2.62x faster |
 
 These numbers are workload- and machine-dependent. Treat them as local
 benchmarks, not universal claims.
@@ -31,15 +31,17 @@ The chromosome 22 PLINK 2 files were used as the source, then converted with
 focused on reader behavior rather than differences in samples or variants. The
 VCF header records `##source=PLINKv2.0`.
 
-For the PLINK2 timing above, the raw Phase 1 baseline is recorded in
+For the PLINK2 timing above, the raw Phase 1 baseline and post-short-circuit
+benchmark are recorded in
 `.plans/implementation-plans/2026-06-03-plink2-speed/benchmark-baseline.md`.
-It was run on 2026-06-03 at git commit
-`257554e8711c80ede05ce8fe10eadb92d36e3b7e` after rebuilding the Rust extension
-in release mode with `env CC=clang AR=ar python -m maturin develop --release`.
-The benchmark script did not emit its own machine note; local provenance was
-recorded separately as macOS arm64. The same run also measured PLINK2
-metadata-returning, sample-filtered, and genotype-filtered scenarios with
-1,000 variants.
+The post-short-circuit PLINK2 run was collected on 2026-06-03 at git commit
+`bd1a4b2a679a0ea9c5fbc9b81dc8eb1d7505c09a`, after rebuilding the Rust extension
+in release mode with `env CC=clang AR=ar python -m maturin develop --release`,
+on macOS arm64. The same run measured PLINK2 metadata-returning,
+sample-filtered, and genotype-filtered scenarios with 1,000 variants. The
+matrix-only median improved from the Phase 1 baseline of 0.0220 s to 0.0178 s;
+the metadata-returning median was 0.0229 s, the sample-filtered median was
+0.0157 s, and the genotype-filtered median was 16.0566 s.
 
 For the timings above, the VCF, PLINK1, and PLINK2 matrix-only comparisons
 produced the same matrix summary:
