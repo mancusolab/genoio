@@ -66,6 +66,66 @@ S3
     (pgen, pvar, psam)
 }
 
+fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    let n_variants = u32::try_from(records.len()).expect("test variant count fits u32");
+    let header_len = 12 + 8 + record_types.len() + records.len();
+    let mut bytes = vec![0x6c, 0x1b, 0x10];
+    bytes.extend(n_variants.to_le_bytes());
+    bytes.extend(n_samples.to_le_bytes());
+    bytes.push(0x04);
+    bytes.extend(
+        u64::try_from(header_len)
+            .expect("test header length fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(record_types);
+    bytes.extend(
+        records
+            .iter()
+            .map(|record| u8::try_from(record.len()).expect("test record length fits one byte")),
+    );
+    for record in records {
+        bytes.extend(*record);
+    }
+    bytes
+}
+
+fn write_variable_width_plink2(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let pgen = dir.join("variable.pgen");
+    let pvar = dir.join("variable.pvar");
+    let psam = dir.join("variable.psam");
+    let pgen_bytes = variable_width_pgen(
+        &[0, 4, 1, 2, 3],
+        &[&[0xe4], &[2, 1, 9, 2], &[2, 5, 0], &[1, 1, 3], &[0]],
+        4,
+    );
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    fs::write(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 A G
+1 30 rs3 A G
+1 40 rs4 A G
+1 50 rs5 A G
+",
+    )
+    .expect("pvar fixture should be written");
+    fs::write(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    )
+    .expect("psam fixture should be written");
+    (pgen, pvar, psam)
+}
+
 #[test]
 fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
     let dir = unique_dir("vcf-filter-genotype");
@@ -138,6 +198,55 @@ fn filter_genotype_stats_plink2_match_expanded_stats_and_attach_metadata() {
     assert_eq!(dense.diagnostics.candidate_variants, 4);
     assert_eq!(dense.diagnostics.retained_variants, 3);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+}
+
+#[test]
+fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
+    let dir = unique_dir("plink2-variable-filter-genotype");
+    let (pgen, pvar, psam) = write_variable_width_plink2(&dir);
+    let keep = vec!["S4".to_string(), "S2".to_string()];
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "maf", "params": {"min": 0.2}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.5}}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, Some(&keep), Some(&filter))
+        .expect("variable-width plink2 should filter");
+
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S2", "S4"]
+    );
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1", "rs2"]
+    );
+    assert_eq!(dense.values, vec![1.0, 1.0, 0.0, 2.0]);
+    assert_eq!(dense.missing_mask, vec![false, false, true, false]);
+    assert_eq!(dense.variants[0].af, Some(0.5));
+    assert_eq!(dense.variants[0].maf, Some(0.5));
+    assert_eq!(dense.variants[0].mac, Some(1));
+    assert_eq!(dense.variants[0].missing_rate, Some(0.5));
+    assert_eq!(dense.variants[0].n_called, Some(1));
+    assert_eq!(dense.variants[1].af, Some(0.75));
+    assert_eq!(dense.variants[1].maf, Some(0.25));
+    assert_eq!(dense.variants[1].mac, Some(1));
+    assert_eq!(dense.variants[1].missing_rate, Some(0.0));
+    assert_eq!(dense.variants[1].n_called, Some(2));
+    assert_eq!(dense.diagnostics.candidate_variants, 5);
+    assert_eq!(dense.diagnostics.retained_variants, 2);
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 3);
 }
 
 #[test]
