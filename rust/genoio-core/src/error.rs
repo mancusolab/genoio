@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt::{self, Display};
 use std::path::PathBuf;
 
+/// Error type for source metadata, parsing, and matrix contract failures.
 #[derive(Debug)]
 pub enum MetadataError {
     Io {
@@ -17,6 +18,7 @@ pub enum MetadataError {
 }
 
 impl MetadataError {
+    /// Build a parse-style error for a path or logical component.
     pub fn parse(path: impl Into<PathBuf>, message: impl Into<String>) -> Self {
         Self::Parse {
             path: path.into(),

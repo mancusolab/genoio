@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::{MetadataError, SampleRecord, VariantRecord};
 
+/// Counts describing source selection and variant filtering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DenseDiagnostics {
     pub requested_samples: usize,
@@ -16,6 +17,10 @@ pub struct DenseDiagnostics {
     pub dropped_genotype_variants: usize,
 }
 
+/// Dense genotype matrix in sample-by-variant order.
+///
+/// `values` and `missing_mask` are both flat sample-major buffers with length
+/// `n_samples * n_variants`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DenseGenotypeMatrix {
     pub n_samples: usize,
@@ -28,6 +33,7 @@ pub struct DenseGenotypeMatrix {
 }
 
 impl DenseGenotypeMatrix {
+    /// Build a dense matrix after validating shape and metadata lengths.
     pub fn new(
         n_samples: usize,
         n_variants: usize,
@@ -90,6 +96,7 @@ impl DenseGenotypeMatrix {
     }
 }
 
+/// Result of applying an optional sample keep list to source sample metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseSampleSelection {
     pub source_indices: Vec<usize>,
@@ -97,6 +104,7 @@ pub struct DenseSampleSelection {
     pub diagnostics: DenseDiagnostics,
 }
 
+/// Select requested samples while preserving source row order.
 pub fn select_samples_source_order(
     source_samples: &[SampleRecord],
     requested: Option<&[String]>,
@@ -125,6 +133,8 @@ pub fn select_samples_source_order(
 
     let mut source_indices = Vec::new();
     let mut samples = Vec::new();
+    // Keep-list order is only used for membership. Matrix rows remain in
+    // source order so VCF/PLINK reads agree and metadata aligns with values.
     for (index, sample) in source_samples.iter().enumerate() {
         if requested_ids.contains(&sample.iid) {
             source_indices.push(index);
@@ -156,11 +166,15 @@ pub fn select_samples_source_order(
     })
 }
 
+/// Transpose a flat variant-major buffer into sample-major order.
 pub fn transpose_variant_major_to_sample_major<T: Copy>(
     values: &[T],
     n_samples: usize,
     n_variants: usize,
 ) -> Vec<T> {
+    // Readers append one variant at a time because source formats are
+    // variant-major. Python callers expect sample rows, so transpose once at
+    // the core boundary instead of reshaping incorrectly downstream.
     let mut transposed = Vec::with_capacity(values.len());
     for sample_index in 0..n_samples {
         for variant_index in 0..n_variants {

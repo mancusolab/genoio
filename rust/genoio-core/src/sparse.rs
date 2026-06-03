@@ -2,6 +2,10 @@
 
 use crate::{DenseDiagnostics, MetadataError, SampleRecord, VariantRecord};
 
+/// Sparse genotype matrix stored as CSC arrays.
+///
+/// Columns are variants and rows are samples. Python can expose the same data
+/// as CSC or convert to CSR after crossing the FFI boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparseGenotypeMatrix {
     pub n_rows: usize,
@@ -15,6 +19,7 @@ pub struct SparseGenotypeMatrix {
 }
 
 impl SparseGenotypeMatrix {
+    /// Build a sparse matrix after validating CSC and metadata contracts.
     #[allow(
         clippy::too_many_arguments,
         reason = "constructor mirrors validated CSC matrix fields"
@@ -62,6 +67,7 @@ impl SparseGenotypeMatrix {
     }
 }
 
+/// Reject retained missing calls before constructing sparse matrices.
 pub fn reject_sparse_missing_values(missing: &[bool]) -> Result<(), MetadataError> {
     if missing.iter().any(|value| *value) {
         return Err(MetadataError::parse(
@@ -72,6 +78,7 @@ pub fn reject_sparse_missing_values(missing: &[bool]) -> Result<(), MetadataErro
     Ok(())
 }
 
+/// Flip a biallelic 0/1/2 column so stored nonzeros represent the minor allele.
 pub fn flip_values_to_minor_allele(values: &mut [f32], variant: &mut VariantRecord) {
     let a1_count = values.iter().sum::<f32>();
     let a0_count = 2.0 * values.len() as f32 - a1_count;
@@ -84,6 +91,7 @@ pub fn flip_values_to_minor_allele(values: &mut [f32], variant: &mut VariantReco
     mark_variant_flipped(variant);
 }
 
+/// Append one dense variant column to CSC buffers, skipping zero entries.
 pub fn append_sparse_column(
     indptr: &mut Vec<usize>,
     indices: &mut Vec<usize>,

@@ -14,6 +14,7 @@ use genoio_core::{
 
 use crate::error::Result;
 
+/// Read PLINK1 sample and variant metadata without decoding BED genotypes.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
     fs::metadata(bed).map_err(|source| MetadataError::Io {
         path: bed.to_path_buf(),
@@ -29,6 +30,7 @@ pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<Metada
     })
 }
 
+/// Read all retained PLINK1 genotypes as a dense sample-by-variant matrix.
 pub fn read_plink1_dense(
     bed: &Path,
     bim: &Path,
@@ -39,6 +41,7 @@ pub fn read_plink1_dense(
     read_plink1_dense_windowed(bed, bim, fam, requested_samples, variant_filter, None)
 }
 
+/// Read retained PLINK1 genotypes as a dense matrix over an optional block window.
 pub fn read_plink1_dense_windowed(
     bed: &Path,
     bim: &Path,
@@ -89,6 +92,8 @@ pub fn read_plink1_dense_windowed(
             }
         }
 
+        // PLINK1 BED is variant-major and fixed-width, so random access by
+        // source variant index is cheap once BIM/FAM metadata has been parsed.
         let (current_values, current_missing) = read_plink1_variant_values(
             bed,
             &mut bed_file,
@@ -141,6 +146,7 @@ pub fn read_plink1_dense_windowed(
     )
 }
 
+/// Read all retained PLINK1 genotypes as a sparse CSC matrix.
 pub fn read_plink1_sparse(
     bed: &Path,
     bim: &Path,
@@ -151,6 +157,7 @@ pub fn read_plink1_sparse(
     read_plink1_sparse_windowed(bed, bim, fam, requested_samples, variant_filter, None)
 }
 
+/// Read retained PLINK1 genotypes as sparse CSC over an optional block window.
 pub fn read_plink1_sparse_windowed(
     bed: &Path,
     bim: &Path,

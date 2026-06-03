@@ -7,11 +7,17 @@ use serde_json::Value;
 
 use crate::{MetadataError, VariantRecord};
 
+/// Serializable variant filter evaluated by Rust readers.
+///
+/// Python constructs a JSON-compatible filter IR. This type validates that IR,
+/// tracks which predicates need genotype statistics, and exposes safe metadata
+/// decisions for early record skipping.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantFilter {
     expr: Expr,
 }
 
+/// Concrete 1-based inclusive genomic region suitable for reader pushdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionPredicate {
     pub chrom: String,
@@ -19,6 +25,7 @@ pub struct RegionPredicate {
     pub end: u32,
 }
 
+/// Per-variant statistics computed from called diploid genotypes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VariantStats {
     pub af: Option<f64>,
@@ -29,6 +36,10 @@ pub struct VariantStats {
     pub polymorphic: bool,
 }
 
+/// Retained-variant window for block reads.
+///
+/// `start` and `len` are expressed after filters have retained variants, not
+/// necessarily in raw source-row coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantWindow {
     pub start: usize,
@@ -36,10 +47,12 @@ pub struct VariantWindow {
 }
 
 impl VariantWindow {
+    /// Return true when `retained_index` belongs to this window.
     pub fn contains(self, retained_index: usize) -> bool {
         retained_index >= self.start && retained_index < self.start.saturating_add(self.len)
     }
 
+    /// Return true when no later retained variant can belong to this window.
     pub fn is_past(self, retained_index: usize) -> bool {
         retained_index >= self.start.saturating_add(self.len)
     }
@@ -89,6 +102,7 @@ enum RawExpr {
 }
 
 impl VariantFilter {
+    /// Parse and validate the JSON-compatible filter IR from Python.
     pub fn from_json_value(value: Value) -> Result<Self, MetadataError> {
         let raw: RawExpr = serde_json::from_value(value).map_err(|error| {
             MetadataError::parse("<filter>", format!("invalid filter IR: {error}"))
@@ -98,22 +112,33 @@ impl VariantFilter {
         })
     }
 
+    /// Evaluate predicates that can be decided from variant metadata alone.
+    ///
+    /// Returns `None` when any part of the expression needs genotype-derived
+    /// statistics such as MAF or missing rate.
     pub fn metadata_decision(&self, variant: &VariantRecord) -> Option<bool> {
         self.expr.metadata_decision(variant)
     }
 
+    /// Evaluate the complete filter against metadata and optional statistics.
     pub fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
         self.expr.evaluate(variant, stats)
     }
 
+    /// Return true when any predicate needs genotype statistics.
     pub fn requires_genotype_stats(&self) -> bool {
         self.expr.requires_genotype_stats()
     }
 
+    /// Return true when the expression contains any region predicate.
     pub fn has_region_predicate(&self) -> bool {
         self.expr.has_region_predicate()
     }
 
+    /// Return a region that can be safely pushed into an indexed reader.
+    ///
+    /// Only bare region predicates and conjunctions with a region are safe.
+    /// Disjunctions and negation require full expression evaluation.
     pub fn concrete_region_pushdown(&self) -> Option<RegionPredicate> {
         self.expr.concrete_region_pushdown()
     }
@@ -309,6 +334,7 @@ impl Predicate {
     }
 }
 
+/// Compute frequency and missingness statistics for one diploid variant.
 pub fn compute_variant_stats(
     values: &[f32],
     missing_mask: &[bool],
@@ -374,6 +400,7 @@ pub fn compute_variant_stats(
     })
 }
 
+/// Attach computed genotype statistics to variant metadata.
 pub fn attach_variant_stats(variant: &mut VariantRecord, stats: VariantStats) {
     variant.af = stats.af.map(|value| value as f32);
     variant.maf = stats.maf.map(|value| value as f32);

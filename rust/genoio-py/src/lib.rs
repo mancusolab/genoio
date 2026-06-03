@@ -9,11 +9,13 @@ use pyo3::types::{
 };
 
 #[pyfunction]
+/// Return the Rust IO backend name for Python diagnostics.
 fn backend_name() -> &'static str {
     genoio_io::backend_name()
 }
 
 #[pyfunction]
+/// Read source metadata and convert it into Python dictionaries.
 fn read_metadata(
     py: Python<'_>,
     format: &str,
@@ -49,6 +51,7 @@ fn read_metadata(
 }
 
 #[pyfunction]
+/// Read dense genotypes from a resolved source.
 fn read_dense(
     py: Python<'_>,
     format: &str,
@@ -110,6 +113,7 @@ fn read_dense(
 }
 
 #[pyfunction]
+/// Read sparse genotypes from a resolved source.
 fn read_sparse(
     py: Python<'_>,
     format: &str,
@@ -171,6 +175,7 @@ fn read_sparse(
 }
 
 #[pyfunction]
+/// Read phased VCF genotypes as dense haplotype rows.
 fn read_haplotypes_dense(
     py: Python<'_>,
     format: &str,
@@ -206,6 +211,7 @@ fn read_haplotypes_dense(
 }
 
 #[pyfunction]
+/// Read phased VCF genotypes as sparse haplotype rows.
 fn read_haplotypes_sparse(
     py: Python<'_>,
     format: &str,
@@ -241,6 +247,7 @@ fn read_haplotypes_sparse(
 }
 
 #[pymodule]
+/// PyO3 extension module used by the pure-Python public API.
 fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(backend_name, module)?)?;
     module.add_function(wrap_pyfunction!(read_metadata, module)?)?;
@@ -423,6 +430,8 @@ fn sparse_to_py(
 }
 
 fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
+    // SAFETY: f32 has a stable byte representation for NumPy's float32 view,
+    // and PyByteArray copies the bytes before `values` is dropped.
     let bytes = unsafe {
         slice::from_raw_parts(
             values.as_ptr().cast::<u8>(),
@@ -450,6 +459,8 @@ fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<
             })
         })
         .collect::<PyResult<Vec<i64>>>()?;
+    // SAFETY: values has been converted to i64 and PyByteArray copies the
+    // contiguous bytes before the local Vec is dropped.
     let bytes = unsafe {
         slice::from_raw_parts(
             values.as_ptr().cast::<u8>(),
@@ -509,6 +520,8 @@ fn variant_records_to_py(
 }
 
 fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    // PyO3 exposes bool as an int subclass, so check bool before PyInt to keep
+    // filter IR values semantically stable.
     if value.is_none() {
         return Ok(serde_json::Value::Null);
     }

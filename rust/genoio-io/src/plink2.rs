@@ -41,6 +41,7 @@ enum PgenLayout {
     VariableWidth,
 }
 
+/// Read PLINK2 sample and variant metadata without returning genotypes.
 pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<MetadataOutput> {
     let header = read_supported_pgen_header(pgen)?;
     let samples = parse_psam(psam)?;
@@ -54,6 +55,7 @@ pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<Met
     })
 }
 
+/// Read all retained PLINK2 hard-call genotypes as a dense matrix.
 pub fn read_plink2_dense(
     pgen: &Path,
     pvar: &Path,
@@ -64,6 +66,7 @@ pub fn read_plink2_dense(
     read_plink2_dense_windowed(pgen, pvar, psam, requested_samples, variant_filter, None)
 }
 
+/// Read retained PLINK2 hard calls as a dense matrix over an optional block window.
 pub fn read_plink2_dense_windowed(
     pgen: &Path,
     pvar: &Path,
@@ -72,6 +75,10 @@ pub fn read_plink2_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    // With no variant filter, retained order is identical to source order.
+    // This lets block reads avoid full PVAR parsing and full variable-width
+    // header validation. Filtered reads use the slower complete path because
+    // retained-window membership depends on evaluating earlier variants.
     if let (None, Some(window)) = (variant_filter, variant_window) {
         return read_plink2_dense_source_window(pgen, pvar, psam, requested_samples, window);
     }
@@ -182,6 +189,7 @@ pub fn read_plink2_dense_windowed(
     )
 }
 
+/// Read all retained PLINK2 hard-call genotypes as sparse CSC.
 pub fn read_plink2_sparse(
     pgen: &Path,
     pvar: &Path,
@@ -192,6 +200,7 @@ pub fn read_plink2_sparse(
     read_plink2_sparse_windowed(pgen, pvar, psam, requested_samples, variant_filter, None)
 }
 
+/// Read retained PLINK2 hard calls as sparse CSC over an optional block window.
 pub fn read_plink2_sparse_windowed(
     pgen: &Path,
     pvar: &Path,
@@ -200,6 +209,8 @@ pub fn read_plink2_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    // See the dense fast path: unfiltered windows can be interpreted directly
+    // in source coordinates, but filtered windows cannot.
     if let (None, Some(window)) = (variant_filter, variant_window) {
         return read_plink2_sparse_source_window(pgen, pvar, psam, requested_samples, window);
     }
@@ -335,6 +346,9 @@ fn read_plink2_dense_source_window(
 
     match header.layout {
         PgenLayout::FixedWidth => {
+            // Fixed-width PGEN records are independently addressable; decode
+            // only the exact source variants represented by the requested
+            // unfiltered window.
             for (variant_index, variant) in window_variants {
                 let (current_values, current_missing) = read_plink2_variant_values(
                     pgen,
@@ -352,6 +366,9 @@ fn read_plink2_dense_source_window(
         PgenLayout::VariableWidth => {
             let mut window_iter = window_variants.into_iter().peekable();
             let prefix_end = header.record_types.len();
+            // Variable-width PGEN can use LD-compressed records that depend on
+            // earlier non-LD records. Decode the prefix through the requested
+            // window to maintain state, but append only requested variants.
             for variant_index in 0..prefix_end {
                 let (current_values, current_missing) = read_plink2_variant_values(
                     pgen,
@@ -421,6 +438,7 @@ fn read_plink2_sparse_source_window(
 
     match header.layout {
         PgenLayout::FixedWidth => {
+            // Fixed-width records can be decoded by direct source index.
             for (variant_index, mut variant) in window_variants {
                 let (mut current_values, current_missing) = read_plink2_variant_values(
                     pgen,
@@ -439,6 +457,8 @@ fn read_plink2_sparse_source_window(
         PgenLayout::VariableWidth => {
             let mut window_iter = window_variants.into_iter().peekable();
             let prefix_end = header.record_types.len();
+            // Preserve LD state exactly as dense reads do, then append only
+            // requested variants to sparse columns.
             for variant_index in 0..prefix_end {
                 let (mut current_values, current_missing) = read_plink2_variant_values(
                     pgen,
@@ -794,6 +814,9 @@ fn read_variable_width_header_body_prefix(
         let needed_in_block = prefix_variant_ct
             .saturating_sub(block_start)
             .min(block_variant_ct);
+        // Type and length tables are block-grouped in the PGEN header. We
+        // still have to skip through unneeded entries in the last touched
+        // block so the file cursor reaches the matching length table.
         read_variable_record_type_prefix(
             path,
             file,
@@ -821,6 +844,8 @@ fn read_variable_width_header_body_prefix(
         let remaining_lengths = block_variant_ct - needed_in_block;
         skip_bytes(path, file, remaining_lengths * length_width)?;
     }
+    // Only validate the prefix that may be decoded for this block. Unsupported
+    // later records should not prevent first-block reads from succeeding.
     for record_type in &record_types {
         validate_supported_variable_record_type(path, *record_type)?;
     }
@@ -863,6 +888,8 @@ fn read_variable_record_type_prefix(
         };
         record_types.push(record_type);
     }
+    // Four-bit type tables pack two variants per byte, so skipping must use
+    // packed byte counts rather than raw variant counts.
     skip_bytes(path, file, block_variant_ct.div_ceil(2) - packed_needed)?;
     Ok(())
 }
@@ -1532,6 +1559,9 @@ fn parse_pvar_source_window(
             continue;
         }
         if !body_started {
+            // Headerless PVAR has PLINK-specific default columns. Infer once
+            // from the first data row, then use the same parser as headered
+            // PVAR rows.
             let (inferred, _) = infer_pvar_header(path, Some(trimmed))?;
             columns = Some(inferred);
             body_started = true;

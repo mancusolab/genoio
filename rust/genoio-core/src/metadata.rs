@@ -2,6 +2,7 @@
 
 use crate::SourceCapabilities;
 
+/// Sample metadata normalized across VCF, PLINK1, and PLINK2 inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleRecord {
     pub fid: Option<String>,
@@ -14,6 +15,7 @@ pub struct SampleRecord {
     pub haplotype_index: Option<usize>,
 }
 
+/// Variant metadata normalized across supported source formats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantRecord {
     pub chrom: String,
@@ -34,6 +36,7 @@ pub struct VariantRecord {
     pub n_called: Option<u32>,
 }
 
+/// Complete source metadata returned before or alongside matrix reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetadataOutput {
     pub samples: Vec<SampleRecord>,

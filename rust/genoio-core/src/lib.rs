@@ -1,5 +1,11 @@
 // pattern: Functional Core
 
+//! Shared genotype metadata, filter, and matrix contracts.
+//!
+//! This crate is intentionally free of file IO and Python bindings. Reader
+//! crates populate these validated containers, and the PyO3 layer converts
+//! them into NumPy, SciPy, and Polars objects.
+
 pub mod capabilities;
 pub mod dense;
 pub mod error;
@@ -23,8 +29,11 @@ pub use sparse::{
     SparseGenotypeMatrix,
 };
 
+/// Python package and Rust workspace package name.
 pub const PACKAGE_NAME: &str = "genoio";
+/// Cargo package version compiled into the extension.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Build profile marker exposed for diagnostics.
 pub const BUILD_PROFILE: &str = if cfg!(debug_assertions) {
     "debug"
 } else {

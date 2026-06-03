@@ -51,6 +51,18 @@ class _ValidatedReadOptions:
 
 @dataclass(frozen=True)
 class Dataset:
+    r"""Resolved genotype dataset with metadata, whole-read, and block-read methods.
+
+    Constructed by [`genoio.open`][]. The object caches source metadata after
+    the first metadata-dependent operation, but matrix reads are executed on
+    each call.
+
+    **Attributes:**
+
+    - `source`: resolved source format, primary path, companion files, and
+      optional PLINK prefix.
+    """
+
     source: ResolvedSource
     _metadata_cache: dict[str, Any] | None = field(default=None, init=False, compare=False, repr=False)
 
@@ -66,6 +78,43 @@ class Dataset:
         return_samples: bool = False,
         return_variants: bool = False,
     ) -> Any:
+        r"""Read a genotype or haplotype matrix from this dataset.
+
+        Dense reads return a NumPy array with shape `(samples, variants)`.
+        Sparse reads return SciPy CSC by default or CSR when `sparse="csr"`.
+        Set `return_samples` or `return_variants` to return Polars metadata
+        frames with the matrix.
+
+        **Arguments:**
+
+        - `kind`: `"geno"` for diploid genotype dosage or `"haplo"` for
+          phased haplotype rows. Haplotype reads currently require phased VCF.
+        - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
+          `"csr"` for CSR.
+        - `variants`: filter expression from `genoio` or iterable of variant
+          IDs. `None` keeps all variants.
+        - `samples`: optional sample ID keep list. Retained rows stay in source
+          order.
+        - `missing`: `"nan"`, `"raise"`, or `"impute"`. The default is `"nan"`
+          for dense reads and `"raise"` for sparse reads.
+        - `dtype`: NumPy dtype for the returned matrix.
+        - `return_samples`: include a sample metadata frame.
+        - `return_variants`: include a variant metadata frame.
+
+        **Returns:**
+
+        Matrix alone, or a tuple containing the matrix and requested metadata
+        frames.
+
+        **Raises:**
+
+        - `genoio.InvalidOptionError`: if read options are invalid.
+        - `genoio.UnsupportedRepresentation`: if the requested representation
+          is unavailable for the source.
+        - `genoio.InvalidSourceError`: if the source cannot be decoded.
+        - `genoio.MissingDataError`: if retained missing calls conflict with
+          the requested missing-data policy.
+        """
         validated_options = _validate_read_options(
             kind=kind,
             sparse=sparse,
@@ -91,15 +140,49 @@ class Dataset:
         )
 
     def samples(self, **options: Any) -> Any:
+        r"""Return sample metadata as a Polars DataFrame.
+
+        **Returns:**
+
+        Polars DataFrame with source sample metadata in source order.
+        """
         _reject_options(options)
         return samples_frame(self._metadata()["samples"])
 
     def variants(self, *, stats: Any = None, **options: Any) -> Any:
+        r"""Return variant metadata as a Polars DataFrame.
+
+        The `stats` argument is reserved for future metadata-stat controls.
+        Passing it currently raises `genoio.InvalidOptionError`.
+
+        **Arguments:**
+
+        - `stats`: reserved; must be `None`.
+
+        **Returns:**
+
+        Polars DataFrame with source variant metadata in source order.
+        """
         _validate_variant_stats(stats)
         _reject_options(options)
         return variants_frame(self._metadata()["variants"])
 
     def blocks(self, size: int, **read_options: Any) -> Any:
+        r"""Yield consecutive variant blocks from this dataset.
+
+        Each yielded block has at most `size` variants and follows the same
+        return contract as [`genoio.Dataset.read`][]. Blocks are ordered by
+        source variant order after any retained-variant filtering.
+
+        **Arguments:**
+
+        - `size`: maximum number of variants per yielded block.
+        - `read_options`: forwarded to [`genoio.Dataset.read`][].
+
+        **Returns:**
+
+        Iterator yielding matrices or matrix/metadata tuples.
+        """
         _validate_block_size(size)
         normalized_options = _read_options_with_defaults(read_options)
         validated_options = _validate_read_options(**normalized_options)
@@ -117,6 +200,9 @@ class Dataset:
     ) -> Any:
         start = 0
         while True:
+            # Variant windows are expressed in retained-variant coordinates.
+            # Rust applies metadata/genotype filters before deciding whether a
+            # retained variant falls into this block.
             block = self._read_block_from_rust(
                 kind=read_options["kind"],
                 samples=read_options["samples"],
@@ -197,6 +283,8 @@ class Dataset:
                 dtype=validated_options.dtype,
                 sparse_format=validated_options.sparse_format,
             )
+        # Metadata frames are assembled only when requested. Large PLINK2
+        # block reads can otherwise avoid parsing full variant metadata.
         sample_metadata = samples_frame(rust_result["samples"]) if return_samples else None
         variant_metadata = variants_frame(rust_result["variants"]) if return_variants else None
         return read_result_tuple(
@@ -253,6 +341,26 @@ class Dataset:
 
 
 def open(path: str | Path, format: str | None = None) -> Dataset:
+    r"""Resolve a genotype source and return a reusable dataset.
+
+    `path` may be a VCF/BCF file, a PLINK1/PLINK2 prefix, or one member of a
+    PLINK file set. `format` can be used to disambiguate prefixes and accepts
+    `"vcf"`, `"bcf"`, `"plink1"`, `"bed"`, `"plink2"`, or `"pgen"`.
+
+    **Arguments:**
+
+    - `path`: input file, PLINK prefix, or PLINK companion-file path.
+    - `format`: optional format hint.
+
+    **Returns:**
+
+    [`genoio.Dataset`][] with resolved source paths.
+
+    **Raises:**
+
+    - `genoio.SourceResolutionError`: if the path cannot be resolved to one
+      supported source.
+    """
     return Dataset(source=resolve_source(path, format=format))
 
 
@@ -269,6 +377,30 @@ def read(
     return_samples: bool = False,
     return_variants: bool = False,
 ) -> Any:
+    r"""Read a genotype source into an array or sparse matrix.
+
+    Convenience wrapper for `genoio.open(path, format).read(...)`. Dense
+    genotype reads return a NumPy array with shape `(samples, variants)`. Use
+    `sparse=True` for SciPy CSC or `sparse="csr"` for CSR.
+
+    **Arguments:**
+
+    - `path`: input file, PLINK prefix, or PLINK companion-file path.
+    - `format`: optional format hint.
+    - `kind`: `"geno"` or `"haplo"`.
+    - `sparse`: dense/sparse output selector.
+    - `variants`: filter expression or iterable of variant IDs.
+    - `samples`: optional sample ID keep list.
+    - `missing`: missing-data policy: `"nan"`, `"raise"`, or `"impute"`.
+    - `dtype`: NumPy dtype for matrix values.
+    - `return_samples`: include sample metadata.
+    - `return_variants`: include variant metadata.
+
+    **Returns:**
+
+    Matrix alone, or a tuple containing the matrix and requested metadata
+    frames.
+    """
     return open(path, format=format).read(
         kind=kind,
         sparse=sparse,
@@ -282,14 +414,52 @@ def read(
 
 
 def samples(path: str | Path, *, format: str | None = None, **options: Any) -> Any:
+    r"""Return sample metadata for `path` as a Polars DataFrame.
+
+    **Arguments:**
+
+    - `path`: input file, PLINK prefix, or PLINK companion-file path.
+    - `format`: optional format hint.
+
+    **Returns:**
+
+    Polars DataFrame with source sample metadata.
+    """
     return open(path, format=format).samples(**options)
 
 
 def variants(path: str | Path, *, format: str | None = None, stats: Any = None, **options: Any) -> Any:
+    r"""Return variant metadata for `path` as a Polars DataFrame.
+
+    **Arguments:**
+
+    - `path`: input file, PLINK prefix, or PLINK companion-file path.
+    - `format`: optional format hint.
+    - `stats`: reserved; must be `None`.
+
+    **Returns:**
+
+    Polars DataFrame with source variant metadata.
+    """
     return open(path, format=format).variants(stats=stats, **options)
 
 
 def blocks(path: str | Path, size: int, *, format: str | None = None, **read_options: Any) -> Any:
+    r"""Yield matrix blocks with at most `size` variants per block.
+
+    Convenience wrapper for `genoio.open(path, format).blocks(size, ...)`.
+
+    **Arguments:**
+
+    - `path`: input file, PLINK prefix, or PLINK companion-file path.
+    - `size`: maximum number of variants per block.
+    - `format`: optional format hint.
+    - `read_options`: forwarded to [`genoio.Dataset.read`][].
+
+    **Returns:**
+
+    Iterator yielding matrices or matrix/metadata tuples.
+    """
     return open(path, format=format).blocks(size, **read_options)
 
 

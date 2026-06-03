@@ -1,5 +1,11 @@
 // pattern: Imperative Shell
 
+//! File-format readers for `genoio-core` matrix and metadata contracts.
+//!
+//! Public functions in this crate perform filesystem IO and format parsing,
+//! then return validated core structs. Python bindings call these functions
+//! through `genoio-py`.
+
 mod error;
 mod plink1;
 mod plink2;
@@ -21,6 +27,7 @@ pub use vcf::{
     read_vcf_sparse_windowed,
 };
 
+/// Return the compiled Rust IO backend name for diagnostics.
 pub fn backend_name() -> &'static str {
     "genoio-io"
 }

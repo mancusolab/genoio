@@ -17,6 +17,8 @@ from ._errors import (
 
 
 class SourceFormat(Enum):
+    r"""Supported on-disk genotype source formats."""
+
     VCF = "vcf"
     BCF = "bcf"
     PLINK1 = "plink1"
@@ -25,6 +27,19 @@ class SourceFormat(Enum):
 
 @dataclass(frozen=True)
 class ResolvedSource:
+    r"""Resolved source path and required member files.
+
+    `members` maps logical member names such as `"vcf"`, `"bed"`, or `"pgen"`
+    to concrete paths. PLINK sources also carry the shared prefix.
+
+    **Attributes:**
+
+    - `format`: detected or requested source format.
+    - `path`: primary input path used by the backend reader.
+    - `members`: required source members keyed by logical role.
+    - `prefix`: PLINK prefix, or `None` for single-file sources.
+    """
+
     format: SourceFormat
     path: Path
     members: Mapping[str, Path]
@@ -40,6 +55,22 @@ _MEMBER_SUFFIX_TO_FORMAT = {
 
 
 def resolve_source(path: str | Path, format: str | SourceFormat | None = None) -> ResolvedSource:
+    r"""Resolve `path` to a supported single-file or multi-file source.
+
+    **Arguments:**
+
+    - `path`: source file path, PLINK prefix, or PLINK member path.
+    - `format`: optional format hint.
+
+    **Returns:**
+
+    `ResolvedSource` with validated member paths.
+
+    **Raises:**
+
+    - `genoio.SourceResolutionError`: if the path is missing, ambiguous, or
+      uses an unsupported format.
+    """
     source_path = Path(path)
     requested_format = _normalize_format(format)
 

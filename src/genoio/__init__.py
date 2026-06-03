@@ -1,5 +1,7 @@
 # pattern: Functional Core
 
+"""Read VCF, PLINK1, and PLINK2 genotype matrices from Python."""
+
 from ._api import Dataset, blocks, open, read, samples, variants
 from ._errors import (
     AmbiguousSourceError,

@@ -18,6 +18,13 @@ ParamValue = JsonScalar | tuple[JsonScalar, ...]
 
 
 class FilterExpr:
+    r"""Serializable variant filter expression.
+
+    Filter expressions can be combined with ``&`` and ``|`` and negated with
+    ``~``. They are converted to a JSON-compatible intermediate representation
+    before being evaluated in Rust.
+    """
+
     def __and__(self, other: FilterExpr) -> FilterExpr:
         return AndExpr(self, _ensure_expression(other))
 
@@ -28,15 +35,30 @@ class FilterExpr:
         return NotExpr(self)
 
     def to_ir(self) -> dict[str, JsonValue]:
+        r"""Return the JSON-compatible filter representation consumed by Rust.
+
+        **Returns:**
+
+        Dictionary containing only JSON-compatible values.
+        """
         raise NotImplementedError
 
 
 @dataclass(frozen=True)
 class PredicateExpr(FilterExpr):
+    r"""Leaf filter predicate with validated parameter values.
+
+    **Arguments:**
+
+    - `name`: predicate name understood by the Rust filter evaluator.
+    - `params`: validated parameter key/value pairs.
+    """
+
     name: str
     params: tuple[tuple[str, ParamValue], ...] = ()
 
     def to_ir(self) -> dict[str, JsonValue]:
+        r"""Return this predicate as filter IR."""
         return {
             "op": "predicate",
             "name": self.name,
@@ -46,71 +68,171 @@ class PredicateExpr(FilterExpr):
 
 @dataclass(frozen=True)
 class AndExpr(FilterExpr):
+    r"""Boolean conjunction of two filter expressions."""
+
     left: FilterExpr
     right: FilterExpr
 
     def to_ir(self) -> dict[str, JsonValue]:
+        r"""Return this conjunction as filter IR."""
         return {"op": "and", "left": self.left.to_ir(), "right": self.right.to_ir()}
 
 
 @dataclass(frozen=True)
 class OrExpr(FilterExpr):
+    r"""Boolean disjunction of two filter expressions."""
+
     left: FilterExpr
     right: FilterExpr
 
     def to_ir(self) -> dict[str, JsonValue]:
+        r"""Return this disjunction as filter IR."""
         return {"op": "or", "left": self.left.to_ir(), "right": self.right.to_ir()}
 
 
 @dataclass(frozen=True)
 class NotExpr(FilterExpr):
+    r"""Boolean negation of one filter expression."""
+
     expr: FilterExpr
 
     def to_ir(self) -> dict[str, JsonValue]:
+        r"""Return this negation as filter IR."""
         return {"op": "not", "expr": self.expr.to_ir()}
 
 
 def chrom(value: str) -> FilterExpr:
+    r"""Keep variants on chromosome `value`.
+
+    **Arguments:**
+
+    - `value`: non-empty chromosome label.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     if not isinstance(value, str) or not value:
         raise InvalidOptionError("chrom filter requires a non-empty chromosome string")
     return PredicateExpr("chrom", (("value", value),))
 
 
 def region(value: str) -> FilterExpr:
+    r"""Keep variants in a 1-based inclusive `"chrom:start-end"` region.
+
+    **Arguments:**
+
+    - `value`: region string with 1-based inclusive coordinates.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     _validate_region(value)
     return PredicateExpr("region", (("value", value),))
 
 
 def snp() -> FilterExpr:
+    r"""Keep single-nucleotide variants with one REF and one ALT base.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     return PredicateExpr("snp")
 
 
 def biallelic() -> FilterExpr:
+    r"""Keep variants with exactly one ALT allele.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     return PredicateExpr("biallelic")
 
 
 def maf(*, min: float | None = None, max: float | None = None) -> FilterExpr:
+    r"""Keep variants by minor allele frequency over called genotypes.
+
+    **Arguments:**
+
+    - `min`: optional inclusive lower MAF threshold.
+    - `max`: optional inclusive upper MAF threshold.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     return PredicateExpr("maf", _validate_float_range("maf", min=min, max=max))
 
 
 def qual(*, min: float | None = None, max: float | None = None) -> FilterExpr:
+    r"""Keep variants by source QUAL value.
+
+    **Arguments:**
+
+    - `min`: optional inclusive lower QUAL threshold.
+    - `max`: optional inclusive upper QUAL threshold.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     return PredicateExpr("qual", _validate_nonnegative_float_range("qual", min=min, max=max))
 
 
 def mac(*, min: int | None = None, max: int | None = None) -> FilterExpr:
+    r"""Keep variants by minor allele count over called genotypes.
+
+    **Arguments:**
+
+    - `min`: optional inclusive lower MAC threshold.
+    - `max`: optional inclusive upper MAC threshold.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     return PredicateExpr("mac", _validate_int_range("mac", min=min, max=max))
 
 
 def missing_rate(max: float) -> FilterExpr:
+    r"""Keep variants with missing-call rate at or below `max`.
+
+    **Arguments:**
+
+    - `max`: inclusive upper missing-call-rate threshold.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     value = _validate_rate("missing_rate max", max)
     return PredicateExpr("missing_rate", (("max", value),))
 
 
 def polymorphic() -> FilterExpr:
+    r"""Keep variants with nonzero minor allele count.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     return PredicateExpr("polymorphic")
 
 
 def id_in(values: Iterable[str]) -> FilterExpr:
+    r"""Keep variants whose source ID is in `values`.
+
+    **Arguments:**
+
+    - `values`: iterable of unique variant ID strings.
+
+    **Returns:**
+
+    `FilterExpr` predicate.
+    """
     if isinstance(values, str) or not isinstance(values, Iterable):
         raise InvalidOptionError("id_in requires an iterable of variant ID strings")
     normalized = tuple(sorted(values) if isinstance(values, set) else values)

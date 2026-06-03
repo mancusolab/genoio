@@ -13,6 +13,7 @@ use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
 
 use crate::error::Result;
 
+/// Read VCF/BCF sample and variant metadata without returning genotypes.
 pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
@@ -43,6 +44,7 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     })
 }
 
+/// Read retained VCF/BCF diploid genotypes as a dense sample-by-variant matrix.
 pub fn read_vcf_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -51,12 +53,15 @@ pub fn read_vcf_dense(
     read_vcf_dense_windowed(path, requested_samples, variant_filter, None)
 }
 
+/// Read retained VCF/BCF diploid genotypes as dense values over an optional block window.
 pub fn read_vcf_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    // Region filters can be pushed into htslib only when the expression shape
+    // is a concrete safe region and the compressed source has an index.
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
             return read_indexed_vcf_dense(
@@ -81,6 +86,7 @@ pub fn read_vcf_dense_windowed(
     )
 }
 
+/// Read retained VCF/BCF diploid genotypes as sparse CSC.
 pub fn read_vcf_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -89,12 +95,15 @@ pub fn read_vcf_sparse(
     read_vcf_sparse_windowed(path, requested_samples, variant_filter, None)
 }
 
+/// Read retained VCF/BCF diploid genotypes as sparse CSC over an optional block window.
 pub fn read_vcf_sparse_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    // Keep sparse and dense region behavior identical so both paths retain the
+    // same variants and fail the same way for unindexed compressed inputs.
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
             return read_indexed_vcf_sparse(
@@ -119,6 +128,7 @@ pub fn read_vcf_sparse_windowed(
     )
 }
 
+/// Read phased VCF/BCF diploid genotypes as dense haplotype rows.
 pub fn read_vcf_haplotypes_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -127,6 +137,7 @@ pub fn read_vcf_haplotypes_dense(
     read_vcf_haplotypes_dense_windowed(path, requested_samples, variant_filter, None)
 }
 
+/// Read phased VCF/BCF diploid genotypes as dense haplotype rows over a block window.
 pub fn read_vcf_haplotypes_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -145,6 +156,7 @@ pub fn read_vcf_haplotypes_dense_windowed(
     )
 }
 
+/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows.
 pub fn read_vcf_haplotypes_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -153,6 +165,7 @@ pub fn read_vcf_haplotypes_sparse(
     read_vcf_haplotypes_sparse_windowed(path, requested_samples, variant_filter, None)
 }
 
+/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows over a block window.
 pub fn read_vcf_haplotypes_sparse_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -252,6 +265,8 @@ fn read_vcf_dense_records<R: Read>(
     let mut variant_major_missing = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        // Check before pulling another record; otherwise block reads still pay
+        // to scan one extra variant after the requested retained window.
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
@@ -359,6 +374,8 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     let mut variant_major_missing = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        // Haplotype reads use the same retained-window semantics as genotype
+        // reads, but each retained sample contributes two output rows.
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
@@ -459,6 +476,8 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
     let mut variants = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        // Stop before reading the next record so sparse blocks do not scan the
+        // remainder of large VCF/BCF files after the block is filled.
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
@@ -551,6 +570,8 @@ fn read_vcf_sparse_records<R: Read>(
     let mut variants = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        // Stop before reading the next record so sparse blocks do not scan the
+        // remainder of large VCF/BCF files after the block is filled.
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
