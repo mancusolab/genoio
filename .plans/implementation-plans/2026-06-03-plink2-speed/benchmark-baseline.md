@@ -184,3 +184,68 @@ short-circuit. The metadata-returning scenario still returned
 work. Sample-filtered and genotype-filtered medians remained effectively
 unchanged, which is consistent with those scenarios not using the matrix-only
 fast path; gating is covered by the contract tests.
+
+## Phase 3 Scratch-Reuse and Sequential-Read Benchmark
+
+Provenance:
+
+- Date: 2026-06-03 10:01:09 HST
+- Git commit before documentation commit: `a6e06c311a160c434b637658bf3776e2c9b59805`
+- Build status: Rust extension rebuilt in release mode with
+  `env CC=clang AR=ar python -m maturin develop --release`
+- Machine note: benchmark script did not emit a machine note. Local machine
+  recorded separately as `macOS-26.3.1-arm64-arm-64bit`, `arm64`;
+  `uname -a` reported `Darwin nmancuso861.local 25.3.0 ... RELEASE_ARM64_T8103 arm64`.
+- Data prefix: `data/chr22_hg38`
+- Optional comparison dependency: `pgenlib` importable from
+  `/Users/nicholas/micromamba/lib/python3.11/site-packages/pgenlib.cpython-311-darwin.so`
+- `.pvar` handling: local fixture has `chr22_hg38.pvar.zst`; `zstd` was available
+  at `/Users/nicholas/micromamba/bin/zstd`.
+
+Command:
+
+```bash
+python scripts/benchmark_plink2.py --scenario all --prefix data/chr22_hg38 --max-variants 1000 --repeats 5 --no-compare
+```
+
+Output:
+
+```text
+genoio_plink2_matrix_only
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0148s min=0.0144s runs=0.0144 0.0155 0.0148 0.0146 0.0152
+pgenlib_pgenreader
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0065s min=0.0064s runs=0.0080 0.0065 0.0066 0.0064 0.0064
+genoio_plink2_with_variants
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0185s min=0.0182s runs=0.0226 0.0197 0.0182 0.0185 0.0185
+  variant_metadata length=1000
+skipped pgenlib comparison for with-variants: pgenlib does not provide the same metadata/filter contract
+genoio_plink2_sample_filtered
+  matrix shape=(1601, 1000) dtype=float32 sum=34913 missing=0
+  time median=0.0129s min=0.0129s runs=0.0129 0.0129 0.0129 0.0130 0.0130
+skipped pgenlib comparison for sample-filtered: pgenlib does not provide the same metadata/filter contract
+genoio_plink2_genotype_filtered
+  matrix shape=(3202, 1000) dtype=float32 sum=447988 missing=0
+  time median=13.2681s min=13.0629s runs=13.3502 13.1876 13.0629 13.2944 13.2681
+skipped pgenlib comparison for genotype-filtered: pgenlib does not provide the same metadata/filter contract
+```
+
+Phase 1 baseline to Phase 3 median comparison:
+
+| Scenario | Phase 1 baseline median | Phase 3 median | Change |
+| --- | ---: | ---: | ---: |
+| Matrix-only | 0.0220 s | 0.0148 s | 1.49x faster |
+| Metadata-returning | 0.0232 s | 0.0185 s | 1.25x faster |
+| Sample-filtered | 0.0158 s | 0.0129 s | 1.22x faster |
+| Genotype-filtered | 16.1535 s | 13.2681 s | 1.22x faster |
+
+The scratch-reuse and sequential fixed-width read changes are visible on the
+small fixture across the non-genotype-filter hot paths: matrix-only, metadata-
+returning, and sample-filtered scenarios all reduced their medians relative to
+the Phase 1 baseline. The genotype-filtered scenario also improved, but its
+absolute runtime is still dominated by filter evaluation over genotypes: it
+remains a 13-second path while the direct matrix and metadata scenarios are
+below 20 milliseconds. The remaining gap to `pgenlib` in matrix-only reads is
+still visible (`pgenlib` median 0.0065 s versus `genoio` median 0.0148 s).
