@@ -35,6 +35,20 @@ fn write_vcf(path: &Path) {
     );
 }
 
+fn write_vcf_with_invalid_record_after_first(path: &Path) {
+    write_text(
+        path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1
+1\t20\tbad\tC\tT,G\t.\tPASS\t.\tGT\t0/1\t1/2
+",
+    );
+}
+
 fn write_plink_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let bed = dir.join("tiny.bed");
     let bim = dir.join("tiny.bim");
@@ -58,6 +72,58 @@ F1 S2 0 0 2 -9
 ",
     );
     (bed, bim, fam)
+}
+
+#[test]
+fn vcf_dense_window_stops_after_requested_retained_variants() {
+    let dir = unique_dir("vcf-dense-window-stop");
+    let path = dir.join("blocks.vcf");
+    write_vcf_with_invalid_record_after_first(&path);
+
+    let block = genoio_io::read_vcf_dense_windowed(
+        &path,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("windowed vcf should stop before later invalid records");
+
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1"]
+    );
+    assert_eq!(block.values, vec![0.0, 1.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn vcf_sparse_window_stops_after_requested_retained_variants() {
+    let dir = unique_dir("vcf-sparse-window-stop");
+    let path = dir.join("blocks.vcf");
+    write_vcf_with_invalid_record_after_first(&path);
+
+    let block = genoio_io::read_vcf_sparse_windowed(
+        &path,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("windowed sparse vcf should stop before later invalid records");
+
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1"]
+    );
+    assert_eq!(block.variants.len(), 1);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 
 #[test]

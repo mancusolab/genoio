@@ -252,6 +252,9 @@ fn read_vcf_dense_records<R: Read>(
     let mut variant_major_missing = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
@@ -266,6 +269,9 @@ fn read_vcf_dense_records<R: Read>(
             if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
                 diagnostics.dropped_genotype_variants += 1;
                 continue;
+            }
+            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                break;
             }
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
@@ -302,6 +308,9 @@ fn read_vcf_dense_records<R: Read>(
             attach_variant_stats(&mut variant, stats);
         }
         if requires_stats {
+            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                break;
+            }
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
@@ -350,6 +359,9 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     let mut variant_major_missing = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
@@ -364,6 +376,9 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
             if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, None)) {
                 diagnostics.dropped_genotype_variants += 1;
                 continue;
+            }
+            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                break;
             }
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
@@ -388,6 +403,9 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
             attach_variant_stats(&mut variant, stats);
         }
         if requires_stats {
+            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                break;
+            }
             let include_in_window =
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
@@ -441,6 +459,9 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
     let mut variants = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
@@ -530,6 +551,9 @@ fn read_vcf_sparse_records<R: Read>(
     let mut variants = Vec::new();
     let mut retained_index = 0_usize;
     for record_result in reader.records() {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
         let mut variant = variant_record_from_record(path, &header, &record)?;

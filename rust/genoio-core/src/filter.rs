@@ -39,6 +39,10 @@ impl VariantWindow {
     pub fn contains(self, retained_index: usize) -> bool {
         retained_index >= self.start && retained_index < self.start.saturating_add(self.len)
     }
+
+    pub fn is_past(self, retained_index: usize) -> bool {
+        retained_index >= self.start.saturating_add(self.len)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
