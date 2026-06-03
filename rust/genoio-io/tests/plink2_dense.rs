@@ -585,6 +585,81 @@ S3
 }
 
 #[test]
+fn plink2_dense_fixed_width_source_window_crosses_packed_batch_boundary() {
+    let dir = unique_dir("plink2-fixed-window-batch-boundary");
+    let n_variants = 70;
+    let records = (0..n_variants)
+        .map(|variant_index| match variant_index % 4 {
+            0 => 0x2c,
+            1 => 0x11,
+            2 => 0x06,
+            _ => 0x3f,
+        })
+        .collect::<Vec<_>>();
+    let pgen_bytes = fixed_width_pgen(&records, 3, n_variants);
+    let pgen = dir.join("fixed.pgen");
+    let pvar = dir.join("fixed.pvar");
+    let psam = dir.join("fixed.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    let pvar_body = (0..n_variants)
+        .map(|index| format!("1 {} rs{} A G\n", 10 + index, index + 1))
+        .collect::<String>();
+    write_text(&pvar, &format!("#CHROM POS ID REF ALT\n{pvar_body}"));
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+
+    let full = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect("full fixed-width pgen should decode");
+    let window = VariantWindow { start: 1, len: 66 };
+    let metadata_bearing =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), false)
+            .expect("metadata-bearing batch-spanning source window should decode");
+    let matrix_only =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), true)
+            .expect("matrix-only batch-spanning source window should decode");
+
+    let expected_values = sample_major_window(
+        &full.values,
+        full.n_samples,
+        full.n_variants,
+        window.start,
+        window.len,
+    );
+    let expected_missing = sample_major_window(
+        &full.missing_mask,
+        full.n_samples,
+        full.n_variants,
+        window.start,
+        window.len,
+    );
+    assert_eq!(metadata_bearing.values, expected_values);
+    assert_eq!(metadata_bearing.missing_mask, expected_missing);
+    assert_eq!(matrix_only.values, expected_values);
+    assert_eq!(matrix_only.missing_mask, expected_missing);
+    assert_eq!(
+        metadata_bearing
+            .variants
+            .first()
+            .map(|variant| variant.id.as_str()),
+        Some("rs2")
+    );
+    assert_eq!(
+        metadata_bearing
+            .variants
+            .last()
+            .map(|variant| variant.id.as_str()),
+        Some("rs67")
+    );
+}
+
+#[test]
 fn plink2_dense_variable_width_source_window_matches_full_read_slice() {
     let dir = unique_dir("plink2-variable-window-matches-full");
     let pgen_bytes = variable_width_pgen(
