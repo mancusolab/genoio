@@ -12,7 +12,7 @@ first 1,000 variants and constructs a dense `float32` matrix with shape
 |---|---:|---:|---|
 | VCF vs `cyvcf2` | 0.1064 s | 0.2383 s | genoio 2.24x faster |
 | PLINK1 vs `pandas_plink` | 0.3968 s | 2.4382 s | genoio 6.15x faster |
-| PLINK2 matrix-only vs `pgenlib` | 0.0145-0.0147 s | 0.0066 s | `pgenlib` 2.16-2.23x faster |
+| PLINK2 matrix-only vs `pgenlib` | 0.0100 s | 0.0069 s | `pgenlib` 1.45x faster |
 
 These numbers are workload- and machine-dependent. Treat them as local
 benchmarks, not universal claims.
@@ -32,20 +32,18 @@ focused on reader behavior rather than differences in samples or variants. The
 VCF header records `##source=PLINKv2.0`.
 
 For the PLINK2 timing above, the raw Phase 1 baseline, post-short-circuit
-benchmark, Phase 3 scratch-reuse/sequential-read benchmark, and Phase 4 direct
-sample-major fill decision are recorded in
+benchmark, Phase 3 scratch-reuse/sequential-read benchmark, Phase 4 direct
+sample-major fill decision, and Phase 6 packed-batch decision are recorded in
 `.plans/implementation-plans/2026-06-03-plink2-speed/benchmark-baseline.md`.
-The Phase 4 PLINK2 direct-fill decision run was collected on 2026-06-03 at git
-commit `135f3d2a165882263ed3520872998473bfd9615b`, after rebuilding the Rust
+The Phase 6 PLINK2 packed-batch decision run was collected on 2026-06-03 at git
+commit `3bb767085c43c8a39687fa93e4b238c305d3c5bc`, after rebuilding the Rust
 extension in release mode with
 `env CC=clang AR=ar python -m maturin develop --release`, on macOS arm64.
-Matrix-only 1,000-variant medians were 0.0145-0.0147 s for `genoio` and
-0.0066 s for `pgenlib`; the 10,000-variant medians were 0.2746 s for `genoio`
-and 0.0467 s for `pgenlib`. The benchmark-supported decision is to keep direct
-sample-major fill for unfiltered dense source windows because it is neutral to
-slightly faster than the Phase 3 baseline while removing the variant-major
-accumulation and transpose copy. The next PLINK2 optimization target remains
-packed batch transpose work because `pgenlib` is still materially faster.
+Matrix-only 1,000-variant medians were 0.0100 s for `genoio` and 0.0069 s for
+`pgenlib`; the 10,000-variant medians were 0.0941 s for `genoio` and 0.0497 s
+for `pgenlib`. The benchmark-supported decision is to keep packed batches for
+unfiltered dense source windows because they improve both required matrix-only
+benchmark sizes while preserving exact agreement with `pgenlib`.
 
 For the timings above, the VCF, PLINK1, and PLINK2 matrix-only comparisons
 produced the same matrix summary:

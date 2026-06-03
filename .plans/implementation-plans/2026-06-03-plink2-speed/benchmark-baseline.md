@@ -330,3 +330,67 @@ scratch-reuse baseline while removing the variant-major accumulation and
 transpose copy for unfiltered matrix-only source windows. Proceed to packed
 batch transpose work because `pgenlib` remains materially faster: 2.16x faster
 on the best direct-fill 1,000-variant run and 5.88x faster at 10,000 variants.
+
+## Phase 6 Packed Batch Transpose Decision
+
+Provenance:
+
+- Date: 2026-06-03 11:33:16 HST
+- Git commit before documentation commit: `3bb767085c43c8a39687fa93e4b238c305d3c5bc`
+- Build status: Rust extension rebuilt in release mode with
+  `env CC=clang AR=ar python -m maturin develop --release`
+- Packed-batch status: current build uses private packed variant batches for
+  unfiltered dense source-window construction in both matrix-only and
+  metadata-bearing paths.
+- Data prefix: `data/chr22_hg38`
+- Batch size: 64 packed variants.
+- Decision: keep the packed-batch production source-window path.
+
+Required 1,000-variant command:
+
+```bash
+python scripts/benchmark_plink2.py --scenario matrix-only --prefix data/chr22_hg38 --max-variants 1000 --repeats 5
+```
+
+Output:
+
+```text
+genoio_plink2_matrix_only
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0100s min=0.0095s runs=0.0095 0.0109 0.0100 0.0101 0.0095
+pgenlib_pgenreader
+  matrix shape=(3202, 1000) dtype=float32 sum=72577 missing=0
+  time median=0.0069s min=0.0068s runs=0.0102 0.0073 0.0069 0.0068 0.0068
+comparison
+  genoio_plink2_matrix_only.shape=(3202, 1000) pgenlib_pgenreader.shape=(3202, 1000)
+  allclose=True max_abs_diff=0
+```
+
+Required 10,000-variant command:
+
+```bash
+python scripts/benchmark_plink2.py --scenario matrix-only --prefix data/chr22_hg38 --max-variants 10000 --repeats 5 --no-compare
+```
+
+Output:
+
+```text
+genoio_plink2_matrix_only
+  matrix shape=(3202, 10000) dtype=float32 sum=802432 missing=0
+  time median=0.0941s min=0.0926s runs=0.1121 0.0935 0.0941 0.0926 0.0950
+pgenlib_pgenreader
+  matrix shape=(3202, 10000) dtype=float32 sum=802432 missing=0
+  time median=0.0497s min=0.0472s runs=0.0472 0.0491 0.0508 0.0504 0.0497
+```
+
+Packed-batch comparison:
+
+| Window | Phase 4 direct-fill `genoio` median | Phase 6 packed-batch `genoio` median | `pgenlib` median | Decision signal |
+| --- | ---: | ---: | ---: | --- |
+| 1,000 variants | 0.0145-0.0147 s | 0.0100 s | 0.0069 s | Improved; remaining pgenlib gap is 1.45x |
+| 10,000 variants | 0.2746 s | 0.0941 s | 0.0497 s | Improved; remaining pgenlib gap is 1.89x |
+
+Decision rationale: packed batches materially improve the unfiltered matrix-only
+source-window path at both required window sizes while preserving exact matrix
+agreement with `pgenlib` on the 1,000-variant comparison. Keep the production
+path and retain the parity tests.
