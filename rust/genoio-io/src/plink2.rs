@@ -19,6 +19,7 @@ const PGEN_MODE_FIXED_WIDTH_HARDCALLS: u8 = 0x02;
 const PGEN_MODE_VARIABLE_WIDTH: u8 = 0x10;
 const PGEN_HEADER_LEN: u64 = 12;
 const PGEN_VARIANT_BLOCK_SIZE: usize = 65_536;
+const PGEN_PACKED_TRANSPOSE_BATCH: usize = 64;
 
 #[derive(Debug, Clone)]
 struct PgenHeader {
@@ -127,6 +128,68 @@ impl PackedGenotypes {
         let mask = (1_u64 << used_bits) - 1;
         if let Some(last_word) = self.words.last_mut() {
             *last_word &= mask;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PackedVariantBatch {
+    variants: Vec<PackedGenotypes>,
+    sample_ct: usize,
+}
+
+impl PackedVariantBatch {
+    fn new(sample_ct: usize) -> Self {
+        Self {
+            variants: Vec::with_capacity(PGEN_PACKED_TRANSPOSE_BATCH),
+            sample_ct,
+        }
+    }
+
+    fn push(&mut self, packed: &PackedGenotypes) {
+        debug_assert_eq!(packed.sample_ct, self.sample_ct);
+        let mut copy = PackedGenotypes::default();
+        copy.copy_from(packed);
+        self.variants.push(copy);
+    }
+
+    fn len(&self) -> usize {
+        self.variants.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.variants.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.variants.len() == PGEN_PACKED_TRANSPOSE_BATCH
+    }
+
+    fn clear(&mut self) {
+        self.variants.clear();
+    }
+
+    fn expand_into_sample_major(
+        &self,
+        source_indices: &[usize],
+        variant_start: usize,
+        n_variants: usize,
+        out_values: &mut [f32],
+        out_missing: &mut [bool],
+    ) {
+        debug_assert!(variant_start + self.variants.len() <= n_variants);
+        debug_assert_eq!(out_values.len(), source_indices.len() * n_variants);
+        debug_assert_eq!(out_missing.len(), source_indices.len() * n_variants);
+
+        for (sample_index, source_index) in source_indices.iter().copied().enumerate() {
+            debug_assert!(source_index < self.sample_ct);
+            let row_start = sample_index * n_variants;
+            for (batch_variant_index, packed) in self.variants.iter().enumerate() {
+                let variant_index = variant_start + batch_variant_index;
+                let (value, is_missing) = decode_pgen_code(packed.get(source_index));
+                out_values[row_start + variant_index] = value;
+                out_missing[row_start + variant_index] = is_missing;
+            }
         }
     }
 }
@@ -1717,6 +1780,65 @@ mod tests {
 
         assert_eq!(values, vec![0.0, 1.0, 2.0, 0.0]);
         assert_eq!(missing, vec![true, false, false, false]);
+    }
+
+    #[test]
+    fn packed_variant_batch_expands_like_variant_at_a_time() {
+        let sample_ct = 5;
+        let source_indices = (0..sample_ct).collect::<Vec<_>>();
+        let n_variants = PGEN_PACKED_TRANSPOSE_BATCH + 3;
+        let mut packed_variants = Vec::with_capacity(n_variants);
+        let mut expected_values = vec![0.0; sample_ct * n_variants];
+        let mut expected_missing = vec![false; sample_ct * n_variants];
+        let mut scratch_values = Vec::new();
+        let mut scratch_missing = Vec::new();
+
+        for variant_index in 0..n_variants {
+            let mut packed = PackedGenotypes::default();
+            packed.resize(sample_ct);
+            for sample_index in 0..sample_ct {
+                packed.set(sample_index, ((variant_index + sample_index) % 4) as u8);
+            }
+            packed.expand_selected(&source_indices, &mut scratch_values, &mut scratch_missing);
+            append_variant_to_sample_major(
+                &scratch_values,
+                &scratch_missing,
+                variant_index,
+                n_variants,
+                &mut expected_values,
+                &mut expected_missing,
+            );
+            packed_variants.push(packed);
+        }
+
+        let mut batch = PackedVariantBatch::new(sample_ct);
+        let mut actual_values = vec![0.0; sample_ct * n_variants];
+        let mut actual_missing = vec![false; sample_ct * n_variants];
+        let mut batch_start = 0;
+        for packed in &packed_variants {
+            batch.push(packed);
+            if batch.is_full() {
+                batch.expand_into_sample_major(
+                    &source_indices,
+                    batch_start,
+                    n_variants,
+                    &mut actual_values,
+                    &mut actual_missing,
+                );
+                batch_start += batch.len();
+                batch.clear();
+            }
+        }
+        batch.expand_into_sample_major(
+            &source_indices,
+            batch_start,
+            n_variants,
+            &mut actual_values,
+            &mut actual_missing,
+        );
+
+        assert_eq!(actual_values, expected_values);
+        assert_eq!(actual_missing, expected_missing);
     }
 
     #[test]
