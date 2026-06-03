@@ -79,6 +79,65 @@ fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -
     bytes
 }
 
+fn write_bad_variable_width_block_offset_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = unique_dir(name);
+    let mut pgen_bytes = variable_width_pgen(&[0], &[&[0x00]], 4);
+    pgen_bytes[12] = pgen_bytes[12].saturating_sub(1);
+    let pgen = dir.join("bad_offset.pgen");
+    let pvar = dir.join("bad_offset.pvar");
+    let psam = dir.join("bad_offset.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+S4
+",
+    );
+    (pgen, pvar, psam)
+}
+
+fn variable_width_two_block_pgen_with_bad_second_offset() -> Vec<u8> {
+    let first_block_variant_ct = 65_536_usize;
+    let n_variants = first_block_variant_ct + 1;
+    let header_len = 12 + 16 + first_block_variant_ct + first_block_variant_ct + 1 + 1;
+    let second_block_offset = header_len + first_block_variant_ct - 1;
+    let mut bytes = vec![0x6c, 0x1b, 0x10];
+    bytes.extend(
+        u32::try_from(n_variants)
+            .expect("test variant count fits u32")
+            .to_le_bytes(),
+    );
+    bytes.extend(4_u32.to_le_bytes());
+    bytes.push(0x04);
+    bytes.extend(
+        u64::try_from(header_len)
+            .expect("test header length fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(
+        u64::try_from(second_block_offset)
+            .expect("test block offset fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(std::iter::repeat_n(0_u8, first_block_variant_ct));
+    bytes.extend(std::iter::repeat_n(1_u8, first_block_variant_ct));
+    bytes.push(0);
+    bytes.push(1);
+    bytes.extend(std::iter::repeat_n(0_u8, n_variants));
+    bytes
+}
+
 fn sample_major_window<T: Copy>(
     values: &[T],
     n_samples: usize,
@@ -921,6 +980,57 @@ S4
 
     let error = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
         .expect_err("bad block offset should fail");
+
+    assert!(error.to_string().contains("block offset"));
+}
+
+#[test]
+fn plink2_dense_matrix_only_source_window_rejects_variable_width_block_offset_mismatch() {
+    let (pgen, pvar, psam) = write_bad_variable_width_block_offset_fixture(
+        "plink2-dense-window-bad-block-offset-matrix-only",
+    );
+    let window = VariantWindow { start: 0, len: 1 };
+
+    let error =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), true)
+            .expect_err("matrix-only source window should reject bad block offset");
+
+    assert!(error.to_string().contains("block offset"));
+}
+
+#[test]
+fn plink2_dense_metadata_source_window_rejects_variable_width_block_offset_mismatch() {
+    let (pgen, pvar, psam) = write_bad_variable_width_block_offset_fixture(
+        "plink2-dense-window-bad-block-offset-metadata",
+    );
+    let window = VariantWindow { start: 0, len: 1 };
+
+    let error =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), false)
+            .expect_err("metadata source window should reject bad block offset");
+
+    assert!(error.to_string().contains("block offset"));
+}
+
+#[test]
+fn plink2_dense_source_window_rejects_variable_width_block_offset_mismatch_after_block_boundary() {
+    let dir = unique_dir("plink2-dense-window-bad-second-block-offset");
+    let pgen = dir.join("bad_second_offset.pgen");
+    fs::write(
+        &pgen,
+        variable_width_two_block_pgen_with_bad_second_offset(),
+    )
+    .expect("pgen fixture should be written");
+    let pvar = dir.join("unused.pvar");
+    let psam = dir.join("unused.psam");
+    let window = VariantWindow {
+        start: 65_536,
+        len: 1,
+    };
+
+    let error =
+        genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), true)
+            .expect_err("source window crossing block boundary should reject bad block offset");
 
     assert!(error.to_string().contains("block offset"));
 }

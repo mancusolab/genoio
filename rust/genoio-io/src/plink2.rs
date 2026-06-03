@@ -1215,6 +1215,7 @@ fn read_variable_width_header_body_prefix(
         block_offsets.push(u64::from_le_bytes(bytes));
     }
 
+    let header_end = variable_width_header_end(path, variant_ct, type_width_bits, length_width)?;
     let prefix_block_ct = prefix_variant_ct.div_ceil(PGEN_VARIANT_BLOCK_SIZE);
     let mut record_types = Vec::with_capacity(prefix_variant_ct);
     let mut record_offsets = Vec::with_capacity(prefix_variant_ct.saturating_add(1));
@@ -1241,7 +1242,21 @@ fn read_variable_width_header_body_prefix(
             &mut record_types,
         )?;
         if record_offsets.is_empty() {
+            if block_index == 0 && block_offset != header_end {
+                return Err(MetadataError::parse(
+                    path,
+                    "pgen first variant-block offset does not match header length",
+                ));
+            }
             record_offsets.push(block_offset);
+        } else if record_offsets
+            .get(block_start)
+            .is_none_or(|expected_offset| *expected_offset != block_offset)
+        {
+            return Err(MetadataError::parse(
+                path,
+                "pgen variant-block offset does not match preceding record lengths",
+            ));
         }
         let mut offset = block_offset;
         for _ in 0..needed_in_block {
@@ -1264,7 +1279,63 @@ fn read_variable_width_header_body_prefix(
     for record_type in &record_types {
         validate_supported_variable_record_type(path, *record_type)?;
     }
+    if let Some(prefix_end) = record_offsets.last() {
+        let actual_len = file
+            .metadata()
+            .map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .len();
+        if *prefix_end > actual_len {
+            return Err(MetadataError::parse(
+                path,
+                "pgen variable-width records extend past end of file",
+            ));
+        }
+    }
     Ok((record_types, record_offsets))
+}
+
+fn variable_width_header_end(
+    path: &Path,
+    variant_ct: usize,
+    type_width_bits: usize,
+    length_width: usize,
+) -> Result<u64> {
+    let block_ct = variant_ct.div_ceil(PGEN_VARIANT_BLOCK_SIZE);
+    let block_offsets_len = block_ct
+        .checked_mul(8)
+        .ok_or_else(|| MetadataError::parse(path, "pgen variable-width header is out of range"))?;
+    let mut header_end = PGEN_HEADER_LEN
+        .checked_add(u64::try_from(block_offsets_len).map_err(|_| {
+            MetadataError::parse(path, "pgen variable-width header is out of range")
+        })?)
+        .ok_or_else(|| MetadataError::parse(path, "pgen variable-width header is out of range"))?;
+    for block_index in 0..block_ct {
+        let block_variant_ct = block_variant_count(variant_ct, block_index);
+        let type_table_len = if type_width_bits == 8 {
+            block_variant_ct
+        } else {
+            block_variant_ct.div_ceil(2)
+        };
+        let length_table_len = block_variant_ct.checked_mul(length_width).ok_or_else(|| {
+            MetadataError::parse(path, "pgen variable-width header is out of range")
+        })?;
+        let table_len = type_table_len
+            .checked_add(length_table_len)
+            .ok_or_else(|| {
+                MetadataError::parse(path, "pgen variable-width header is out of range")
+            })?;
+        header_end = header_end
+            .checked_add(u64::try_from(table_len).map_err(|_| {
+                MetadataError::parse(path, "pgen variable-width header is out of range")
+            })?)
+            .ok_or_else(|| {
+                MetadataError::parse(path, "pgen variable-width header is out of range")
+            })?;
+    }
+    Ok(header_end)
 }
 
 fn read_variable_record_type_prefix(
@@ -1522,8 +1593,11 @@ fn read_variable_width_variant_packed(
 ) -> Result<()> {
     let start = header.record_offsets[variant_index];
     let end = header.record_offsets[variant_index + 1];
-    let record_len = usize::try_from(end - start)
-        .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
+    let record_len = usize::try_from(
+        end.checked_sub(start)
+            .ok_or_else(|| MetadataError::parse(path, "pgen record length is out of range"))?,
+    )
+    .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
     file.seek(SeekFrom::Start(start))
         .map_err(|source| MetadataError::Io {
             path: path.to_path_buf(),

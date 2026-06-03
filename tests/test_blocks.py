@@ -9,6 +9,39 @@ from scipy import sparse as scipy_sparse
 from test_dense_read import write_fixed_width_plink2
 
 
+def write_bad_variable_width_block_offset_plink2(tmp_path: Path) -> Path:
+    prefix = tmp_path / "bad_offset"
+    record = bytes([0x00])
+    header_len = 12 + 8 + 1 + 1
+    bad_first_block_offset = header_len - 1
+    prefix.with_suffix(".pgen").write_bytes(
+        b"\x6c\x1b\x10"
+        + (1).to_bytes(4, "little")
+        + (4).to_bytes(4, "little")
+        + bytes([0x04])
+        + bad_first_block_offset.to_bytes(8, "little")
+        + bytes([0x00])
+        + bytes([len(record)])
+        + record
+    )
+    prefix.with_suffix(".pvar").write_text(
+        """\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+"""
+    )
+    prefix.with_suffix(".psam").write_text(
+        """\
+#IID
+S1
+S2
+S3
+S4
+"""
+    )
+    return prefix
+
+
 def write_blocks_vcf(tmp_path: Path) -> Path:
     path = tmp_path / "blocks.vcf"
     path.write_text(
@@ -205,6 +238,24 @@ def test_plink2_blocks_metadata_required_paths_reject_malformed_companion_files(
 
     with pytest.raises(genoio.InvalidSourceError, match=match):
         list(dataset.blocks(size=1, **read_options))
+
+
+def test_plink2_matrix_only_blocks_reject_bad_variable_width_block_offset(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_bad_variable_width_block_offset_plink2(tmp_path))
+
+    with pytest.raises(genoio.InvalidSourceError, match="block offset|header length"):
+        next(dataset.blocks(size=1))
+
+
+def test_plink2_metadata_blocks_reject_bad_variable_width_block_offset(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_bad_variable_width_block_offset_plink2(tmp_path))
+
+    with pytest.raises(genoio.InvalidSourceError, match="block offset|header length"):
+        next(dataset.blocks(size=1, return_variants=True))
 
 
 def test_blocks_validate_size(tmp_path):
