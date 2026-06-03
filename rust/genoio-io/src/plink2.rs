@@ -133,7 +133,7 @@ impl PackedGenotypes {
 
 #[derive(Debug, Clone)]
 struct PgenDecoderState {
-    previous_non_ld_categories: Vec<u8>,
+    previous_non_ld_packed: PackedGenotypes,
     has_previous_non_ld: bool,
     record: Vec<u8>,
     categories: Vec<u8>,
@@ -145,7 +145,7 @@ struct PgenDecoderState {
 impl PgenDecoderState {
     fn new(sample_ct: usize, selected_sample_ct: usize) -> Self {
         Self {
-            previous_non_ld_categories: Vec::with_capacity(sample_ct),
+            previous_non_ld_packed: PackedGenotypes::default(),
             has_previous_non_ld: false,
             record: Vec::with_capacity(sample_ct.div_ceil(4)),
             categories: Vec::with_capacity(sample_ct),
@@ -1296,14 +1296,12 @@ fn read_plink2_variant_values(
             );
         }
         PgenLayout::VariableWidth => {
-            read_variable_width_variant_categories(
-                path,
-                file,
-                header,
-                variant_index,
-                decoder_state,
-            )?;
-            fill_plink2_variant_values(source_indices, decoder_state);
+            read_variable_width_variant_packed(path, file, header, variant_index, decoder_state)?;
+            decoder_state.packed.expand_selected(
+                source_indices,
+                &mut decoder_state.values,
+                &mut decoder_state.missing,
+            );
         }
     }
     Ok(())
@@ -1372,7 +1370,7 @@ fn read_fixed_width_variant_packed_sequential(
     Ok(())
 }
 
-fn read_variable_width_variant_categories(
+fn read_variable_width_variant_packed(
     path: &Path,
     file: &mut File,
     header: &PgenHeader,
@@ -1405,18 +1403,11 @@ fn read_variable_width_variant_categories(
                     "pgen uncompressed record is shorter than expected",
                 ));
             }
-            decode_packed_categories(
-                &record[..header.bytes_per_variant],
-                header.sample_ct,
-                &mut decoder_state.categories,
-            );
+            decoder_state
+                .packed
+                .load_pgen_payload(&record[..header.bytes_per_variant], header.sample_ct);
         }
-        1 => decode_one_bit_record(
-            path,
-            record,
-            header.sample_ct,
-            &mut decoder_state.categories,
-        )?,
+        1 => decode_one_bit_record(path, record, header.sample_ct, &mut decoder_state.packed)?,
         2 | 3 => {
             if !decoder_state.has_previous_non_ld {
                 return Err(MetadataError::parse(
@@ -1428,32 +1419,14 @@ fn read_variable_width_variant_categories(
                 path,
                 record,
                 header.sample_ct,
-                &decoder_state.previous_non_ld_categories,
+                &decoder_state.previous_non_ld_packed,
                 compression == 3,
-                &mut decoder_state.categories,
+                &mut decoder_state.packed,
             )?;
         }
-        4 => decode_difflist_record(
-            path,
-            record,
-            header.sample_ct,
-            0,
-            &mut decoder_state.categories,
-        )?,
-        6 => decode_difflist_record(
-            path,
-            record,
-            header.sample_ct,
-            2,
-            &mut decoder_state.categories,
-        )?,
-        7 => decode_difflist_record(
-            path,
-            record,
-            header.sample_ct,
-            3,
-            &mut decoder_state.categories,
-        )?,
+        4 => decode_difflist_record(path, record, header.sample_ct, 0, &mut decoder_state.packed)?,
+        6 => decode_difflist_record(path, record, header.sample_ct, 2, &mut decoder_state.packed)?,
+        7 => decode_difflist_record(path, record, header.sample_ct, 3, &mut decoder_state.packed)?,
         other => {
             return Err(MetadataError::parse(
                 path,
@@ -1461,17 +1434,16 @@ fn read_variable_width_variant_categories(
             ));
         }
     }
-    if decoder_state.categories.len() != header.sample_ct {
+    if decoder_state.packed.sample_ct != header.sample_ct {
         return Err(MetadataError::parse(
             path,
             "pgen decoded category count does not match sample count",
         ));
     }
     if !matches!(compression, 2 | 3) {
-        decoder_state.previous_non_ld_categories.clear();
         decoder_state
-            .previous_non_ld_categories
-            .extend_from_slice(&decoder_state.categories);
+            .previous_non_ld_packed
+            .copy_from(&decoder_state.packed);
         decoder_state.has_previous_non_ld = true;
     }
     Ok(())
@@ -1489,7 +1461,7 @@ fn decode_one_bit_record(
     path: &Path,
     record: &[u8],
     sample_ct: usize,
-    categories: &mut Vec<u8>,
+    packed: &mut PackedGenotypes,
 ) -> Result<()> {
     let common_categories = *record.first().ok_or_else(|| {
         MetadataError::parse(path, "pgen 1-bit record is missing common-category byte")
@@ -1516,16 +1488,16 @@ fn decode_one_bit_record(
         ));
     }
     let bitarray = &record[1..1 + bitarray_len];
-    categories.clear();
-    categories.resize(sample_ct, low_category);
-    for (sample_index, category) in categories.iter_mut().enumerate() {
+    packed.resize(sample_ct);
+    packed.clear_to(low_category);
+    for sample_index in 0..sample_ct {
         if bit_is_set(bitarray, sample_index) {
-            *category = high_category;
+            packed.set(sample_index, high_category);
         }
     }
     let mut cursor = 1 + bitarray_len;
     for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
-        categories[sample_index] = category;
+        packed.set(sample_index, category);
     }
     Ok(())
 }
@@ -1534,24 +1506,23 @@ fn decode_ld_compressed_record(
     path: &Path,
     record: &[u8],
     sample_ct: usize,
-    previous_non_ld_categories: &[u8],
+    previous_non_ld_packed: &PackedGenotypes,
     inverted: bool,
-    categories: &mut Vec<u8>,
+    packed: &mut PackedGenotypes,
 ) -> Result<()> {
-    if previous_non_ld_categories.len() != sample_ct {
+    if previous_non_ld_packed.sample_ct != sample_ct {
         return Err(MetadataError::parse(
             path,
             "pgen LD state length does not match sample count",
         ));
     }
-    categories.clear();
-    categories.extend_from_slice(previous_non_ld_categories);
+    packed.copy_from(previous_non_ld_packed);
     let mut cursor = 0;
     for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
-        categories[sample_index] = category;
+        packed.set(sample_index, category);
     }
     if inverted {
-        invert_categories(categories);
+        packed.invert_0_2();
     }
     Ok(())
 }
@@ -1561,13 +1532,13 @@ fn decode_difflist_record(
     record: &[u8],
     sample_ct: usize,
     base_category: u8,
-    categories: &mut Vec<u8>,
+    packed: &mut PackedGenotypes,
 ) -> Result<()> {
-    categories.clear();
-    categories.resize(sample_ct, base_category);
+    packed.resize(sample_ct);
+    packed.clear_to(base_category);
     let mut cursor = 0;
     for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
-        categories[sample_index] = category;
+        packed.set(sample_index, category);
     }
     Ok(())
 }
@@ -1818,6 +1789,46 @@ mod tests {
                 .map(|sample_index| packed.get(sample_index))
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 3, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn variable_record_helpers_write_packed_genotypes() {
+        let path = Path::new("test.pgen");
+        let mut packed = PackedGenotypes::default();
+
+        decode_one_bit_record(path, &[2, 0b0000_1010, 0], 4, &mut packed)
+            .expect("one-bit record should decode");
+        assert_eq!(
+            (0..4)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 2, 0, 2]
+        );
+
+        decode_difflist_record(path, &[2, 1, 9, 2], 4, 0, &mut packed)
+            .expect("difflist record should decode");
+        assert_eq!(
+            (0..4)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 0, 2]
+        );
+
+        let mut previous = PackedGenotypes::default();
+        previous.resize(4);
+        previous.clear_to(0);
+        previous.set(1, 1);
+        previous.set(2, 2);
+        previous.set(3, 3);
+
+        decode_ld_compressed_record(path, &[1, 2, 0], 4, &previous, true, &mut packed)
+            .expect("LD-compressed record should decode");
+        assert_eq!(
+            (0..4)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![2, 1, 2, 3]
         );
     }
 }
