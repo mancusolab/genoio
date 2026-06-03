@@ -21,6 +21,14 @@ dev = [
     "pytest",
     "ruff",
 ]
+docs = [
+    "hippogriffe>=0.2",
+    "mkdocs>=1.6",
+    "mkdocs-autorefs>=1.4",
+    "mkdocs-include-exclude-files>=0.0.1",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+]
 
 [tool.maturin]
 python-source = "src"

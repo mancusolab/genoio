@@ -14,7 +14,7 @@ from ._errors import (
     UnsupportedFormatError,
     UnsupportedRepresentation,
 )
-from ._filters import biallelic, chrom, id_in, mac, maf, missing_rate, polymorphic, qual, region, snp
+from ._filters import FilterExpr, biallelic, chrom, id_in, mac, maf, missing_rate, polymorphic, qual, region, snp
 
 __all__ = [
     "Dataset",
@@ -23,6 +23,7 @@ __all__ = [
     "samples",
     "variants",
     "blocks",
+    "FilterExpr",
     "chrom",
     "region",
     "snp",

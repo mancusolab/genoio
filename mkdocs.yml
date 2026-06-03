@@ -1,0 +1,96 @@
+theme:
+    name: material
+    features:
+        - navigation.sections
+        - toc.integrate
+        - header.autohide
+    palette:
+        - scheme: default
+          primary: white
+          accent: blue
+          toggle:
+              icon: material/weather-night
+              name: Switch to dark mode
+        - scheme: slate
+          primary: black
+          accent: blue
+          toggle:
+              icon: material/weather-sunny
+              name: Switch to light mode
+    icon:
+        repo: fontawesome/brands/github
+        logo: material/matrix
+
+site_name: genoio
+site_description: Genotype matrix IO for Python.
+site_url: https://mancusolab.github.io/genoio
+
+repo_url: https://github.com/mancusolab/genoio
+repo_name: mancusolab/genoio
+edit_uri: ""
+
+strict: true
+
+extra_css:
+    - _static/custom_css.css
+
+markdown_extensions:
+    - pymdownx.arithmatex:
+          generic: true
+    - pymdownx.superfences
+    - pymdownx.details
+    - pymdownx.snippets:
+          base_path: docs
+    - admonition
+    - toc:
+          permalink: "¤"
+          toc_depth: 4
+
+plugins:
+    - search
+    - autorefs
+    - include_exclude_files:
+          exclude:
+              - "_overrides"
+    - hippogriffe:
+          show_bases: true
+          extra_public_objects:
+              - numpy.ndarray
+              - polars.DataFrame
+              - scipy.sparse.csc_matrix
+              - scipy.sparse.csr_matrix
+    - mkdocstrings:
+          custom_templates: docs/_templates
+          handlers:
+              python:
+                  paths: [src]
+                  load_external_modules: true
+                  options:
+                      force_inspection: true
+                      show_source: false
+                      heading_level: 3
+                      show_root_heading: true
+                      show_symbol_type_heading: true
+                      show_symbol_type_toc: true
+                      filters: ["!^_"]
+                      inherited_members: true
+                      members_order: source
+                      docstring_style: google
+                      show_if_no_docstring: true
+                      line_length: 88
+                      modernize_annotations: true
+                      show_overloads: false
+                      show_signature_annotations: true
+                      separate_signature: false
+
+nav:
+    - Home: index.md
+    - Getting started: guide.md
+    - Filtering: filtering.md
+    - Performance: performance.md
+    - Format support: formats.md
+    - API:
+          - Overview: api/index.md
+          - Reading: api/reading.md
+          - Filters: api/filters.md
+          - Errors: api/errors.md

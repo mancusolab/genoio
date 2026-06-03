@@ -1,12 +1,9 @@
 # genoio
 
-`genoio` reads genotype files into Python matrices with one API across VCF,
-PLINK1, and PLINK2. The Python layer handles source resolution and result
-assembly; Rust readers do the format parsing, filtering, and matrix
-construction.
+Genotype matrix IO for Python. One API for VCF, PLINK1, and PLINK2; Rust
+readers for parsing, filtering, and matrix construction.
 
-The common pattern is to resolve a source once, keep sample metadata fixed, and
-stream variant blocks with the metadata for each block:
+## Example
 
 ```python
 import genoio
@@ -20,15 +17,25 @@ for X, variants in ds.blocks(10_000, return_variants=True):
     run_association_scan(X, samples=samples, variants=variants)
 ```
 
-Dense reads return NumPy arrays. Sparse reads return SciPy sparse matrices.
-Metadata comes back as Polars DataFrames when requested.
+This is the main use case: samples are fixed, variants stream by block, and
+each block carries the metadata needed to interpret its columns. Downstream
+tools do not need to load all variant metadata globally and match it back to
+matrix columns after the fact.
 
-`genoio` is useful when you want to write analysis code once and point it at a
-VCF, PLINK1, or PLINK2 source without changing the rest of the pipeline.
+`read(...)`, `open(...)`, and `blocks(...)` cover the common workflows:
 
-## What It Does
+- `read(...)`: read one matrix now.
+- `open(...)`: resolve a source once and reuse it for metadata, reads, or
+  blocks.
+- `blocks(...)`: stream variant blocks while keeping each block's matrix and
+  variant metadata aligned.
 
-`genoio` turns genotype sources into matrices:
+Dense reads return NumPy arrays with shape `(samples, variants)`. Sparse reads
+return SciPy sparse matrices. Metadata is returned as Polars DataFrames.
+
+## What genoio Does
+
+`genoio` turns genotype files into matrices:
 
 - rows are samples
 - columns are variants
@@ -36,50 +43,8 @@ VCF, PLINK1, or PLINK2 source without changing the rest of the pipeline.
 - missing calls are handled by an explicit policy
 - sample and variant metadata can be returned with the matrix
 
-It also supports:
-
-- variant filters such as `maf(max=0.05)`, `qual(min=20)`, and genomic regions
-- sample keep lists
-- dense or sparse output
-- block-wise reads for larger scans
-- phased VCF haplotype reads
-
-The package does not try to be a full variant annotation framework. It focuses
-on the part many downstream tools need first: getting a correctly oriented
-genotype matrix and enough metadata to keep rows and columns interpretable.
-
-## Install
-
-From a local checkout:
-
-```bash
-pip install -e ".[dev]"
-python -m maturin develop --release
-```
-
-For a quick editable development build, omit `--release`:
-
-```bash
-python -m maturin develop
-```
-
-Use release builds for benchmarks and real performance comparisons.
-
-## Reading Genotypes
-
-Open a dataset once when downstream code will reuse the same source:
-
-```python
-import genoio
-
-ds = genoio.open("data/chr22_hg38.vcf.gz")
-samples = ds.samples()
-
-for X, variants in ds.blocks(5_000, return_variants=True):
-    analyze_block(X, samples=samples, variants=variants)
-```
-
-Use `read(...)` when you only need one matrix:
+The package is meant for analysis pipelines that need a consistent matrix API
+across file formats. It is not a full variant annotation framework.
 
 ```python
 X_vcf = genoio.read("data/chr22_hg38.vcf.gz")
@@ -87,36 +52,14 @@ X_bed = genoio.read("data/chr22_hg38", format="plink1")
 X_pgen = genoio.read("data/chr22_hg38", format="plink2")
 ```
 
-You can pass a PLINK prefix or one member file such as
+PLINK sources can be passed as a prefix or as one member file such as
 `data/chr22_hg38.pgen`; `genoio` resolves companion files from the shared
 prefix.
 
-## Metadata
-
-```python
-samples = genoio.samples("data/chr22_hg38", format="plink2")
-variants = genoio.variants("data/chr22_hg38", format="plink2")
-```
-
-`samples` and `variants` are Polars DataFrames. Variant metadata includes source
-alleles, normalized `a0`/`a1` alleles, optional `qual`, and genotype-derived
-statistics when a read computes them for filtering.
-
-You can return metadata alongside a matrix:
-
-```python
-X, sample_metadata, variant_metadata = genoio.read(
-    "data/chr22_hg38",
-    format="plink2",
-    return_samples=True,
-    return_variants=True,
-)
-```
-
 ## Filtering Expressions
 
-Filters are serializable expression objects. Python builds the expression;
-Rust evaluates it while reading records.
+Filters are serializable expression objects. Python builds the expression; Rust
+evaluates it while reading records.
 
 ```python
 rare_high_quality = (
@@ -125,11 +68,13 @@ rare_high_quality = (
     & genoio.maf(max=0.05)
 )
 
-X, variants = genoio.read(
+for X, variants in genoio.blocks(
     "data/chr22_hg38.vcf.gz",
+    5_000,
     variants=rare_high_quality,
     return_variants=True,
-)
+):
+    run_association_scan(X, variants=variants)
 ```
 
 Expressions compose with Python operators:
@@ -142,10 +87,10 @@ genoio.maf(max=0.01) | genoio.id_in(["rs123", "rs456"])
 
 There are two kinds of predicates:
 
-- metadata predicates use fields already present in the source record, such as
-  chromosome, position, ID, REF/ALT structure, and `QUAL`
-- genotype predicates require decoding retained genotypes first, such as MAF,
-  MAC, missing rate, and polymorphism
+- **Metadata predicates** use fields already present in the source record:
+  chromosome, position, ID, REF/ALT structure, and `QUAL`.
+- **Genotype predicates** require decoding retained genotypes first: MAF, MAC,
+  missing rate, and polymorphism.
 
 That distinction matters for speed. Metadata predicates can drop records before
 matrix decoding. A concrete VCF/BCF `region(...)` can also use a `.tbi` or
@@ -170,9 +115,9 @@ silently doing a full compressed-file scan when the user asked for a region.
 
 ## Performance
 
-The Rust backend is designed to avoid Python loops over variants and samples.
-For common block reads, matrix construction happens in Rust and crosses the
-Python boundary once per block.
+The Rust backend avoids Python loops over variants and samples. For block reads,
+matrix construction happens in Rust and crosses the Python boundary once per
+block.
 
 On the local `data/chr22_hg38` fixture with 3,202 samples, release builds show:
 
@@ -185,9 +130,9 @@ On the local `data/chr22_hg38` fixture with 3,202 samples, release builds show:
 
 These numbers are workload- and machine-dependent. They are included to set
 expectations, not as a universal benchmark. The main point is that `genoio`
-does not require Python-level variant iteration to build the matrix.
+builds matrices without Python-level variant iteration.
 
-Run the benchmark scripts on your machine:
+Run benchmarks on your machine:
 
 ```bash
 python -m maturin develop --release
@@ -196,38 +141,44 @@ python scripts/benchmark_plink1.py --max-variants 1000 --repeats 3
 python scripts/benchmark_plink2.py --max-variants 1000 --repeats 3
 ```
 
-Optional comparison packages are used when installed:
+Optional comparison packages are used when installed: `cyvcf2` for VCF,
+`pandas_plink` for PLINK1, and `pgenlib` for PLINK2.
 
-- `cyvcf2` for VCF
-- `pandas_plink` for PLINK1
-- `pgenlib` for PLINK2
-
-## Block Reads
-
-Use `blocks(...)` when you want to process variants incrementally:
+## Metadata
 
 ```python
-for X in genoio.blocks("data/chr22_hg38", 10_000, format="plink2"):
-    print(X.shape)
+ds = genoio.open("data/chr22_hg38", format="plink2")
+
+samples = ds.samples()
+variants = ds.variants()
 ```
 
-Block reads accept the same read options as `read(...)`:
+`samples` and `variants` are Polars DataFrames. Variant metadata includes source
+alleles, normalized `a0`/`a1` alleles, optional `qual`, and genotype-derived
+statistics when a read computes them for filtering.
+
+Return metadata alongside a whole-matrix read:
 
 ```python
-for X, variants in genoio.blocks(
-    "data/chr22_hg38.vcf.gz",
-    5_000,
-    variants=genoio.maf(max=0.05),
+X, sample_metadata, variant_metadata = genoio.read(
+    "data/chr22_hg38",
+    format="plink2",
+    return_samples=True,
     return_variants=True,
-):
-    ...
+)
 ```
 
-Blocks are defined in retained-variant order after filtering. If a filter keeps
-only every tenth variant, a block of size `5_000` contains up to `5_000`
-retained variants, not `5_000` raw source records.
+For block reads, prefer reading samples once and returning variants per block:
 
-## Samples
+```python
+ds = genoio.open("data/chr22_hg38", format="plink2")
+samples = ds.samples()
+
+for X, variants in ds.blocks(10_000, return_variants=True):
+    run_association_scan(X, samples=samples, variants=variants)
+```
+
+## Samples and Missing Data
 
 Pass sample IDs with `samples=...` to keep a subset of rows:
 
@@ -243,8 +194,6 @@ X, sample_metadata = genoio.read(
 Rows remain in source order, not in the order of the requested list. Duplicate
 sample IDs in the request are rejected.
 
-## Missing Data
-
 Dense reads support three missing-data policies:
 
 ```python
@@ -256,7 +205,7 @@ genoio.read(path, missing="impute")  # per-variant mean imputation
 Sparse reads currently require `missing="raise"` because this release does not
 store sparse missing-value masks.
 
-## Sparse Reads
+## Sparse and Haplotype Reads
 
 ```python
 X = genoio.read("data/chr22_hg38", format="plink1", sparse=True)
@@ -267,8 +216,6 @@ Sparse matrices are built with variants as columns and samples as rows. By
 default, sparse genotype columns are oriented to the minor allele to reduce
 stored nonzeros.
 
-## Haplotype Reads
-
 Phased VCF genotypes can be read as haplotype rows:
 
 ```python
@@ -278,6 +225,21 @@ H = genoio.read("phased.vcf.gz", kind="haplo")
 Each retained sample contributes two output rows. Haplotype reads require phased
 diploid genotypes in retained variants. PLINK1 and PLINK2 haplotype reads are
 not implemented in this release.
+
+## Installation
+
+From a local checkout:
+
+```bash
+pip install -e ".[dev]"
+python -m maturin develop --release
+```
+
+For a quick editable development build, omit `--release`:
+
+```bash
+python -m maturin develop
+```
 
 ## Format Support
 
