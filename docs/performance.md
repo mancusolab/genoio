@@ -3,17 +3,37 @@
 `genoio` builds matrices in Rust and crosses the Python boundary once per read
 or block. This avoids Python loops over variants and samples.
 
-On the local `data/chr22_hg38` fixture with 3,202 samples, release builds show:
+The current local benchmark was run on an Apple Silicon M1 Mac (`arm64`) with
+Python 3.11. The Rust extension was built in release mode. Each run reads the
+first 1,000 variants and constructs a dense `float32` matrix with shape
+`(3202, 1000)`.
 
-| Read | genoio | comparison |
-|---|---:|---:|
-| VCF, first 1,000 variants | ~0.10 s | `cyvcf2` matrix construction ~0.23 s |
-| PLINK2, first 100 variants | ~0.003 s | `pgenlib` matrix construction ~0.004 s |
-| PLINK2, first 1,000 variants | ~0.02 s | `pgenlib` matrix construction ~0.007 s |
-| PLINK2, first 10,000 variants | ~0.30 s | `pgenlib` matrix construction ~0.05 s |
+| Source | genoio median | comparison median | Result |
+|---|---:|---:|---|
+| VCF vs `cyvcf2` | 0.1064 s | 0.2383 s | genoio 2.24x faster |
+| PLINK1 vs `pandas_plink` | 0.3968 s | 2.4382 s | genoio 6.15x faster |
+| PLINK2 vs `pgenlib` | 0.0257 s | 0.0075 s | `pgenlib` 3.43x faster |
 
 These numbers are workload- and machine-dependent. Treat them as local
 benchmarks, not universal claims.
+
+---
+
+## Benchmark data
+
+The benchmark scripts default to `data/chr22_hg38`, but that directory is a
+local fixture and isn't distributed with the repository.
+
+The fixture comes from the PLINK 2
+[1000 Genomes phase 3 hg38 resources](https://www.cog-genomics.org/plink/2.0/resources#phase3_1kg).
+The chromosome 22 PLINK 2 files were used as the source, then converted with
+`plink2` to VCF and PLINK1 `.bed/.bim/.fam` files. That keeps the comparisons
+focused on reader behavior rather than differences in samples or variants. The
+VCF header records `##source=PLINKv2.0`.
+
+For the timings above, all three comparisons produced the same matrix summary:
+shape `(3202, 1000)`, `float32` dtype, genotype sum `72577`, zero missing
+values, and exact agreement with the comparison reader.
 
 ---
 

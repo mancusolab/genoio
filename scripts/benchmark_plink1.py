@@ -23,7 +23,7 @@ def read_genoio(args: argparse.Namespace) -> np.ndarray:
     import genoio
 
     return next(
-        genoio.open(args.prefix, format="plink1").blocks(
+        genoio.bfile(args.prefix).blocks(
             args.max_variants,
             missing="nan",
             dtype=np.float32,

@@ -8,12 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from ._errors import (
-    AmbiguousSourceError,
-    InvalidSourceError,
-    MissingCompanionFileError,
-    UnsupportedFormatError,
-)
+from ._errors import InvalidSourceError, MissingCompanionFileError, UnsupportedFormatError
 
 
 class SourceFormat(Enum):
@@ -48,68 +43,57 @@ class ResolvedSource:
 
 _PLINK1_SUFFIXES = {"bed": ".bed", "bim": ".bim", "fam": ".fam"}
 _PLINK2_SUFFIXES = {"pgen": ".pgen", "pvar": ".pvar", "psam": ".psam"}
-_MEMBER_SUFFIX_TO_FORMAT = {
-    **{suffix: SourceFormat.PLINK1 for suffix in _PLINK1_SUFFIXES.values()},
-    **{suffix: SourceFormat.PLINK2 for suffix in _PLINK2_SUFFIXES.values()},
-}
 
 
-def resolve_source(path: str | Path, format: str | SourceFormat | None = None) -> ResolvedSource:
-    r"""Resolve `path` to a supported single-file or multi-file source.
+def resolve_vcf(path: str | Path) -> ResolvedSource:
+    r"""Resolve a VCF or BCF source file.
 
     **Arguments:**
 
-    - `path`: source file path, PLINK prefix, or PLINK member path.
-    - `format`: optional format hint.
+    - `path`: `.vcf`, `.vcf.gz`, or `.bcf` path.
 
     **Returns:**
 
-    `ResolvedSource` with validated member paths.
+    `ResolvedSource` with one VCF/BCF member.
 
     **Raises:**
 
-    - `genoio.SourceResolutionError`: if the path is missing, ambiguous, or
-      uses an unsupported format.
+    - `genoio.SourceResolutionError`: if the path is missing, is not a file, or
+      does not have a supported VCF/BCF extension.
     """
     source_path = Path(path)
-    requested_format = _normalize_format(format)
-
-    if requested_format in {SourceFormat.PLINK1, SourceFormat.PLINK2}:
-        return _resolve_plink(source_path, requested_format)
-
-    if requested_format in {SourceFormat.VCF, SourceFormat.BCF}:
-        return _resolve_single_file(source_path, requested_format)
-
     detected_format = _detect_single_file_format(source_path)
-    if detected_format is not None:
-        return _resolve_single_file(source_path, detected_format)
-
-    member_format = _MEMBER_SUFFIX_TO_FORMAT.get(source_path.suffix)
-    if member_format is not None:
-        return _resolve_plink(source_path, member_format)
-
-    if source_path.suffix:
+    if detected_format is None:
         raise UnsupportedFormatError(f"unsupported source extension: {source_path}")
+    return _resolve_single_file(source_path, detected_format)
 
-    return _resolve_prefix(source_path)
+
+def resolve_bfile(path: str | Path) -> ResolvedSource:
+    r"""Resolve a PLINK1 BED/BIM/FAM file set from a prefix or member path.
+
+    **Arguments:**
+
+    - `path`: PLINK1 prefix or one `.bed`, `.bim`, or `.fam` member path.
+
+    **Returns:**
+
+    `ResolvedSource` with `.bed`, `.bim`, and `.fam` members.
+    """
+    return _resolve_plink(Path(path), SourceFormat.PLINK1)
 
 
-def _normalize_format(format: str | SourceFormat | None) -> SourceFormat | None:
-    if format is None or isinstance(format, SourceFormat):
-        return format
-    normalized = format.lower()
-    aliases = {
-        "vcf": SourceFormat.VCF,
-        "bcf": SourceFormat.BCF,
-        "plink1": SourceFormat.PLINK1,
-        "bed": SourceFormat.PLINK1,
-        "plink2": SourceFormat.PLINK2,
-        "pgen": SourceFormat.PLINK2,
-    }
-    try:
-        return aliases[normalized]
-    except KeyError as error:
-        raise UnsupportedFormatError(f"unsupported format: {format}") from error
+def resolve_pfile(path: str | Path) -> ResolvedSource:
+    r"""Resolve a PLINK2 PGEN/PVAR/PSAM file set from a prefix or member path.
+
+    **Arguments:**
+
+    - `path`: PLINK2 prefix or one `.pgen`, `.pvar`, or `.psam` member path.
+
+    **Returns:**
+
+    `ResolvedSource` with `.pgen`, `.pvar`, and `.psam` members.
+    """
+    return _resolve_plink(Path(path), SourceFormat.PLINK2)
 
 
 def _detect_single_file_format(path: Path) -> SourceFormat | None:
@@ -136,26 +120,9 @@ def _resolve_single_file(path: Path, format: SourceFormat) -> ResolvedSource:
     return ResolvedSource(format=format, path=path, members={member_key: path}, prefix=None)
 
 
-def _resolve_prefix(path: Path) -> ResolvedSource:
-    plink1_members = _existing_members(path, _PLINK1_SUFFIXES)
-    plink2_members = _existing_members(path, _PLINK2_SUFFIXES)
-    plink1_complete = set(plink1_members) == set(_PLINK1_SUFFIXES)
-    plink2_complete = set(plink2_members) == set(_PLINK2_SUFFIXES)
-
-    if plink1_complete and plink2_complete:
-        raise AmbiguousSourceError(f"source prefix matches multiple formats: {path}")
-    if plink1_members:
-        return _resolve_plink_prefix(path, SourceFormat.PLINK1)
-    if plink2_members:
-        return _resolve_plink_prefix(path, SourceFormat.PLINK2)
-    if path.exists():
-        raise UnsupportedFormatError(f"unsupported source extension: {path}")
-    raise InvalidSourceError(f"source path does not exist: {path}")
-
-
 def _resolve_plink(path: Path, format: SourceFormat) -> ResolvedSource:
     suffixes = _PLINK1_SUFFIXES if format is SourceFormat.PLINK1 else _PLINK2_SUFFIXES
-    if path.suffix and path.suffix not in suffixes.values() and path.exists():
+    if path.suffix and path.suffix not in suffixes.values():
         raise UnsupportedFormatError(f"source path {path} is not {format.value}")
     prefix = _prefix_for_plink_path(path, format)
     return _resolve_plink_prefix(prefix, format)

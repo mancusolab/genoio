@@ -84,7 +84,7 @@ def write_common_a1_vcf(tmp_path: Path) -> Path:
 def test_plink1_haplotype_reads_raise_unsupported_representation():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "plink1" / "tiny")
+    dataset = genoio.bfile(FIXTURE_ROOT / "plink1" / "tiny")
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="haplo"):
         dataset.read(kind="haplo")
@@ -93,7 +93,7 @@ def test_plink1_haplotype_reads_raise_unsupported_representation():
 def test_unphased_vcf_haplotype_reads_raise_unsupported_representation(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_unphased_vcf(tmp_path))
+    dataset = genoio.vcf(write_unphased_vcf(tmp_path))
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="haplo"):
         dataset.read(kind="haplo")
@@ -102,7 +102,7 @@ def test_unphased_vcf_haplotype_reads_raise_unsupported_representation(tmp_path)
 def test_default_read_is_dense_genotype_read(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_unphased_vcf(tmp_path))
+    dataset = genoio.vcf(write_unphased_vcf(tmp_path))
 
     np.testing.assert_array_equal(dataset.read(), dataset.read(kind="geno"))
 
@@ -110,7 +110,7 @@ def test_default_read_is_dense_genotype_read(tmp_path):
 def test_phased_vcf_haplotype_dense_counts_a1_in_sample_haplotype_order(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_phased_vcf(tmp_path))
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     H, samples, variants = dataset.read(kind="haplo", return_samples=True, return_variants=True)
 
@@ -135,7 +135,7 @@ def test_phased_vcf_haplotype_dense_counts_a1_in_sample_haplotype_order(tmp_path
 def test_filtered_haplotype_read_preserves_source_sample_index(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_phased_vcf(tmp_path))
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     H, samples = dataset.read(kind="haplo", samples=["S2"], return_samples=True)
 
@@ -157,7 +157,7 @@ def test_filtered_haplotype_read_preserves_source_sample_index(tmp_path):
 def test_phased_vcf_haplotype_sparse_uses_requested_sparse_format(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_phased_vcf(tmp_path))
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     H_csc = dataset.read(kind="haplo", sparse=True)
     H_csr = dataset.read(kind="haplo", sparse="csr")
@@ -182,7 +182,7 @@ def test_phased_vcf_haplotype_sparse_uses_requested_sparse_format(tmp_path):
 def test_haplotype_read_rejects_unphased_separator_in_retained_variant(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_mixed_phase_vcf(tmp_path))
+    dataset = genoio.vcf(write_mixed_phase_vcf(tmp_path))
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="unphased"):
         dataset.read(kind="haplo", variants=["rs2"])
@@ -191,7 +191,7 @@ def test_haplotype_read_rejects_unphased_separator_in_retained_variant(tmp_path)
 def test_haplotype_stat_filter_drops_unphased_variant_before_separator_check(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_mixed_phase_stat_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_mixed_phase_stat_filter_vcf(tmp_path))
 
     H, variants = dataset.read(kind="haplo", variants=genoio.maf(min=0.1), return_variants=True)
 
@@ -205,7 +205,7 @@ def test_haplotype_stat_filter_drops_unphased_variant_before_separator_check(tmp
 def test_sparse_haplotype_stat_filter_drops_unphased_variant_before_separator_check(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_mixed_phase_stat_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_mixed_phase_stat_filter_vcf(tmp_path))
 
     H, variants = dataset.read(kind="haplo", sparse=True, variants=genoio.maf(min=0.1), return_variants=True)
 
@@ -220,7 +220,7 @@ def test_sparse_haplotype_stat_filter_drops_unphased_variant_before_separator_ch
 def test_haplotype_blocks_stream_dense_haplotype_columns(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_phased_vcf(tmp_path))
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     full, full_samples, full_variants = dataset.read(kind="haplo", return_samples=True, return_variants=True)
     blocks = list(dataset.blocks(size=1, kind="haplo", return_samples=True, return_variants=True))
@@ -235,7 +235,7 @@ def test_haplotype_blocks_stream_dense_haplotype_columns(tmp_path):
 def test_filtered_haplotype_blocks_preserve_source_sample_index(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_phased_vcf(tmp_path))
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     blocks = list(dataset.blocks(size=1, kind="haplo", samples=["S2"], return_samples=True))
 
@@ -253,7 +253,7 @@ def test_filtered_haplotype_blocks_preserve_source_sample_index(tmp_path):
 def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_phased_vcf(tmp_path))
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     full = dataset.read(kind="haplo", sparse=True)
     blocks = list(dataset.blocks(size=1, kind="haplo", sparse=True))
@@ -266,7 +266,7 @@ def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
 def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_common_a1_vcf(tmp_path))
+    dataset = genoio.vcf(write_common_a1_vcf(tmp_path))
 
     G, variants = dataset.read(kind="geno", sparse=True, return_variants=True)
 

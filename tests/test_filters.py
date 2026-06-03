@@ -84,7 +84,7 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
     import genoio
 
     path = write_filter_vcf(tmp_path)
-    dataset = genoio.open(path)
+    dataset = genoio.vcf(path)
     expr = genoio.snp() & genoio.maf(min=0.1) & genoio.missing_rate(0.5)
 
     G, variants = dataset.read(variants=expr, return_variants=True)
@@ -123,7 +123,7 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
 def test_qual_filter_matches_fixture_reference_results(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     G, variants = dataset.read(variants=genoio.qual(min=20) & genoio.biallelic(), return_variants=True)
 
@@ -145,7 +145,7 @@ def test_qual_filter_matches_fixture_reference_results(tmp_path):
 def test_biallelic_filter_matches_fixture_reference_results(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     G, variants = dataset.read(variants=genoio.biallelic(), return_variants=True)
 
@@ -166,7 +166,7 @@ def test_biallelic_filter_matches_fixture_reference_results(tmp_path):
 def test_mac_filter_matches_called_genotype_reference_results(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     G, variants = dataset.read(variants=genoio.mac(min=1, max=1), return_variants=True)
 
@@ -179,7 +179,7 @@ def test_mac_filter_matches_called_genotype_reference_results(tmp_path):
 def test_polymorphic_filter_matches_called_genotype_reference_results(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     G, variants = dataset.read(variants=genoio.polymorphic(), return_variants=True)
 
@@ -201,7 +201,7 @@ def test_polymorphic_filter_matches_called_genotype_reference_results(tmp_path):
 def test_iterable_variant_id_selection_preserves_source_variant_order(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     G, variants = dataset.read(variants=["rs2", "rs1"], return_variants=True)
 
@@ -215,7 +215,7 @@ def test_iterable_variant_id_selection_preserves_source_variant_order(tmp_path):
 def test_generator_variant_id_selection_is_consumed_once(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     G, variants = dataset.read(
         variants=(variant_id for variant_id in ["rs2", "rs1"]),
@@ -232,7 +232,7 @@ def test_generator_variant_id_selection_is_consumed_once(tmp_path):
 def test_variants_rejects_python_callbacks(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_filter_vcf(tmp_path))
+    dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="serializable"):
         dataset.read(variants=lambda variant: True)

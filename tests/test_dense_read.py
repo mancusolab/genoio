@@ -109,7 +109,7 @@ F2 S3 0 0 0 2.0
 def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     G, samples, variants = dataset.read(return_samples=True, return_variants=True)
 
@@ -125,7 +125,7 @@ def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_p
 def test_default_read_equals_explicit_genotype_read(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     np.testing.assert_array_equal(dataset.read(), dataset.read(kind="geno"))
 
@@ -133,7 +133,7 @@ def test_default_read_equals_explicit_genotype_read(tmp_path):
 def test_dense_genotype_reads_do_not_minor_allele_flip_by_default(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_common_a1_vcf(tmp_path))
+    dataset = genoio.vcf(write_common_a1_vcf(tmp_path))
 
     G, variants = dataset.read(return_variants=True)
 
@@ -146,7 +146,7 @@ def test_dense_genotype_reads_do_not_minor_allele_flip_by_default(tmp_path):
 def test_return_samples_and_variants_tuple_order_is_matrix_samples_variants(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     result = dataset.read(return_samples=True, return_variants=True)
 
@@ -161,7 +161,7 @@ def test_return_samples_and_variants_tuple_order_is_matrix_samples_variants(tmp_
 def test_dense_plink1_read_matches_fixture_matrix_and_return_tuple_shapes():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "plink1" / "tiny")
+    dataset = genoio.bfile(FIXTURE_ROOT / "plink1" / "tiny")
 
     G = dataset.read()
     G_samples = dataset.read(return_samples=True)
@@ -188,7 +188,7 @@ def test_dense_plink1_read_matches_fixture_matrix_and_return_tuple_shapes():
 def test_dense_plink2_read_matches_fixed_width_hardcall_fixture(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_fixed_width_plink2(tmp_path))
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
 
     G, samples, variants = dataset.read(return_samples=True, return_variants=True)
 
@@ -212,7 +212,7 @@ def test_dense_plink2_read_matches_fixed_width_hardcall_fixture(tmp_path):
 def test_missing_policies_nan_raise_and_impute(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     with_nan = dataset.read(missing="nan", dtype="float64")
     with_impute = dataset.read(missing="impute")
@@ -227,7 +227,7 @@ def test_missing_policies_nan_raise_and_impute(tmp_path):
 def test_missing_policy_impute_rejects_all_missing_variant(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_all_missing_vcf(tmp_path))
+    dataset = genoio.vcf(write_all_missing_vcf(tmp_path))
 
     with pytest.raises(genoio.MissingDataError, match="all-missing variant"):
         dataset.read(missing="impute")
@@ -236,7 +236,7 @@ def test_missing_policy_impute_rejects_all_missing_variant(tmp_path):
 def test_missing_policy_rejects_integer_dtype_combinations(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match='missing="nan"'):
         dataset.read(dtype=np.int16, missing="nan")
@@ -248,7 +248,7 @@ def test_missing_policy_rejects_integer_dtype_combinations(tmp_path):
 def test_read_option_validation_prioritizes_dtype_and_missing_before_samples(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match='missing="nan"'):
         dataset.read(dtype=np.int16, missing="nan", samples=["S1", "S1"])
@@ -257,7 +257,7 @@ def test_read_option_validation_prioritizes_dtype_and_missing_before_samples(tmp
 def test_dense_vcf_read_rejects_multi_alt_records_even_when_gt_uses_first_alt(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_multi_alt_vcf(tmp_path))
+    dataset = genoio.vcf(write_multi_alt_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidSourceError, match="multi-ALT"):
         dataset.read()
@@ -266,7 +266,7 @@ def test_dense_vcf_read_rejects_multi_alt_records_even_when_gt_uses_first_alt(tm
 def test_unordered_sample_keep_list_returns_rows_in_source_order_and_metadata_matches(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     G, samples = dataset.read(samples=["S3", "S1"], return_samples=True)
 
@@ -277,7 +277,7 @@ def test_unordered_sample_keep_list_returns_rows_in_source_order_and_metadata_ma
 def test_missing_requested_sample_raises_structured_error_with_counts(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_biallelic_vcf(tmp_path))
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
     with pytest.raises(genoio.SampleFilterError, match="requested=2 retained=1 missing=1"):
         dataset.read(samples=["S1", "S4"])

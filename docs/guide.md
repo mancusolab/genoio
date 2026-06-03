@@ -8,7 +8,7 @@ metadata.
 ```python
 import genoio
 
-ds = genoio.open("data/chr22_hg38", format="plink2")
+ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
 
 for X, variants in ds.blocks(10_000, return_variants=True):
@@ -23,10 +23,10 @@ matching it back to columns after the fact.
 
 ## Reading one matrix
 
-Use `read` when the analysis needs one matrix in memory.
+Use a dataset's `read` method when the analysis needs one matrix in memory.
 
 ```python
-X = genoio.read("data/chr22_hg38", format="plink2")
+X = genoio.pfile("data/chr22_hg38").read()
 ```
 
 The returned array has samples on rows and variants on columns:
@@ -38,9 +38,7 @@ n_samples, n_variants = X.shape
 Ask for metadata when you need to preserve row and column labels:
 
 ```python
-X, samples, variants = genoio.read(
-    "data/chr22_hg38",
-    format="plink2",
+X, samples, variants = genoio.pfile("data/chr22_hg38").read(
     return_samples=True,
     return_variants=True,
 )
@@ -53,29 +51,24 @@ X, samples, variants = genoio.read(
 
 ---
 
-## Opening a dataset
+## Constructing a dataset
 
-Use `open` when code will reuse the same source for metadata, whole reads, or
-blocks.
+Use the constructor that matches the source format:
 
 ```python
-ds = genoio.open("data/chr22_hg38.pgen")
+vcf_ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+bfile_ds = genoio.bfile("data/chr22_hg38")
+pfile_ds = genoio.pfile("data/chr22_hg38.pgen")
 
-samples = ds.samples()
-variants = ds.variants()
-X = ds.read()
+samples = pfile_ds.samples()
+variants = pfile_ds.variants()
+X = pfile_ds.read()
 ```
 
 PLINK sources can be passed as a shared prefix or as one member file. For
 example, `data/chr22_hg38`, `data/chr22_hg38.pgen`, and
-`data/chr22_hg38.psam` all resolve to the same PLINK2 dataset when the
-companion files are present.
-
-Pass `format=...` when a prefix could resolve to more than one format:
-
-```python
-ds = genoio.open("data/chr22_hg38", format="plink1")
-```
+`data/chr22_hg38.psam` all resolve to the same PLINK2 dataset when passed to
+`pfile(...)` and the companion files are present.
 
 ---
 
@@ -88,17 +81,14 @@ source records.
 ```python
 rare = genoio.maf(max=0.05) & genoio.missing_rate(max=0.1)
 
-for X, variants in genoio.blocks(
-    "data/chr22_hg38.vcf.gz",
+ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+for X, variants in ds.blocks(
     5_000,
     variants=rare,
     return_variants=True,
 ):
     run_association_scan(X, variants=variants)
 ```
-
-The top-level `genoio.blocks(...)` function is a convenience wrapper around
-`genoio.open(...).blocks(...)`.
 
 ---
 
@@ -107,9 +97,9 @@ The top-level `genoio.blocks(...)` function is a convenience wrapper around
 Dense reads support three missing-data policies:
 
 ```python
-genoio.read(path, missing="nan")     # default for dense reads
-genoio.read(path, missing="raise")   # fail if retained calls are missing
-genoio.read(path, missing="impute")  # per-variant mean imputation
+ds.read(missing="nan")     # default for dense reads
+ds.read(missing="raise")   # fail if retained calls are missing
+ds.read(missing="impute")  # per-variant mean imputation
 ```
 
 Sparse reads currently require `missing="raise"` because this release does not
@@ -122,8 +112,8 @@ store sparse missing-value masks.
 Use `sparse=True` for SciPy CSC output, or `sparse="csr"` for CSR output.
 
 ```python
-X_csc = genoio.read("data/chr22_hg38", format="plink1", sparse=True)
-X_csr = genoio.read("data/chr22_hg38", format="plink1", sparse="csr")
+X_csc = genoio.bfile("data/chr22_hg38").read(sparse=True)
+X_csr = genoio.bfile("data/chr22_hg38").read(sparse="csr")
 ```
 
 Sparse genotype columns are oriented to the minor allele by default to reduce
@@ -136,7 +126,7 @@ stored nonzeros.
 Phased VCF genotypes can be read as haplotype rows:
 
 ```python
-H = genoio.read("phased.vcf.gz", kind="haplo")
+H = genoio.vcf("phased.vcf.gz").read(kind="haplo")
 ```
 
 Each retained sample contributes two output rows. Haplotype reads require

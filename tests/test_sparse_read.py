@@ -45,7 +45,7 @@ def sparse_to_source_dense(matrix, variants):
 def test_sparse_true_returns_csc_and_preserves_tuple_metadata(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_sparse_vcf(tmp_path))
+    dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     G, samples, variants = dataset.read(sparse=True, return_samples=True, return_variants=True)
 
@@ -58,7 +58,7 @@ def test_sparse_true_returns_csc_and_preserves_tuple_metadata(tmp_path):
 def test_sparse_csr_returns_csr_matrix(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_sparse_vcf(tmp_path))
+    dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     G = dataset.read(sparse="csr", missing="raise")
 
@@ -69,7 +69,7 @@ def test_sparse_csr_returns_csr_matrix(tmp_path):
 def test_sparse_reconstructs_dense_after_accounting_for_default_flips(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_sparse_vcf(tmp_path))
+    dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     dense = dataset.read()
     sparse_matrix, variants = dataset.read(sparse="csc", missing="raise", return_variants=True)
@@ -81,7 +81,7 @@ def test_sparse_reconstructs_dense_after_accounting_for_default_flips(tmp_path):
 def test_sparse_missing_data_raises_structured_error(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_missing_vcf(tmp_path))
+    dataset = genoio.vcf(write_missing_vcf(tmp_path))
 
     with pytest.raises(genoio.MissingDataError, match="sparse missing values"):
         dataset.read(sparse=True, missing="raise")
@@ -91,7 +91,7 @@ def test_sparse_missing_data_raises_structured_error(tmp_path):
 def test_sparse_rejects_missing_policies_that_require_stored_missing_values(tmp_path, missing):
     import genoio
 
-    dataset = genoio.open(write_sparse_vcf(tmp_path))
+    dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="does not store sparse missing values"):
         dataset.read(sparse=True, missing=missing)
@@ -100,7 +100,7 @@ def test_sparse_rejects_missing_policies_that_require_stored_missing_values(tmp_
 def test_sparse_rejects_unknown_options_before_calling_rust(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_sparse_vcf(tmp_path))
+    dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
         dataset.read(sparse="coo", missing="raise")
@@ -112,7 +112,7 @@ def test_sparse_rejects_unknown_options_before_calling_rust(tmp_path):
 def test_sparse_invalid_missing_policy_raises_structured_error(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_sparse_vcf(tmp_path))
+    dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="unsupported missing-data policy"):
         dataset.read(sparse=True, missing=[])

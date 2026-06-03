@@ -27,11 +27,9 @@ def test_import_exposes_public_names_without_reference_packages():
     import genoio
 
     expected_names = {
-        "open",
-        "read",
-        "samples",
-        "variants",
-        "blocks",
+        "vcf",
+        "bfile",
+        "pfile",
         "chrom",
         "region",
         "snp",
@@ -43,7 +41,7 @@ def test_import_exposes_public_names_without_reference_packages():
         "polymorphic",
         "id_in",
         "GenoioError",
-        "AmbiguousSourceError",
+        "SourceResolutionError",
         "MissingCompanionFileError",
         "UnsupportedFormatError",
         "InvalidSourceError",
@@ -62,7 +60,7 @@ def test_open_returns_lightweight_dataset_for_vcf(tmp_path):
     source_path = tmp_path / "cohort.vcf"
     source_path.touch()
 
-    dataset = genoio.open(source_path)
+    dataset = genoio.vcf(source_path)
 
     assert dataset.source.path == source_path
     assert dataset.source.format.value == "vcf"
@@ -73,7 +71,7 @@ def test_dataset_read_recognizes_sparse_options_and_validates_missing_policy(tmp
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
-    dataset = genoio.open(source_path)
+    dataset = genoio.vcf(source_path)
 
     with pytest.raises(genoio.InvalidOptionError, match="sparse missing values"):
         dataset.read(sparse="csc", missing="nan")
@@ -85,7 +83,7 @@ def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_pat
 
     source_path = tmp_path / "cohort.vcf"
     source_path.touch()
-    dataset = genoio.open(source_path)
+    dataset = genoio.vcf(source_path)
 
     def fake_read_dense(format, members, options):
         assert options["return_samples"] is False
@@ -114,7 +112,7 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
     import genoio._api as api
 
     path = write_blocks_vcf(tmp_path)
-    dataset = genoio.open(path)
+    dataset = genoio.vcf(path)
     members = {key: str(path) for key, path in dataset.source.members.items()}
 
     result = api._rust.read_dense(
@@ -138,7 +136,7 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
 def test_sparse_default_missing_signature_is_readable():
     import genoio
 
-    assert "missing: 'Any' = DEFAULT_MISSING" in str(signature(genoio.read))
+    assert "missing: 'Any' = DEFAULT_MISSING" in str(signature(genoio.Dataset.read))
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
@@ -146,7 +144,7 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
-    dataset = genoio.open(source_path)
+    dataset = genoio.vcf(source_path)
 
     read_options = {
         "kind": "geno",
@@ -167,34 +165,12 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
         dataset.blocks(0, **read_options)
 
 
-def test_top_level_blocks_matches_dataset_blocks(tmp_path):
-    import genoio
-
-    path = write_blocks_vcf(tmp_path)
-
-    top_level_blocks = list(genoio.blocks(path, size=2, return_variants=True))
-    dataset_blocks = list(genoio.open(path).blocks(size=2, return_variants=True))
-
-    assert len(top_level_blocks) == len(dataset_blocks)
-    for top_level_block, dataset_block in zip(top_level_blocks, dataset_blocks, strict=True):
-        np.testing.assert_array_equal(top_level_block[0], dataset_block[0])
-        assert top_level_block[1].equals(dataset_block[1])
-
-
 def test_dataset_variants_accepts_documented_default_stats_keyword():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "vcf" / "tiny.vcf")
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "tiny.vcf")
 
     variants = dataset.variants(stats=None)
-
-    assert variants["id"].to_list() == ["rs1", "rs2", "indel1"]
-
-
-def test_top_level_variants_accepts_documented_default_stats_keyword():
-    import genoio
-
-    variants = genoio.variants(FIXTURE_ROOT / "vcf" / "tiny.vcf", stats=None)
 
     assert variants["id"].to_list() == ["rs1", "rs2", "indel1"]
 
@@ -204,7 +180,7 @@ def test_dataset_variants_rejects_stats_until_stat_metadata_is_implemented(tmp_p
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
-    dataset = genoio.open(source_path)
+    dataset = genoio.vcf(source_path)
 
     with pytest.raises(genoio.InvalidOptionError, match="variant stats"):
         dataset.variants(stats=["maf"])
@@ -215,7 +191,7 @@ def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
-    dataset = genoio.open(source_path)
+    dataset = genoio.vcf(source_path)
 
     with pytest.raises(genoio.UnsupportedRepresentation):
         dataset.read(kind="unsupported")

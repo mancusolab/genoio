@@ -8,7 +8,7 @@ readers for parsing, filtering, and matrix construction.
 ```python
 import genoio
 
-ds = genoio.open("data/chr22_hg38", format="plink2")
+ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
 
 for X, variants in ds.blocks(10_000, return_variants=True):
@@ -22,13 +22,15 @@ each block carries the metadata needed to interpret its columns. Downstream
 tools do not need to load all variant metadata globally and match it back to
 matrix columns after the fact.
 
-`read(...)`, `open(...)`, and `blocks(...)` cover the common workflows:
+`vcf(...)`, `bfile(...)`, and `pfile(...)` construct reusable datasets:
 
-- `read(...)`: read one matrix now.
-- `open(...)`: resolve a source once and reuse it for metadata, reads, or
-  blocks.
-- `blocks(...)`: stream variant blocks while keeping each block's matrix and
-  variant metadata aligned.
+- `vcf(...)`: VCF/BCF source.
+- `bfile(...)`: PLINK1 `.bed/.bim/.fam` source.
+- `pfile(...)`: PLINK2 `.pgen/.pvar/.psam` source.
+
+Each dataset has `read(...)`, `blocks(...)`, `samples()`, and `variants()`.
+Block reads stream variant chunks while keeping each block's matrix and variant
+metadata aligned.
 
 Dense reads return NumPy arrays with shape `(samples, variants)`. Sparse reads
 return SciPy sparse matrices. Metadata is returned as Polars DataFrames.
@@ -47,14 +49,15 @@ The package is meant for analysis pipelines that need a consistent matrix API
 across file formats. It is not a full variant annotation framework.
 
 ```python
-X_vcf = genoio.read("data/chr22_hg38.vcf.gz")
-X_bed = genoio.read("data/chr22_hg38", format="plink1")
-X_pgen = genoio.read("data/chr22_hg38", format="plink2")
+X_vcf = genoio.vcf("data/chr22_hg38.vcf.gz").read()
+X_bed = genoio.bfile("data/chr22_hg38").read()
+X_pgen = genoio.pfile("data/chr22_hg38").read()
 ```
 
 PLINK sources can be passed as a prefix or as one member file such as
 `data/chr22_hg38.pgen`; `genoio` resolves companion files from the shared
-prefix.
+prefix. The constructor chooses the format, so unrelated files with the same
+prefix do not affect resolution.
 
 ## Filtering Expressions
 
@@ -68,8 +71,8 @@ rare_high_quality = (
     & genoio.maf(max=0.05)
 )
 
-for X, variants in genoio.blocks(
-    "data/chr22_hg38.vcf.gz",
+ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+for X, variants in ds.blocks(
     5_000,
     variants=rare_high_quality,
     return_variants=True,
@@ -119,18 +122,25 @@ The Rust backend avoids Python loops over variants and samples. For block reads,
 matrix construction happens in Rust and crosses the Python boundary once per
 block.
 
-On the local `data/chr22_hg38` fixture with 3,202 samples, release builds show:
+On a local Apple Silicon M1 Mac (`arm64`, Python 3.11), release builds on the
+first 1,000 variants show:
 
 | Read | genoio | comparison |
 |---|---:|---:|
-| VCF, first 1,000 variants | ~0.10 s | `cyvcf2` matrix construction ~0.23 s |
-| PLINK2, first 100 variants | ~0.003 s | `pgenlib` matrix construction ~0.004 s |
-| PLINK2, first 1,000 variants | ~0.02 s | `pgenlib` matrix construction ~0.007 s |
-| PLINK2, first 10,000 variants | ~0.30 s | `pgenlib` matrix construction ~0.05 s |
+| VCF | 0.106 s | `cyvcf2` matrix construction 0.238 s |
+| PLINK1 | 0.397 s | `pandas_plink` matrix construction 2.438 s |
+| PLINK2 | 0.026 s | `pgenlib` matrix construction 0.008 s |
 
 These numbers are workload- and machine-dependent. They are included to set
 expectations, not as a universal benchmark. The main point is that `genoio`
 builds matrices without Python-level variant iteration.
+
+The benchmark fixture is a local `data/chr22_hg38` dataset with 3,202 samples.
+It isn't distributed with the repository. It comes from the PLINK 2
+[1000 Genomes phase 3 hg38 resources](https://www.cog-genomics.org/plink/2.0/resources#phase3_1kg):
+the chromosome 22 PLINK 2 files were used as the source, then converted with
+`plink2` to VCF and PLINK1 `.bed/.bim/.fam` files so each script reads the same
+underlying genotypes.
 
 Run benchmarks on your machine:
 
@@ -147,7 +157,7 @@ Optional comparison packages are used when installed: `cyvcf2` for VCF,
 ## Metadata
 
 ```python
-ds = genoio.open("data/chr22_hg38", format="plink2")
+ds = genoio.pfile("data/chr22_hg38")
 
 samples = ds.samples()
 variants = ds.variants()
@@ -160,9 +170,7 @@ statistics when a read computes them for filtering.
 Return metadata alongside a whole-matrix read:
 
 ```python
-X, sample_metadata, variant_metadata = genoio.read(
-    "data/chr22_hg38",
-    format="plink2",
+X, sample_metadata, variant_metadata = genoio.pfile("data/chr22_hg38").read(
     return_samples=True,
     return_variants=True,
 )
@@ -171,7 +179,7 @@ X, sample_metadata, variant_metadata = genoio.read(
 For block reads, prefer reading samples once and returning variants per block:
 
 ```python
-ds = genoio.open("data/chr22_hg38", format="plink2")
+ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
 
 for X, variants in ds.blocks(10_000, return_variants=True):
@@ -183,9 +191,7 @@ for X, variants in ds.blocks(10_000, return_variants=True):
 Pass sample IDs with `samples=...` to keep a subset of rows:
 
 ```python
-X, sample_metadata = genoio.read(
-    "data/chr22_hg38",
-    format="plink1",
+X, sample_metadata = genoio.bfile("data/chr22_hg38").read(
     samples=["HG00096", "HG00097"],
     return_samples=True,
 )
@@ -197,9 +203,9 @@ sample IDs in the request are rejected.
 Dense reads support three missing-data policies:
 
 ```python
-genoio.read(path, missing="nan")     # default for dense reads
-genoio.read(path, missing="raise")   # fail if retained calls are missing
-genoio.read(path, missing="impute")  # per-variant mean imputation
+ds.read(missing="nan")     # default for dense reads
+ds.read(missing="raise")   # fail if retained calls are missing
+ds.read(missing="impute")  # per-variant mean imputation
 ```
 
 Sparse reads currently require `missing="raise"` because this release does not
@@ -208,8 +214,8 @@ store sparse missing-value masks.
 ## Sparse and Haplotype Reads
 
 ```python
-X = genoio.read("data/chr22_hg38", format="plink1", sparse=True)
-X_csr = genoio.read("data/chr22_hg38", format="plink1", sparse="csr")
+X = genoio.bfile("data/chr22_hg38").read(sparse=True)
+X_csr = genoio.bfile("data/chr22_hg38").read(sparse="csr")
 ```
 
 Sparse matrices are built with variants as columns and samples as rows. By
@@ -219,7 +225,7 @@ stored nonzeros.
 Phased VCF genotypes can be read as haplotype rows:
 
 ```python
-H = genoio.read("phased.vcf.gz", kind="haplo")
+H = genoio.vcf("phased.vcf.gz").read(kind="haplo")
 ```
 
 Each retained sample contributes two output rows. Haplotype reads require phased

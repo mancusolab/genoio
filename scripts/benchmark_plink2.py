@@ -29,7 +29,7 @@ def read_genoio(prefix: Path, max_variants: int) -> np.ndarray:
     import genoio
 
     return next(
-        genoio.open(prefix, format="plink2").blocks(
+        genoio.pfile(prefix).blocks(
             max_variants,
             missing="nan",
             dtype=np.float32,

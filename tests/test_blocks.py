@@ -27,7 +27,7 @@ def write_blocks_vcf(tmp_path: Path) -> Path:
 def test_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     full = dataset.read()
     blocks = list(dataset.blocks(size=2))
@@ -39,7 +39,7 @@ def test_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
 def test_blocks_variant_metadata_aligns_with_each_block(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     blocks = list(dataset.blocks(size=2, return_variants=True))
 
@@ -51,7 +51,7 @@ def test_blocks_variant_metadata_aligns_with_each_block(tmp_path):
 def test_blocks_return_samples_keeps_sample_order_constant(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     blocks = list(dataset.blocks(size=3, samples=["S3", "S1"], return_samples=True, return_variants=True))
 
@@ -65,7 +65,7 @@ def test_blocks_return_samples_keeps_sample_order_constant(tmp_path):
 def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
     read_options = {"variants": genoio.chrom("1"), "samples": ["S3", "S1"]}
 
     full, full_variants = dataset.read(**read_options, return_variants=True)
@@ -79,7 +79,7 @@ def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
 def test_blocks_validate_size(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="positive integer"):
         list(dataset.blocks(size=0))
@@ -91,7 +91,7 @@ def test_blocks_validate_size(tmp_path):
 def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monkeypatch):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
     calls = []
     original = genoio.Dataset._read_validated
 
@@ -111,7 +111,7 @@ def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monke
 def test_blocks_do_not_call_public_read_internally(tmp_path, monkeypatch):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     def fail_read(*args, **kwargs):
         raise AssertionError("blocks must use the bounded Rust call boundary, not public read()")
@@ -126,7 +126,7 @@ def test_blocks_do_not_call_public_read_internally(tmp_path, monkeypatch):
 def test_sparse_blocks_work_with_default_missing_policy(tmp_path):
     import genoio
 
-    dataset = genoio.open(write_blocks_vcf(tmp_path))
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     blocks = list(dataset.blocks(size=2, sparse=True))
 

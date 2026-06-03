@@ -9,10 +9,6 @@ class SourceResolutionError(GenoioError):
     r"""Base class for source resolution errors."""
 
 
-class AmbiguousSourceError(SourceResolutionError):
-    r"""Raised when a path can resolve to multiple source formats."""
-
-
 class MissingCompanionFileError(SourceResolutionError):
     r"""Raised when a multi-file source is missing required companion files."""
 

@@ -1,5 +1,5 @@
-# pattern: Mixed (needs refactoring)
-# Reason: Public entrypoints call resolve_source(), which performs filesystem checks;
+# pattern: Mixed
+# Reason: Public dataset constructors perform filesystem source resolution;
 # Dataset validation helpers remain pure.
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from ._errors import (
     UnsupportedRepresentation,
 )
 from ._filters import FilterExpr, id_in
-from ._source import ResolvedSource, resolve_source
+from ._source import ResolvedSource, resolve_bfile, resolve_pfile, resolve_vcf
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
@@ -65,9 +65,9 @@ class _ValidatedReadOptions:
 class Dataset:
     r"""Resolved genotype dataset with metadata, whole-read, and block-read methods.
 
-    Constructed by [`genoio.open`][]. The object caches source metadata after
-    the first metadata-dependent operation, but matrix reads are executed on
-    each call.
+    Constructed by [`genoio.vcf`][], [`genoio.bfile`][], or
+    [`genoio.pfile`][]. The object caches source metadata after the first
+    metadata-dependent operation, but matrix reads are executed on each call.
 
     **Attributes:**
 
@@ -324,127 +324,54 @@ class Dataset:
             raise _unsupported_haplotype_source(self.source.format.value)
 
 
-def open(path: str | Path, format: str | None = None) -> Dataset:
-    r"""Resolve a genotype source and return a reusable dataset.
-
-    `path` may be a VCF/BCF file, a PLINK1/PLINK2 prefix, or one member of a
-    PLINK file set. `format` can be used to disambiguate prefixes and accepts
-    `"vcf"`, `"bcf"`, `"plink1"`, `"bed"`, `"plink2"`, or `"pgen"`.
+def vcf(path: str | Path) -> Dataset:
+    r"""Resolve a VCF/BCF file and return a reusable dataset.
 
     **Arguments:**
 
-    - `path`: input file, PLINK prefix, or PLINK companion-file path.
-    - `format`: optional format hint.
+    - `path`: `.vcf`, `.vcf.gz`, or `.bcf` path.
 
     **Returns:**
 
-    [`genoio.Dataset`][] with resolved source paths.
+    [`genoio.Dataset`][] backed by the VCF/BCF source.
 
     **Raises:**
 
-    - `genoio.SourceResolutionError`: if the path cannot be resolved to one
-      supported source.
+    - `genoio.SourceResolutionError`: if the path cannot be used as VCF/BCF.
     """
-    return Dataset(source=resolve_source(path, format=format))
+    return Dataset(source=resolve_vcf(path))
 
 
-def read(
-    path: str | Path,
-    *,
-    format: str | None = None,
-    kind: str = "geno",
-    sparse: bool | str = False,
-    variants: Any = None,
-    samples: list[str] | tuple[str, ...] | set[str] | None = None,
-    missing: Any = _DEFAULT_MISSING,
-    dtype: Any = "float32",
-    return_samples: bool = False,
-    return_variants: bool = False,
-) -> Any:
-    r"""Read a genotype source into an array or sparse matrix.
+def bfile(path: str | Path) -> Dataset:
+    r"""Resolve a PLINK1 BED/BIM/FAM file set and return a reusable dataset.
 
-    Convenience wrapper for `genoio.open(path, format).read(...)`. Dense
-    genotype reads return a NumPy array with shape `(samples, variants)`. Use
-    `sparse=True` for SciPy CSC or `sparse="csr"` for CSR.
+    `path` may be the shared prefix or one `.bed`, `.bim`, or `.fam` member.
 
     **Arguments:**
 
-    - `path`: input file, PLINK prefix, or PLINK companion-file path.
-    - `format`: optional format hint.
-    - `kind`: `"geno"` or `"haplo"`.
-    - `sparse`: dense/sparse output selector.
-    - `variants`: filter expression or iterable of variant IDs.
-    - `samples`: optional sample ID keep list.
-    - `missing`: missing-data policy: `"nan"`, `"raise"`, or `"impute"`.
-    - `dtype`: NumPy dtype for matrix values.
-    - `return_samples`: include sample metadata.
-    - `return_variants`: include variant metadata.
+    - `path`: PLINK1 prefix or member path.
 
     **Returns:**
 
-    Matrix alone, or a tuple containing the matrix and requested metadata
-    frames.
+    [`genoio.Dataset`][] backed by the PLINK1 source.
     """
-    return open(path, format=format).read(
-        kind=kind,
-        sparse=sparse,
-        variants=variants,
-        samples=samples,
-        missing=missing,
-        dtype=dtype,
-        return_samples=return_samples,
-        return_variants=return_variants,
-    )
+    return Dataset(source=resolve_bfile(path))
 
 
-def samples(path: str | Path, *, format: str | None = None, **options: Any) -> Any:
-    r"""Return sample metadata for `path` as a Polars DataFrame.
+def pfile(path: str | Path) -> Dataset:
+    r"""Resolve a PLINK2 PGEN/PVAR/PSAM file set and return a reusable dataset.
+
+    `path` may be the shared prefix or one `.pgen`, `.pvar`, or `.psam` member.
 
     **Arguments:**
 
-    - `path`: input file, PLINK prefix, or PLINK companion-file path.
-    - `format`: optional format hint.
+    - `path`: PLINK2 prefix or member path.
 
     **Returns:**
 
-    Polars DataFrame with source sample metadata.
+    [`genoio.Dataset`][] backed by the PLINK2 source.
     """
-    return open(path, format=format).samples(**options)
-
-
-def variants(path: str | Path, *, format: str | None = None, stats: Any = None, **options: Any) -> Any:
-    r"""Return variant metadata for `path` as a Polars DataFrame.
-
-    **Arguments:**
-
-    - `path`: input file, PLINK prefix, or PLINK companion-file path.
-    - `format`: optional format hint.
-    - `stats`: reserved; must be `None`.
-
-    **Returns:**
-
-    Polars DataFrame with source variant metadata.
-    """
-    return open(path, format=format).variants(stats=stats, **options)
-
-
-def blocks(path: str | Path, size: int, *, format: str | None = None, **read_options: Any) -> Any:
-    r"""Yield matrix blocks with at most `size` variants per block.
-
-    Convenience wrapper for `genoio.open(path, format).blocks(size, ...)`.
-
-    **Arguments:**
-
-    - `path`: input file, PLINK prefix, or PLINK companion-file path.
-    - `size`: maximum number of variants per block.
-    - `format`: optional format hint.
-    - `read_options`: forwarded to [`genoio.Dataset.read`][].
-
-    **Returns:**
-
-    Iterator yielding matrices or matrix/metadata tuples.
-    """
-    return open(path, format=format).blocks(size, **read_options)
+    return Dataset(source=resolve_pfile(path))
 
 
 def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:

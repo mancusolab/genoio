@@ -9,7 +9,7 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "vcf" / "tiny.vcf")
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "tiny.vcf")
 
     samples = dataset.samples()
     variants = dataset.variants()
@@ -51,7 +51,7 @@ def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
 def test_plink1_samples_and_variants_normalize_metadata_without_decoding_bed():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "plink1" / "tiny")
+    dataset = genoio.bfile(FIXTURE_ROOT / "plink1" / "tiny")
 
     samples = dataset.samples()
     variants = dataset.variants()
@@ -72,7 +72,7 @@ def test_metadata_is_cached_after_first_load(monkeypatch):
     import genoio
     import genoio._api as api
 
-    dataset = genoio.open(FIXTURE_ROOT / "vcf" / "tiny.vcf")
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "tiny.vcf")
     calls = 0
     original = api._rust.read_metadata
 
@@ -93,7 +93,7 @@ def test_metadata_is_cached_after_first_load(monkeypatch):
 def test_variant_stats_are_rejected_until_genotype_statistics_exist():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "vcf" / "tiny.vcf")
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "tiny.vcf")
 
     with pytest.raises(genoio.InvalidOptionError, match="variant stats"):
         dataset.variants(stats=["maf"])
@@ -102,7 +102,7 @@ def test_variant_stats_are_rejected_until_genotype_statistics_exist():
 def test_plink1_haplotype_reads_are_rejected_by_capabilities():
     import genoio
 
-    dataset = genoio.open(FIXTURE_ROOT / "plink1" / "tiny")
+    dataset = genoio.bfile(FIXTURE_ROOT / "plink1" / "tiny")
 
     assert dataset._metadata()["capabilities"]["supports_haplo"] is False
     with pytest.raises(genoio.UnsupportedRepresentation, match="haplo"):
@@ -117,7 +117,7 @@ def test_malformed_plink1_fam_line_is_reported_as_invalid_source(tmp_path):
     (tmp_path / "bad.bim").write_text("1 rs1 0 10 G A\n")
     (tmp_path / "bad.fam").write_text("F1 S1 0 0 1\n")
 
-    dataset = genoio.open(prefix)
+    dataset = genoio.bfile(prefix)
     with pytest.raises(genoio.InvalidSourceError, match="fam"):
         dataset.samples()
 
@@ -130,6 +130,6 @@ def test_malformed_plink1_bim_line_is_reported_as_invalid_source(tmp_path):
     (tmp_path / "bad.bim").write_text("1 rs1 0 10 G\n")
     (tmp_path / "bad.fam").write_text("F1 S1 0 0 1 -9\n")
 
-    dataset = genoio.open(prefix)
+    dataset = genoio.bfile(prefix)
     with pytest.raises(genoio.InvalidSourceError, match="bim"):
         dataset.variants()

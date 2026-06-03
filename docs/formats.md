@@ -15,18 +15,19 @@
 VCF and BCF inputs are single files:
 
 ```python
-X = genoio.read("cohort.vcf.gz")
+X = genoio.vcf("cohort.vcf.gz").read()
 ```
 
 PLINK inputs are file sets. Pass either the shared prefix or one member file:
 
 ```python
-X = genoio.read("cohort", format="plink2")
-X = genoio.read("cohort.pgen")
+X = genoio.pfile("cohort").read()
+X = genoio.pfile("cohort.pgen").read()
 ```
 
-Use `format=...` when a shared prefix could refer to more than one supported
-format.
+Use `bfile(...)` for PLINK1 prefixes and `pfile(...)` for PLINK2 prefixes.
+The constructor chooses the file-set type, so same-stem files from other
+formats are ignored.
 
 ---
 

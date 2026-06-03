@@ -2,7 +2,7 @@
 
 ::: genoio.GenoioError
 
-::: genoio.AmbiguousSourceError
+::: genoio.SourceResolutionError
 
 ::: genoio.MissingCompanionFileError
 

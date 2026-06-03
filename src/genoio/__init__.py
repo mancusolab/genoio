@@ -2,15 +2,15 @@
 
 """Read VCF, PLINK1, and PLINK2 genotype matrices from Python."""
 
-from ._api import Dataset, blocks, open, read, samples, variants
+from ._api import Dataset, bfile, pfile, vcf
 from ._errors import (
-    AmbiguousSourceError,
     GenoioError,
     InvalidOptionError,
     InvalidSourceError,
     MissingCompanionFileError,
     MissingDataError,
     SampleFilterError,
+    SourceResolutionError,
     UnsupportedFormatError,
     UnsupportedRepresentation,
 )
@@ -18,11 +18,9 @@ from ._filters import FilterExpr, biallelic, chrom, id_in, mac, maf, missing_rat
 
 __all__ = [
     "Dataset",
-    "open",
-    "read",
-    "samples",
-    "variants",
-    "blocks",
+    "vcf",
+    "bfile",
+    "pfile",
     "FilterExpr",
     "chrom",
     "region",
@@ -35,7 +33,7 @@ __all__ = [
     "polymorphic",
     "id_in",
     "GenoioError",
-    "AmbiguousSourceError",
+    "SourceResolutionError",
     "MissingCompanionFileError",
     "UnsupportedFormatError",
     "InvalidSourceError",

@@ -7,7 +7,7 @@ records, apply filters, and build matrices.
 ```python
 import genoio
 
-ds = genoio.open("data/chr22_hg38", format="plink2")
+ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
 
 for X, variants in ds.blocks(10_000, return_variants=True):
@@ -15,13 +15,14 @@ for X, variants in ds.blocks(10_000, return_variants=True):
     run_association_scan(X, samples=samples, variants=variants)
 ```
 
-Three entry points cover the common workflows:
+Three constructors resolve supported sources:
 
-- [`open`](api/reading.md#genoio.open) resolves a source once and returns a
-  reusable dataset.
-- [`read`](api/reading.md#genoio.read) reads one matrix now.
-- [`blocks`](api/reading.md#genoio.blocks) streams variant blocks with matrix
-  columns and variant metadata kept in the same order.
+- [`vcf`](api/reading.md#genoio.vcf) for VCF/BCF files.
+- [`bfile`](api/reading.md#genoio.bfile) for PLINK1 `.bed/.bim/.fam` file sets.
+- [`pfile`](api/reading.md#genoio.pfile) for PLINK2 `.pgen/.pvar/.psam` file sets.
+
+Each constructor returns a reusable [`Dataset`](api/reading.md#genoio.Dataset)
+with `read`, `blocks`, `samples`, and `variants` methods.
 
 Dense reads return NumPy arrays with shape `(samples, variants)`. Sparse reads
 return SciPy sparse matrices. Metadata is returned as Polars DataFrames.

@@ -10,8 +10,8 @@ rare_high_quality = (
     & genoio.maf(max=0.05)
 )
 
-for X, variants in genoio.blocks(
-    "data/chr22_hg38.vcf.gz",
+ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+for X, variants in ds.blocks(
     5_000,
     variants=rare_high_quality,
     return_variants=True,

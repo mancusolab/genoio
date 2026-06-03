@@ -4,6 +4,13 @@ These scripts compare bounded dense matrix construction across `genoio` and comm
 
 Defaults use `data/chr22_hg38` and read the first 1000 variants. Use `--max-variants` to adjust the workload.
 
+`data/chr22_hg38` is a local benchmark fixture, not a repository fixture. It
+comes from the PLINK 2
+[1000 Genomes phase 3 hg38 resources](https://www.cog-genomics.org/plink/2.0/resources#phase3_1kg).
+The chromosome 22 PLINK 2 files were used as the source, then converted with
+`plink2` to VCF and PLINK1 `.bed/.bim/.fam` files so each script reads the same
+underlying genotypes.
+
 ```bash
 python scripts/benchmark_vcf.py --max-variants 1000 --repeats 3
 python scripts/benchmark_plink1.py --max-variants 1000 --repeats 3

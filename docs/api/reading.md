@@ -2,12 +2,8 @@
 
 ::: genoio.Dataset
 
-::: genoio.open
+::: genoio.vcf
 
-::: genoio.read
+::: genoio.bfile
 
-::: genoio.samples
-
-::: genoio.variants
-
-::: genoio.blocks
+::: genoio.pfile
