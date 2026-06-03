@@ -5,13 +5,19 @@ PLINK1, and PLINK2. The Python layer handles source resolution and result
 assembly; Rust readers do the format parsing, filtering, and matrix
 construction.
 
-The core contract is simple:
+The common pattern is to resolve a source once, keep sample metadata fixed, and
+stream variant blocks with the metadata for each block:
 
 ```python
 import genoio
 
-X = genoio.read("data/chr22_hg38", format="plink2")
-print(X.shape)  # (samples, variants)
+ds = genoio.open("data/chr22_hg38", format="plink2")
+samples = ds.samples()
+
+for X, variants in ds.blocks(10_000, return_variants=True):
+    # X has shape (samples, variants_in_this_block).
+    # `variants` describes the columns of X in the same order.
+    run_association_scan(X, samples=samples, variants=variants)
 ```
 
 Dense reads return NumPy arrays. Sparse reads return SciPy sparse matrices.
@@ -61,16 +67,19 @@ Use release builds for benchmarks and real performance comparisons.
 
 ## Reading Genotypes
 
-Open a dataset once and reuse it:
+Open a dataset once when downstream code will reuse the same source:
 
 ```python
 import genoio
 
 ds = genoio.open("data/chr22_hg38.vcf.gz")
-X = ds.read()
+samples = ds.samples()
+
+for X, variants in ds.blocks(5_000, return_variants=True):
+    analyze_block(X, samples=samples, variants=variants)
 ```
 
-Or use the one-shot helpers:
+Use `read(...)` when you only need one matrix:
 
 ```python
 X_vcf = genoio.read("data/chr22_hg38.vcf.gz")
