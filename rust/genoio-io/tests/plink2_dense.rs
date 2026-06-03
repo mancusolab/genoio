@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -238,6 +240,39 @@ S3
 }
 
 #[test]
+fn plink2_dense_window_aligns_variant_metadata_with_source_window() {
+    let dir = unique_dir("plink2-window-metadata");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11, 0x06], 3, 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+
+    let dense = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 2 }),
+    )
+    .expect("window should decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs2", "rs3"]
+    );
+    assert_eq!(dense.values, vec![1.0, 2.0, 0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, false, false, false]
+    );
+}
+
+#[test]
 fn plink2_dense_window_does_not_validate_variable_records_after_window() {
     let dir = unique_dir("plink2-window-pgen-prefix");
     let pgen_bytes = variable_width_pgen(&[0, 5], &[&[0xe4], &[0]], 4);
@@ -277,6 +312,18 @@ S4
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs1");
     assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
+}
+
+#[test]
+fn plink2_dense_rejects_truncated_fixed_width_records() {
+    let dir = unique_dir("plink2-dense-truncated-fixed");
+    let pgen_bytes = fixed_width_pgen(&[0x2c, 0x11], 3, 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+
+    let error = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
+        .expect_err("truncated fixed-width pgen should fail");
+
+    assert!(error.to_string().contains("truncated"));
 }
 
 #[test]

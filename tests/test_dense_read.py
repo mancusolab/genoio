@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 from pathlib import Path
 
 import numpy as np
@@ -207,6 +209,26 @@ def test_dense_plink2_read_matches_fixed_width_hardcall_fixture(tmp_path):
     assert samples["iid"].to_list() == ["S1", "S2", "S3"]
     assert variants["id"].to_list() == ["rs1", "rs2", "rs3"]
     assert variants["qual"].to_list() == [30.0, 40.0, 50.0]
+
+
+def test_dense_plink2_sample_filter_keeps_source_order_and_values(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    G, samples = dataset.read(samples=["S3", "S1"], return_samples=True)
+
+    np.testing.assert_array_equal(
+        G,
+        np.array(
+            [
+                [0.0, 1.0, 2.0],
+                [2.0, 1.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert samples["iid"].to_list() == ["S1", "S3"]
 
 
 def test_missing_policies_nan_raise_and_impute(tmp_path):

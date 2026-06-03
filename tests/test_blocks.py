@@ -1,8 +1,12 @@
+# pattern: Imperative Shell
+
 from pathlib import Path
 
 import numpy as np
 import pytest
 from scipy import sparse as scipy_sparse
+
+from test_dense_read import write_fixed_width_plink2
 
 
 def write_blocks_vcf(tmp_path: Path) -> Path:
@@ -74,6 +78,44 @@ def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs5"]]
     np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
     assert full_variants["id"].to_list() == ["rs1", "rs2", "rs5"]
+
+
+def test_plink2_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    full = dataset.read()
+    blocks = list(dataset.blocks(size=2))
+
+    assert [block.shape for block in blocks] == [(3, 2), (3, 1)]
+    np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+
+
+def test_plink2_blocks_variant_metadata_aligns_with_each_block(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    blocks = list(dataset.blocks(size=2, return_variants=True))
+
+    assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs3"]]
+    for G_block, variants in blocks:
+        assert G_block.shape[1] == len(variants)
+
+
+def test_plink2_blocks_return_samples_keeps_source_order_for_each_block(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    blocks = list(dataset.blocks(size=1, samples=["S3", "S1"], return_samples=True, return_variants=True))
+
+    assert len(blocks) == 3
+    for G_block, samples, variants in blocks:
+        assert G_block.shape[0] == 2
+        assert G_block.shape[1] == len(variants)
+        assert samples["iid"].to_list() == ["S1", "S3"]
 
 
 def test_blocks_validate_size(tmp_path):
