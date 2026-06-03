@@ -182,5 +182,5 @@ The matrix-only path is the benchmark scenario that exercises the metadata
 short-circuit. The metadata-returning scenario still returned
 `variant_metadata length=1000`, confirming that metadata paths continue to
 work. Sample-filtered and genotype-filtered medians remained effectively
-unchanged, which confirms those scenarios did not accidentally use the
-matrix-only fast path.
+unchanged, which is consistent with those scenarios not using the matrix-only
+fast path; gating is covered by the contract tests.
