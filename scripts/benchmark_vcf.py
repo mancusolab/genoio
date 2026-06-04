@@ -45,7 +45,7 @@ def read_genoio(args: argparse.Namespace) -> np.ndarray:
 
 
 def read_cyvcf2(args: argparse.Namespace) -> np.ndarray:
-    import cyvcf2
+    import cyvcf2  # type: ignore[import-not-found]
 
     columns = []
     for variant in cyvcf2.VCF(str(args.vcf), gts012=True, strict_gt=True):

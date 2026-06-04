@@ -32,7 +32,7 @@ def read_genoio(args: argparse.Namespace) -> np.ndarray:
 
 
 def read_pandas_plink(args: argparse.Namespace) -> np.ndarray:
-    from pandas_plink import read_plink1_bin
+    from pandas_plink import read_plink1_bin  # type: ignore[import-not-found]
 
     data = read_plink1_bin(
         args.prefix.with_suffix(".bed"),

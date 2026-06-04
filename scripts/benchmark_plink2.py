@@ -113,7 +113,7 @@ def import_pgenlib(pgenlib_path: Path | None):
         sys.path.insert(0, str(pgenlib_path))
         sys.path.insert(0, str(pgenlib_path / "src"))
     try:
-        import pgenlib
+        import pgenlib  # type: ignore[import-not-found]
     except ModuleNotFoundError as error:
         raise RuntimeError(
             "pgenlib is not importable; install it with `pip install Pgenlib` or pass "
