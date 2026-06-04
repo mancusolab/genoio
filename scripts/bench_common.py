@@ -3,10 +3,7 @@ from __future__ import annotations
 import argparse
 import statistics
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from pathlib import Path
-from tempfile import TemporaryDirectory
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -79,36 +76,3 @@ def compare_summaries(left_name: str, left: Any, right_name: str, right: Any) ->
     equal = np.allclose(left_array, right_array, equal_nan=True)
     max_abs_diff = float(np.nanmax(np.abs(left_array - right_array))) if left_array.size else 0.0
     print(f"  allclose={equal} max_abs_diff={max_abs_diff:.6g}")
-
-
-@contextmanager
-def plink2_prefix_with_uncompressed_pvar(prefix: Path) -> Iterator[Path]:
-    if prefix.with_suffix(".pvar").exists():
-        yield prefix
-        return
-    pvar_zst = prefix.with_suffix(".pvar.zst")
-    if not pvar_zst.exists():
-        yield prefix
-        return
-
-    import shutil
-    import subprocess
-
-    zstd = shutil.which("zstd")
-    if zstd is None:
-        raise RuntimeError(f"{prefix}.pvar is missing and zstd is not available to decompress {pvar_zst}")
-
-    with TemporaryDirectory(prefix="genoio-plink2-bench-") as tmpdir:
-        tmp_prefix = Path(tmpdir) / prefix.name
-        for suffix in (".pgen", ".psam"):
-            source = prefix.with_suffix(suffix).resolve()
-            target = tmp_prefix.with_suffix(suffix)
-            try:
-                target.symlink_to(source)
-                continue
-            except OSError:
-                pass
-            shutil.copy2(source, target)
-        with tmp_prefix.with_suffix(".pvar").open("wb") as out:
-            subprocess.run([zstd, "-dc", str(pvar_zst)], stdout=out, check=True)
-        yield tmp_prefix

@@ -63,7 +63,6 @@ def test_all_scenario_names_each_genoio_reader_and_skips_pgenlib(monkeypatch, ca
             "1",
         ],
     )
-    monkeypatch.setattr(benchmark_plink2, "plink2_prefix_with_uncompressed_pvar", lambda prefix: _NullPrefix(prefix))
     monkeypatch.setattr(benchmark_plink2, "read_genoio_matrix_only", lambda prefix, max_variants: _matrix(1.0))
     monkeypatch.setattr(benchmark_plink2, "read_genoio_with_variants", lambda prefix, max_variants: (_matrix(2.0), 3))
     monkeypatch.setattr(benchmark_plink2, "read_genoio_sample_filtered", lambda prefix, max_variants: _matrix(3.0))
@@ -99,7 +98,6 @@ def test_matrix_only_scenario_includes_pgenlib_comparison(monkeypatch, capsys) -
             "1",
         ],
     )
-    monkeypatch.setattr(benchmark_plink2, "plink2_prefix_with_uncompressed_pvar", lambda prefix: _NullPrefix(prefix))
     monkeypatch.setattr(benchmark_plink2, "read_genoio_matrix_only", lambda prefix, max_variants: _matrix(1.0))
     monkeypatch.setattr(benchmark_plink2, "read_pgenlib", lambda args: _matrix(1.0))
 
@@ -110,14 +108,3 @@ def test_matrix_only_scenario_includes_pgenlib_comparison(monkeypatch, capsys) -
     assert "pgenlib_pgenreader" in output
     assert "  time median=" in output
     assert "comparison" in output
-
-
-class _NullPrefix:
-    def __init__(self, prefix: Path) -> None:
-        self.prefix = prefix
-
-    def __enter__(self) -> Path:
-        return self.prefix
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        return None

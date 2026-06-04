@@ -1098,3 +1098,22 @@ fn plink2_metadata_reads_psam_and_pvar() {
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
 }
+
+#[test]
+fn plink2_metadata_reads_zstd_compressed_pvar() {
+    let dir = unique_dir("plink2-compressed-pvar");
+    let pgen_bytes = fixed_width_pgen(&[0x00, 0x00, 0x00], 3, 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+    let pvar_zst = pvar.with_extension("pvar.zst");
+    let pvar_contents = fs::read(&pvar).expect("pvar fixture should be readable");
+    let compressed = zstd::stream::encode_all(&pvar_contents[..], 0)
+        .expect("pvar fixture should compress as zstd");
+    fs::write(&pvar_zst, compressed).expect("compressed pvar fixture should be written");
+    fs::remove_file(&pvar).expect("uncompressed pvar fixture should be removed");
+
+    let metadata =
+        genoio_io::read_plink2_metadata(&pgen, &pvar_zst, &psam).expect("metadata should decode");
+
+    assert_eq!(metadata.variants.len(), 3);
+    assert_eq!(metadata.variants[0].id, "rs1");
+}

@@ -321,9 +321,7 @@ def test_indexed_vcf_region_pushdown_combines_with_genotype_stat_filter(tmp_path
         ),
     ],
 )
-def test_plink1_filter_combinations_match_fixture_reference_results(
-    expr_factory, expected_ids, expected_matrix
-):
+def test_plink1_filter_combinations_match_fixture_reference_results(expr_factory, expected_ids, expected_matrix):
     import genoio
 
     dataset = genoio.bfile(Path(__file__).parent / "fixtures" / "plink1" / "tiny")

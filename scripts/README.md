@@ -26,7 +26,8 @@ python scripts/benchmark_plink1.py --backend pandas_plink --max-variants 1000
 python scripts/benchmark_plink2.py --backend pgenlib --max-variants 1000
 ```
 
-The PLINK2 `genoio` benchmark needs an uncompressed `.pvar`. If only `.pvar.zst` is present, the script decompresses it into a temporary directory with `zstd`.
+The PLINK2 `genoio` benchmark accepts either `.pvar` or `.pvar.zst`; compressed
+PVAR metadata is decompressed by the Rust reader.
 
 `pgenlib` must be importable for the PLINK2 comparison backend. If it is built in the symlinked PLINK repository but not installed, pass:
 

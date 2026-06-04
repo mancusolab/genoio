@@ -86,6 +86,40 @@ def test_pfile_member_path_resolves_shared_prefix(tmp_path):
     assert set(dataset.source.members) == {"pgen", "pvar", "psam"}
 
 
+def test_pfile_resolves_compressed_pvar_when_uncompressed_is_absent(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar.zst", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    dataset = genoio.pfile(tmp_path / "cohort")
+
+    assert dataset.source.members["pvar"] == tmp_path / "cohort.pvar.zst"
+
+
+def test_pfile_compressed_pvar_member_path_resolves_shared_prefix(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar.zst", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    dataset = genoio.pfile(tmp_path / "cohort.pvar.zst")
+
+    assert dataset.source.prefix == tmp_path / "cohort"
+    assert dataset.source.members["pvar"] == tmp_path / "cohort.pvar.zst"
+
+
+def test_pfile_prefers_uncompressed_pvar_when_both_exist(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar", ".pvar.zst", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    dataset = genoio.pfile(tmp_path / "cohort")
+
+    assert dataset.source.members["pvar"] == tmp_path / "cohort.pvar"
+
+
 def test_pfile_rejects_non_pfile_member_path(tmp_path):
     import genoio
 

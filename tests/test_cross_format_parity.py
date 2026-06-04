@@ -164,9 +164,7 @@ def test_canonical_sources_keep_sample_selection_in_source_order(canonical_datas
         ),
     ],
 )
-def test_canonical_sources_apply_filters_equivalently(
-    canonical_datasets, expr_factory, expected_ids, expected_matrix
-):
+def test_canonical_sources_apply_filters_equivalently(canonical_datasets, expr_factory, expected_ids, expected_matrix):
     import genoio
 
     expr = expr_factory(genoio)

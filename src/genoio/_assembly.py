@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 import polars as pl
+from numpy.typing import NDArray
 from scipy import sparse as scipy_sparse
 
 from ._errors import MissingDataError
 
-MatrixResult = NDArray[Any] | scipy_sparse.spmatrix
+SparseMatrixResult = scipy_sparse.spmatrix | scipy_sparse.sparray
+MatrixResult = NDArray[Any] | SparseMatrixResult
 
 _SAMPLE_COLUMNS = ["fid", "iid", "father", "mother", "sex", "phenotype"]
 _VARIANT_COLUMNS = [
@@ -122,7 +123,7 @@ def sparse_matrix_from_rust(
     shape: tuple[int, int],
     dtype: np.dtype[Any],
     sparse_format: str,
-) -> scipy_sparse.spmatrix:
+) -> SparseMatrixResult:
     r"""Convert Rust CSC arrays into the requested SciPy sparse format.
 
     Rust always emits CSC because variants are accumulated column-wise. CSR is

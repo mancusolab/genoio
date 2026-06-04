@@ -64,9 +64,7 @@ def test_documented_association_workflow_aligns_phenotypes_to_genotype_sample_or
             ]
         ),
     )
-    assert [(shape, variant_ids) for shape, variant_ids, _, _ in scanned] == [
-        ((4, 2), ["rs1", "rs2"])
-    ]
+    assert [(shape, variant_ids) for shape, variant_ids, _, _ in scanned] == [((4, 2), ["rs1", "rs2"])]
     for _, _, block_y, block_covariates in scanned:
         np.testing.assert_array_equal(block_y, y)
         np.testing.assert_array_equal(block_covariates, C)

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from bench_common import benchmark, compare_summaries, plink2_prefix_with_uncompressed_pvar, positive_int
+from bench_common import benchmark, compare_summaries, positive_int
 
 SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered")
 _last_variant_metadata_length: int | None = None
@@ -194,8 +194,7 @@ def main() -> None:
         genoio_matrix = None
         pgenlib_matrix = None
         if args.backend in {"both", "genoio"}:
-            with plink2_prefix_with_uncompressed_pvar(args.prefix) as genoio_prefix:
-                genoio_matrix = benchmark_genoio_scenario(scenario, genoio_prefix, args.max_variants, args.repeats)
+            genoio_matrix = benchmark_genoio_scenario(scenario, args.prefix, args.max_variants, args.repeats)
         if scenario == "matrix-only" and args.backend in {"both", "pgenlib"}:
             pgenlib_matrix = benchmark("pgenlib_pgenreader", lambda: read_pgenlib(args), args.repeats)
         elif scenario != "matrix-only" and args.backend in {"both", "pgenlib"}:

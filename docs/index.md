@@ -21,7 +21,7 @@ Three constructors resolve supported sources:
 
 - [`vcf`](api/reading.md#genoio.vcf) for VCF/BCF files.
 - [`bfile`](api/reading.md#genoio.bfile) for PLINK1 `.bed/.bim/.fam` file sets.
-- [`pfile`](api/reading.md#genoio.pfile) for PLINK2 `.pgen/.pvar/.psam` file sets.
+- [`pfile`](api/reading.md#genoio.pfile) for PLINK2 `.pgen/.pvar[.zst]/.psam` file sets.
 
 Each constructor returns a reusable [`Dataset`](api/reading.md#genoio.Dataset)
 with `read`, `blocks`, `samples`, and `variants` methods.

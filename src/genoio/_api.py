@@ -379,7 +379,9 @@ def bfile(path: str | Path) -> Dataset:
 def pfile(path: str | Path) -> Dataset:
     r"""Resolve a PLINK2 PGEN/PVAR/PSAM file set and return a reusable dataset.
 
-    `path` may be the shared prefix or one `.pgen`, `.pvar`, or `.psam` member.
+    `path` may be the shared prefix or one `.pgen`, `.pvar`, `.pvar.zst`, or
+    `.psam` member. If both `.pvar` and `.pvar.zst` exist for a prefix,
+    uncompressed `.pvar` is preferred.
 
     **Arguments:**
 

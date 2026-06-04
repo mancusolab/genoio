@@ -43,6 +43,7 @@ class ResolvedSource:
 
 _PLINK1_SUFFIXES = {"bed": ".bed", "bim": ".bim", "fam": ".fam"}
 _PLINK2_SUFFIXES = {"pgen": ".pgen", "pvar": ".pvar", "psam": ".psam"}
+_PLINK2_COMPRESSED_PVAR_SUFFIX = ".pvar.zst"
 
 
 def resolve_vcf(path: str | Path) -> ResolvedSource:
@@ -87,11 +88,13 @@ def resolve_pfile(path: str | Path) -> ResolvedSource:
 
     **Arguments:**
 
-    - `path`: PLINK2 prefix or one `.pgen`, `.pvar`, or `.psam` member path.
+    - `path`: PLINK2 prefix or one `.pgen`, `.pvar`, `.pvar.zst`, or `.psam`
+      member path.
 
     **Returns:**
 
-    `ResolvedSource` with `.pgen`, `.pvar`, and `.psam` members.
+    `ResolvedSource` with `.pgen`, `.psam`, and either `.pvar` or `.pvar.zst`
+    as the logical `"pvar"` member.
     """
     return _resolve_plink(Path(path), SourceFormat.PLINK2)
 
@@ -122,7 +125,7 @@ def _resolve_single_file(path: Path, format: SourceFormat) -> ResolvedSource:
 
 def _resolve_plink(path: Path, format: SourceFormat) -> ResolvedSource:
     suffixes = _PLINK1_SUFFIXES if format is SourceFormat.PLINK1 else _PLINK2_SUFFIXES
-    if path.suffix and path.suffix not in suffixes.values():
+    if path.suffix and path.suffix not in suffixes.values() and not _is_compressed_pvar(path, format):
         raise UnsupportedFormatError(f"source path {path} is not {format.value}")
     prefix = _prefix_for_plink_path(path, format)
     return _resolve_plink_prefix(prefix, format)
@@ -130,6 +133,10 @@ def _resolve_plink(path: Path, format: SourceFormat) -> ResolvedSource:
 
 def _prefix_for_plink_path(path: Path, format: SourceFormat) -> Path:
     suffixes = _PLINK1_SUFFIXES if format is SourceFormat.PLINK1 else _PLINK2_SUFFIXES
+    if _is_compressed_pvar(path, format):
+        if not path.exists():
+            raise InvalidSourceError(f"source path does not exist: {path}")
+        return path.with_suffix("").with_suffix("")
     if path.suffix in suffixes.values():
         if not path.exists():
             raise InvalidSourceError(f"source path does not exist: {path}")
@@ -152,8 +159,16 @@ def _existing_members(prefix: Path, suffixes: Mapping[str, str]) -> dict[str, Pa
     members: dict[str, Path] = {}
     for key, suffix in suffixes.items():
         member_path = prefix.with_suffix(suffix)
+        if key == "pvar" and not member_path.exists():
+            compressed_member = Path(f"{member_path}.zst")
+            if compressed_member.exists():
+                member_path = compressed_member
         if member_path.exists():
             if not member_path.is_file():
                 raise InvalidSourceError(f"source member is not a file: {member_path}")
             members[key] = member_path
     return members
+
+
+def _is_compressed_pvar(path: Path, format: SourceFormat) -> bool:
+    return format is SourceFormat.PLINK2 and path.name.endswith(_PLINK2_COMPRESSED_PVAR_SUFFIX)

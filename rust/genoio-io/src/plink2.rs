@@ -2089,10 +2089,14 @@ fn parse_psam_line(
 }
 
 fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut reader = open_pvar_reader(path)?;
+    let mut contents = String::new();
+    reader
+        .read_to_string(&mut contents)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let data_lines = contents
         .lines()
         .enumerate()
@@ -2121,11 +2125,7 @@ fn parse_pvar_source_window(
     window: VariantWindow,
     expected_variant_ct: usize,
 ) -> Result<Vec<(usize, VariantRecord)>> {
-    let file = File::open(path).map_err(|source| MetadataError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let reader = BufReader::new(file);
+    let reader = open_pvar_reader(path)?;
     let mut columns = None;
     let mut body_started = false;
     let mut source_index = 0_usize;
@@ -2179,7 +2179,7 @@ fn parse_pvar_source_window(
 
 struct PvarRecordReader {
     path: std::path::PathBuf,
-    lines: std::iter::Enumerate<std::io::Lines<BufReader<File>>>,
+    lines: std::iter::Enumerate<std::io::Lines<Box<dyn BufRead>>>,
     columns: Option<PvarColumns>,
     body_started: bool,
     source_index: usize,
@@ -2187,13 +2187,9 @@ struct PvarRecordReader {
 
 impl PvarRecordReader {
     fn new(path: &Path) -> Result<Self> {
-        let file = File::open(path).map_err(|source| MetadataError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
         Ok(Self {
             path: path.to_path_buf(),
-            lines: BufReader::new(file).lines().enumerate(),
+            lines: open_pvar_reader(path)?.lines().enumerate(),
             columns: None,
             body_started: false,
             source_index: 0,
@@ -2245,6 +2241,26 @@ impl PvarRecordReader {
         }
         Ok(())
     }
+}
+
+fn open_pvar_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+    let file = File::open(path).map_err(|source| MetadataError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".pvar.zst"))
+    {
+        let decoder =
+            zstd::stream::read::Decoder::new(file).map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        return Ok(Box::new(BufReader::new(decoder)));
+    }
+    Ok(Box::new(BufReader::new(file)))
 }
 
 #[derive(Debug, Clone, Copy)]

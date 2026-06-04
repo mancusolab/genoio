@@ -75,7 +75,7 @@ Open supported genotype sources with the matching constructor:
 ```python
 vcf_ds = genoio.vcf("cohort.vcf.gz")
 bed_ds = genoio.bfile("cohort")       # .bed/.bim/.fam
-pgen_ds = genoio.pfile("cohort.pgen") # .pgen/.pvar/.psam
+pgen_ds = genoio.pfile("cohort.pgen") # .pgen/.pvar[.zst]/.psam
 ```
 
 Use serializable filters when reading whole matrices or blocks:
