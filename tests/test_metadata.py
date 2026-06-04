@@ -1,9 +1,98 @@
+# pattern: Imperative Shell
+
+import struct
 from pathlib import Path
 
 import polars as pl
 import pytest
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+_BGEN_FLAG_LAYOUT2 = 2 << 2
+_BGEN_FLAG_SAMPLE_IDENTIFIERS = 1 << 31
+
+
+def _write_bgen_header(
+    buffer: bytearray,
+    *,
+    n_samples: int,
+    n_variants: int,
+    has_sample_ids: bool,
+) -> None:
+    flags = _BGEN_FLAG_LAYOUT2
+    if has_sample_ids:
+        flags |= _BGEN_FLAG_SAMPLE_IDENTIFIERS
+    buffer.extend(struct.pack("<IIII4sI", 20, 20, n_variants, n_samples, b"bgen", flags))
+
+
+def _write_sample_identifier_block(buffer: bytearray, sample_ids: list[str]) -> None:
+    encoded_ids = [sample_id.encode() for sample_id in sample_ids]
+    block_len = 8 + sum(2 + len(sample_id) for sample_id in encoded_ids)
+    buffer.extend(struct.pack("<II", block_len, len(encoded_ids)))
+    for sample_id in encoded_ids:
+        buffer.extend(struct.pack("<H", len(sample_id)))
+        buffer.extend(sample_id)
+
+
+def _write_layout2_variant(
+    buffer: bytearray,
+    *,
+    variant_id: str,
+    rsid: str,
+    chrom: str,
+    pos: int,
+    alleles: tuple[str, str],
+    n_samples: int,
+) -> None:
+    for value in (variant_id, rsid, chrom):
+        encoded = value.encode()
+        buffer.extend(struct.pack("<H", len(encoded)))
+        buffer.extend(encoded)
+    buffer.extend(struct.pack("<IH", pos, len(alleles)))
+    for allele in alleles:
+        encoded = allele.encode()
+        buffer.extend(struct.pack("<I", len(encoded)))
+        buffer.extend(encoded)
+    buffer.extend(struct.pack("<IIHBBBB", 10, n_samples, len(alleles), 2, 2, 0, 0))
+
+
+def _write_tiny_bgen(path: Path, *, sample_ids: list[str] | None) -> None:
+    buffer = bytearray()
+    _write_bgen_header(
+        buffer,
+        n_samples=2,
+        n_variants=2,
+        has_sample_ids=sample_ids is not None,
+    )
+    if sample_ids is not None:
+        _write_sample_identifier_block(buffer, sample_ids)
+    variant_offset = len(buffer) - 4
+    buffer[0:4] = struct.pack("<I", variant_offset)
+    _write_layout2_variant(
+        buffer,
+        variant_id="var1",
+        rsid="rs1",
+        chrom="1",
+        pos=10,
+        alleles=("A", "G"),
+        n_samples=2,
+    )
+    _write_layout2_variant(
+        buffer,
+        variant_id="var2",
+        rsid="rs2",
+        chrom="2",
+        pos=20,
+        alleles=("C", "T"),
+        n_samples=2,
+    )
+    path.write_bytes(buffer)
+
+
+def _write_sample_file(path: Path, sample_ids: list[str]) -> None:
+    rows = ["ID_1 ID_2 missing", "0 0 0"]
+    rows.extend(f"{sample_id} {sample_id} 0" for sample_id in sample_ids)
+    path.write_text("\n".join(rows) + "\n")
 
 
 def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
@@ -156,3 +245,45 @@ def test_malformed_plink1_bim_line_is_reported_as_invalid_source(tmp_path):
     dataset = genoio.bfile(prefix)
     with pytest.raises(genoio.InvalidSourceError, match="bim"):
         dataset.variants()
+
+
+def test_bgen_samples_and_variants_return_embedded_metadata(tmp_path):
+    import genoio
+
+    bgen = tmp_path / "tiny.bgen"
+    _write_tiny_bgen(bgen, sample_ids=["sample_1", "sample_2"])
+
+    dataset = genoio.bgen(bgen)
+
+    assert dataset.samples()["iid"].to_list() == ["sample_1", "sample_2"]
+    assert dataset.variants().rows() == [
+        ("1", 10, "rs1", "A", "G"),
+        ("2", 20, "rs2", "C", "T"),
+    ]
+
+
+def test_bgen_samples_can_come_from_companion_sample_file(tmp_path):
+    import genoio
+
+    prefix = tmp_path / "tiny"
+    _write_tiny_bgen(prefix.with_suffix(".bgen"), sample_ids=None)
+    _write_sample_file(prefix.with_suffix(".sample"), ["sample_a", "sample_b"])
+
+    dataset = genoio.bgen(prefix)
+
+    assert dataset.samples()["iid"].to_list() == ["sample_a", "sample_b"]
+    assert dataset.variants().rows() == [
+        ("1", 10, "rs1", "A", "G"),
+        ("2", 20, "rs2", "C", "T"),
+    ]
+
+
+def test_bgen_missing_sample_ids_raise_invalid_source_error(tmp_path):
+    import genoio
+
+    bgen = tmp_path / "tiny.bgen"
+    _write_tiny_bgen(bgen, sample_ids=None)
+
+    dataset = genoio.bgen(bgen)
+    with pytest.raises(genoio.InvalidSourceError, match="sample"):
+        dataset.samples()

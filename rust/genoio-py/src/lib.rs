@@ -40,9 +40,9 @@ fn read_metadata(
             genoio_io::read_plink2_metadata(&pgen, &pvar, &psam)
         }
         "bgen" => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "bgen metadata reads are not implemented",
-            ));
+            let bgen = member_path(members, "bgen")?;
+            let sample = optional_member_path(members, "sample")?;
+            genoio_io::read_bgen_metadata(&bgen, sample.as_deref())
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -324,6 +324,13 @@ fn member_path(members: &Bound<'_, PyDict>, key: &str) -> PyResult<PathBuf> {
         pyo3::exceptions::PyKeyError::new_err(format!("missing source member: {key}"))
     })?;
     Ok(PathBuf::from(value.extract::<String>()?))
+}
+
+fn optional_member_path(members: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<PathBuf>> {
+    let Some(value) = members.get_item(key)? else {
+        return Ok(None);
+    };
+    Ok(Some(PathBuf::from(value.extract::<String>()?)))
 }
 
 struct ReadOptions {
