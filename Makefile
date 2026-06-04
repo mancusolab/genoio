@@ -44,11 +44,12 @@ build-release: requirements  ## Compile and install an optimized development ext
 
 build-wheel: requirements  ## Build a repaired redistributable wheel
 	$(REPAIR_ENV) $(MATURIN) build --release --auditwheel=repair -o $(DIST_DIR) $(ARGS)
+	$(RUST_ENV) $(MATURIN) develop
 
 test: build-dev  ## Run Python tests
 	$(PYTEST) -q
 
-pyright: requirements  ## Run Python type checks
+pyright: build-dev  ## Run Python type checks
 	$(PYRIGHT) src tests scripts
 
 docs: build-dev  ## Build documentation with strict checks
