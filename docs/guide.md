@@ -106,6 +106,78 @@ for X, variants in ds.blocks(
 
 ---
 
+## Association and QTL scans
+
+Association tools usually need phenotype and covariate arrays in the same row
+order as the genotype matrix. Use `samples["iid"]` as the join key, then build
+arrays from the joined frame. `genoio` keeps matrix rows in source sample order,
+so this joined frame can be reused for every block.
+
+```python
+import polars as pl
+import genoio
+
+ds = genoio.pfile("data/chr22_hg38")
+samples = ds.samples()
+
+phenotypes = pl.read_csv("phenotypes.tsv", separator="\t")
+covariates = pl.read_csv("covariates.tsv", separator="\t")
+
+design = (
+    # Start from genoio sample order so y and C match genotype matrix rows.
+    samples.select("iid")
+    .join(phenotypes.select("iid", "expression"), on="iid", how="left")
+    .join(covariates.select("iid", "age", "sex", "PC1", "PC2"), on="iid", how="left")
+)
+
+missing_input_rows = design.select(
+    # Check every analysis column, but keep iid out of the missing-value test.
+    pl.any_horizontal(pl.all().exclude("iid").is_null())
+).to_series()
+if missing_input_rows.any():
+    raise ValueError("phenotype or covariate table is missing retained samples")
+
+# These arrays now have the same row order as matrices returned by read/blocks.
+y = design["expression"].to_numpy()
+C = design.select("age", "sex", "PC1", "PC2").to_numpy()
+
+cis_window = genoio.region("22:20000000-21000000") & genoio.missing_rate(max=0.1)
+
+for X, variants in ds.blocks(5_000, variants=cis_window, return_variants=True):
+    run_association_scan(X, y, covariates=C, samples=samples, variants=variants)
+```
+
+If a filter retains no variants, `blocks(...)` yields no blocks. Treat that as a
+valid empty scan result, not as an IO failure.
+
+Extra rows in the phenotype or covariate tables are ignored because the join
+starts from `samples`. If you pass `samples=...` to `read` or `blocks`, build
+the design matrix from the returned filtered sample frame instead of
+`ds.samples()`:
+
+```python
+keep = ["sample_1", "sample_2", "sample_3"]
+blocks = ds.blocks(
+    5_000,
+    samples=keep,
+    variants=cis_window,
+    return_samples=True,
+    return_variants=True,
+)
+
+for X, block_samples, variants in blocks:
+    design = (
+        block_samples.select("iid")
+        .join(phenotypes.select("iid", "expression"), on="iid", how="left")
+        .join(covariates.select("iid", "age", "sex", "PC1", "PC2"), on="iid", how="left")
+    )
+    y = design["expression"].to_numpy()
+    C = design.select("age", "sex", "PC1", "PC2").to_numpy()
+    run_association_scan(X, y, covariates=C, samples=block_samples, variants=variants)
+```
+
+---
+
 ## Missing data
 
 Dense reads support three missing-data policies:
