@@ -41,6 +41,32 @@ fn write_bgen_header(
     writer.write_all(&flags.to_le_bytes())
 }
 
+fn write_bgen_header_with_free_data(
+    writer: &mut impl Write,
+    n_samples: u32,
+    n_variants: u32,
+    flags: u32,
+    has_sample_ids: bool,
+    free_data: &[u8],
+) -> io::Result<()> {
+    let flags = if has_sample_ids {
+        flags | FLAG_SAMPLE_IDENTIFIERS
+    } else {
+        flags
+    };
+    let header_length = 20_u32
+        .checked_add(u32::try_from(free_data.len()).expect("free data length should fit u32"))
+        .expect("header length should fit u32");
+
+    writer.write_all(&header_length.to_le_bytes())?;
+    writer.write_all(&header_length.to_le_bytes())?;
+    writer.write_all(&n_variants.to_le_bytes())?;
+    writer.write_all(&n_samples.to_le_bytes())?;
+    writer.write_all(b"bgen")?;
+    writer.write_all(free_data)?;
+    writer.write_all(&flags.to_le_bytes())
+}
+
 fn write_sample_identifier_block(writer: &mut impl Write, sample_ids: &[&str]) -> io::Result<()> {
     let block_len = 8 + sample_ids
         .iter()
@@ -198,6 +224,45 @@ fn assert_metadata_error_contains(error: genoio_core::MetadataError, expected: &
         message.contains(expected),
         "expected error containing {expected:?}, got {message:?}"
     );
+}
+
+#[test]
+fn bgen_metadata_reads_header_with_free_data_before_flags() {
+    let dir = unique_dir("bgen-header-free-data");
+    let bgen = dir.join("tiny.bgen");
+    let mut contents = Vec::new();
+
+    write_bgen_header_with_free_data(
+        &mut contents,
+        2,
+        1,
+        FLAG_LAYOUT2,
+        true,
+        &[0xAA, 0xBB, 0xCC, 0xDD],
+    )
+    .expect("header should write");
+    write_sample_identifier_block(&mut contents, &["sample_1", "sample_2"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(contents.len() - 4).expect("variant offset should fit u32");
+    contents[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+    write_layout2_variant_identifying_data(&mut contents, "var1", "rs1", "1", 10, &["A", "G"])
+        .expect("variant identifying data should write");
+    write_empty_layout2_probability_block(&mut contents, 2, 2)
+        .expect("probability block should write");
+    fs::write(&bgen, contents).expect("bgen fixture should be written");
+
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("bgen metadata with header free data should parse");
+
+    assert_eq!(
+        metadata
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample_1", "sample_2"]
+    );
+    assert_eq!(metadata.variants[0].id, "rs1");
 }
 
 #[test]

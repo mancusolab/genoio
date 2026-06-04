@@ -81,6 +81,12 @@ impl BgenHeader {
             return Err(MetadataError::parse(path, "invalid bgen magic bytes"));
         }
 
+        let free_data_length = header_length
+            .checked_sub(MIN_HEADER_LENGTH)
+            .ok_or_else(|| {
+                MetadataError::parse(path, "bgen header length is smaller than 20 bytes")
+            })?;
+        skip_exact(reader, path, u64::from(free_data_length))?;
         let flags = BgenFlags::from_raw(read_u32_le(reader, path)?);
         Ok(Self {
             offset,
