@@ -20,16 +20,19 @@ From a local checkout:
 pip install .
 ```
 
-For a quick editable development build:
+For development, use the Makefile to create `.venv`, install development
+dependencies, and build the Rust extension:
 
 ```bash
-pip install -e ".[dev,docs]"
-python -m maturin develop
+make build
 ```
 
-Run the full local verification suite with:
+Useful development targets:
 
 ```bash
+make help
+make build-release
+make build-wheel
 make verify
 ```
 

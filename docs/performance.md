@@ -56,7 +56,7 @@ for candidate variants before expanding retained variants.
 Build the Rust extension in release mode before benchmarking:
 
 ```bash
-python -m maturin develop --release
+make build-release
 ```
 
 Then run the benchmark scripts:
