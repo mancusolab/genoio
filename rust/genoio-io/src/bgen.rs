@@ -300,8 +300,9 @@ fn read_layout2_variant_metadata(
     );
 
     for _ in 0..variant_count {
-        variants.push(read_layout2_variant_identifying_data(reader, path)?);
-        skip_layout2_probability_block(reader, path, sample_count, compression)?;
+        let variant = read_layout2_variant_identifying_data(reader, path)?;
+        skip_layout2_probability_block(reader, path, sample_count, 2, compression)?;
+        variants.push(variant);
     }
 
     if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
@@ -366,10 +367,14 @@ fn skip_layout2_probability_block(
     reader: &mut impl Read,
     path: &Path,
     expected_sample_count: u32,
+    variant_allele_count: u16,
     compression: BgenCompression,
 ) -> Result<()> {
     let payload = read_layout2_probability_payload(reader, path, compression)?;
-    validate_layout2_probability_payload(path, &payload, expected_sample_count)
+    let decoded =
+        DecodedDosageVariant::decode(path, &payload, expected_sample_count, variant_allele_count)?;
+    decoded.debug_assert_supported_subset();
+    Ok(())
 }
 
 fn read_layout2_probability_payload(
@@ -411,69 +416,188 @@ fn read_layout2_probability_payload(
     }
 }
 
-fn validate_layout2_probability_payload(
-    path: &Path,
-    payload: &[u8],
-    expected_sample_count: u32,
-) -> Result<()> {
-    let block_length = u32::try_from(payload.len())
-        .map_err(|_| MetadataError::parse(path, "bgen probability block is out of range"))?;
-    let fixed_header_length = 10_u32
-        .checked_add(expected_sample_count)
-        .ok_or_else(|| MetadataError::parse(path, "bgen sample count is out of range"))?;
-    if block_length < fixed_header_length {
-        return Err(MetadataError::parse(
-            path,
-            "bgen uncompressed probability block is shorter than the layout 2 header",
-        ));
-    }
+#[derive(Debug, Clone)]
+struct Layout2ProbabilityHeader {
+    sample_count: u32,
+    allele_count: u16,
+    min_ploidy: u8,
+    max_ploidy: u8,
+    sample_ploidies: Vec<u8>,
+    non_missing_sample_count: u32,
+    phased: u8,
+    bit_depth: u8,
+    byte_len: usize,
+}
 
-    let reader = &mut &payload[..];
-    let sample_count = read_u32_le(reader, path)?;
-    if sample_count != expected_sample_count {
-        return Err(MetadataError::parse(
-            path,
-            "bgen probability block sample count does not match header sample count",
-        ));
-    }
+impl Layout2ProbabilityHeader {
+    fn decode(
+        path: &Path,
+        payload: &[u8],
+        expected_sample_count: u32,
+        variant_allele_count: u16,
+    ) -> Result<Self> {
+        let fixed_header_length = Self::fixed_header_length(path, expected_sample_count)?;
+        if payload.len() < fixed_header_length {
+            return Err(MetadataError::parse(
+                path,
+                "bgen uncompressed probability block is shorter than the layout 2 header",
+            ));
+        }
 
-    let allele_count = read_u16_le(reader, path)?;
-    if allele_count != 2 {
-        return Err(MetadataError::parse(
-            path,
-            "unsupported bgen multiallelic probability block; only biallelic records are supported",
-        ));
-    }
+        let reader = &mut &payload[..fixed_header_length];
+        let sample_count = read_u32_le(reader, path)?;
+        if sample_count != expected_sample_count {
+            return Err(MetadataError::parse(
+                path,
+                "bgen probability block sample count does not match header sample count",
+            ));
+        }
 
-    let min_ploidy = read_u8(reader, path)?;
-    let max_ploidy = read_u8(reader, path)?;
-    if min_ploidy != 2 || max_ploidy != 2 {
-        return Err(MetadataError::parse(
-            path,
-            "unsupported bgen variable-ploidy probability block; only diploid records are supported",
-        ));
-    }
+        let allele_count = read_u16_le(reader, path)?;
+        if allele_count != variant_allele_count {
+            return Err(MetadataError::parse(
+                path,
+                "bgen probability block allele count does not match variant allele count",
+            ));
+        }
+        if allele_count != 2 {
+            return Err(MetadataError::parse(
+                path,
+                "unsupported bgen multiallelic probability block; only biallelic records are supported",
+            ));
+        }
 
-    for _ in 0..expected_sample_count {
-        let ploidy = read_u8(reader, path)? & 0b0011_1111;
-        if ploidy != 2 {
+        let min_ploidy = read_u8(reader, path)?;
+        let max_ploidy = read_u8(reader, path)?;
+        if min_ploidy != 2 || max_ploidy != 2 {
             return Err(MetadataError::parse(
                 path,
                 "unsupported bgen variable-ploidy probability block; only diploid records are supported",
             ));
         }
+
+        let sample_count_usize = usize::try_from(expected_sample_count)
+            .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+        let mut sample_ploidies = Vec::with_capacity(sample_count_usize);
+        let mut non_missing_sample_count = 0_u32;
+        for _ in 0..expected_sample_count {
+            let ploidy_byte = read_u8(reader, path)?;
+            let is_missing = ploidy_byte & 0b1000_0000 != 0;
+            let ploidy = ploidy_byte & 0b0011_1111;
+            if !is_missing {
+                if ploidy != 2 {
+                    return Err(MetadataError::parse(
+                        path,
+                        "unsupported bgen variable-ploidy probability block; only diploid records are supported",
+                    ));
+                }
+                non_missing_sample_count =
+                    non_missing_sample_count.checked_add(1).ok_or_else(|| {
+                        MetadataError::parse(path, "bgen non-missing sample count is out of range")
+                    })?;
+            }
+            sample_ploidies.push(ploidy_byte);
+        }
+
+        let phased = read_u8(reader, path)?;
+        if phased != 0 {
+            return Err(MetadataError::parse(
+                path,
+                "unsupported bgen phased probability block; only unphased records are supported",
+            ));
+        }
+
+        let bit_depth = read_u8(reader, path)?;
+        if !(1..=32).contains(&bit_depth) {
+            return Err(MetadataError::parse(
+                path,
+                "unsupported bgen probability bit depth; expected 1..=32",
+            ));
+        }
+
+        Ok(Self {
+            sample_count,
+            allele_count,
+            min_ploidy,
+            max_ploidy,
+            sample_ploidies,
+            non_missing_sample_count,
+            phased,
+            bit_depth,
+            byte_len: fixed_header_length,
+        })
     }
 
-    let phased = read_u8(reader, path)?;
-    if phased != 0 {
-        return Err(MetadataError::parse(
+    fn fixed_header_length(path: &Path, sample_count: u32) -> Result<usize> {
+        let sample_count = usize::try_from(sample_count)
+            .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+        10_usize
+            .checked_add(sample_count)
+            .ok_or_else(|| MetadataError::parse(path, "bgen probability header is out of range"))
+    }
+
+    fn required_packed_probability_bytes(&self, path: &Path) -> Result<usize> {
+        let bits = u64::from(self.non_missing_sample_count)
+            .checked_mul(2)
+            .and_then(|value| value.checked_mul(u64::from(self.bit_depth)))
+            .ok_or_else(|| {
+                MetadataError::parse(path, "bgen packed probability bit count is out of range")
+            })?;
+        let bytes = bits.div_ceil(8);
+        usize::try_from(bytes).map_err(|_| {
+            MetadataError::parse(path, "bgen packed probability bytes are out of range")
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DecodedDosageVariant<'a> {
+    header: Layout2ProbabilityHeader,
+    packed_probabilities: &'a [u8],
+}
+
+impl<'a> DecodedDosageVariant<'a> {
+    fn decode(
+        path: &Path,
+        payload: &'a [u8],
+        expected_sample_count: u32,
+        variant_allele_count: u16,
+    ) -> Result<Self> {
+        let header = Layout2ProbabilityHeader::decode(
             path,
-            "unsupported bgen phased probability block; only unphased records are supported",
-        ));
+            payload,
+            expected_sample_count,
+            variant_allele_count,
+        )?;
+        let packed_probabilities = &payload[header.byte_len..];
+        let required_packed_len = header.required_packed_probability_bytes(path)?;
+        if packed_probabilities.len() < required_packed_len {
+            return Err(MetadataError::parse(
+                path,
+                "bgen probability block is truncated; packed probabilities are shorter than declared non-missing samples",
+            ));
+        }
+
+        Ok(Self {
+            header,
+            packed_probabilities,
+        })
     }
 
-    let _bit_depth = read_u8(reader, path)?;
-    Ok(())
+    fn debug_assert_supported_subset(&self) {
+        debug_assert_eq!(
+            self.header.sample_count as usize,
+            self.header.sample_ploidies.len()
+        );
+        debug_assert_eq!(self.header.allele_count, 2);
+        debug_assert_eq!(self.header.min_ploidy, 2);
+        debug_assert_eq!(self.header.max_ploidy, 2);
+        debug_assert_eq!(self.header.phased, 0);
+        debug_assert!((1..=32).contains(&self.header.bit_depth));
+        debug_assert!(
+            !self.packed_probabilities.is_empty() || self.header.non_missing_sample_count == 0
+        );
+    }
 }
 
 fn decompress_probability_block(
