@@ -30,6 +30,50 @@ def test_vcf_does_not_resolve_same_stem_plink_prefix(tmp_path):
         genoio.vcf(source_path)
 
 
+def test_bgen_member_path_resolves_bgen_source(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.bgen"
+    source_path.touch()
+
+    dataset = genoio.bgen(source_path)
+
+    assert dataset.source.format.value == "bgen"
+    assert dataset.source.path == source_path
+    assert dataset.source.members == {"bgen": source_path}
+    assert dataset.source.prefix == tmp_path / "cohort"
+
+
+def test_bgen_prefix_resolves_optional_sample_companion(tmp_path):
+    import genoio
+
+    bgen_path = tmp_path / "cohort.bgen"
+    sample_path = tmp_path / "cohort.sample"
+    bgen_path.touch()
+    sample_path.touch()
+
+    dataset = genoio.bgen(tmp_path / "cohort")
+
+    assert dataset.source.members == {"bgen": bgen_path, "sample": sample_path}
+
+
+def test_bgen_missing_path_raises_invalid_source_error(tmp_path):
+    import genoio
+
+    with pytest.raises(genoio.InvalidSourceError):
+        genoio.bgen(tmp_path / "missing.bgen")
+
+
+def test_bgen_unsupported_extension_raises_unsupported_format_error(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf"
+    source_path.touch()
+
+    with pytest.raises(genoio.UnsupportedFormatError):
+        genoio.bgen(source_path)
+
+
 def test_bfile_missing_companion_raises_missing_companion_error(tmp_path):
     import genoio
 
