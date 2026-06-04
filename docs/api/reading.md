@@ -31,7 +31,9 @@ back to its original diploid sample.
 
 `Dataset.variants()` returns a Polars DataFrame in source variant order.
 `read(..., return_variants=True)` and `blocks(..., return_variants=True)` return
-the same five columns for the retained variants, in matrix-column order.
+the same five columns for the retained variants, in matrix-column order. The
+schema is format-neutral: `a1` is the allele counted by returned dosage values,
+not necessarily the VCF ALT allele.
 
 ??? info "Variant metadata schema"
     | Column | Meaning |

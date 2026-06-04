@@ -9,17 +9,18 @@ description = "Genotype IO tools for Python"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
-    "polars",
-    "scipy",
+    "numpy>=1.24",
+    "polars>=1.0",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
 dev = [
     "maturin>=1.10,<2",
-    "pre-commit",
-    "pytest",
-    "ruff",
+    "pre-commit>=3",
+    "pyright>=1.1",
+    "pytest>=8",
+    "ruff>=0.5",
 ]
 docs = [
     "hippogriffe>=0.2",
@@ -37,6 +38,7 @@ manifest-path = "rust/genoio-py/Cargo.toml"
 
 [tool.ruff]
 line-length = 120
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -46,3 +48,14 @@ known-first-party = ["genoio"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+]
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+extraPaths = ["scripts"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"

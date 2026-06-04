@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy import sparse as scipy_sparse
-
 from test_dense_read import write_fixed_width_plink2
 
 
@@ -185,9 +184,7 @@ def test_plink2_matrix_only_blocks_pass_private_matrix_only_option(tmp_path, mon
         {"variants": ["rs1"]},
     ],
 )
-def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(
-    tmp_path, monkeypatch, read_options
-):
+def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(tmp_path, monkeypatch, read_options):
     import genoio
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
@@ -261,9 +258,7 @@ def test_plink2_blocks_metadata_required_paths_reject_malformed_companion_files(
         ),
     ],
 )
-def test_plink2_metadata_blocks_validate_full_pvar_before_first_block_return(
-    tmp_path, pvar_text, match
-):
+def test_plink2_metadata_blocks_validate_full_pvar_before_first_block_return(tmp_path, pvar_text, match):
     import genoio
 
     prefix = write_fixed_width_plink2(tmp_path)

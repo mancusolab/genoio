@@ -3,14 +3,21 @@ repos:
     hooks:
       - id: ruff-check
         name: ruff check
-        entry: ruff check src tests
+        entry: ruff check src tests scripts
         language: system
         pass_filenames: false
         types_or: [python, pyi]
 
       - id: ruff-format
         name: ruff format check
-        entry: ruff format --check src tests
+        entry: ruff format --check src tests scripts
+        language: system
+        pass_filenames: false
+        types_or: [python, pyi]
+
+      - id: pyright
+        name: pyright
+        entry: pyright src tests scripts
         language: system
         pass_filenames: false
         types_or: [python, pyi]

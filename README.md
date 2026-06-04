@@ -274,15 +274,18 @@ python -m maturin develop
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,docs]"
 pre-commit install
-python -m maturin develop
-pytest -q
-cargo test --manifest-path rust/Cargo.toml --workspace
+make build-dev
+make test
 ```
 
-Run the full hygiene checks:
+Run the full local verification suite before publishing or opening a PR:
 
 ```bash
-pre-commit run --all-files
+make verify
 ```
+
+`make verify` builds the extension, runs Rust formatting, Clippy, Rust tests,
+Python tests, MkDocs strict mode, and Rust documentation with warnings as
+errors.

@@ -184,10 +184,8 @@ def benchmark_genoio_scenario(scenario: str, prefix: Path, max_variants: int, re
 
 
 def print_pgenlib_skip(scenario: str) -> None:
-    print(
-        f"skipped pgenlib comparison for {scenario}: "
-        "pgenlib does not provide the same metadata/filter contract"
-    )
+    message = f"skipped pgenlib comparison for {scenario}: pgenlib does not provide the same metadata/filter contract"
+    print(message)
 
 
 def main() -> None:

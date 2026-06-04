@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-
 from test_dense_read import write_fixed_width_plink2
 
 
@@ -52,7 +51,7 @@ def test_filter_expressions_are_frozen_composable_and_json_serializable():
     json.dumps(expr.to_ir())
 
     with pytest.raises(AttributeError):
-        expr.left = genoio.chrom("2")
+        expr.left = genoio.chrom("2")  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @pytest.mark.parametrize(

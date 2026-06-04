@@ -52,7 +52,9 @@ def variants_frame(records: list[dict[str, Any]]) -> pl.DataFrame:
 
     **Returns:**
 
-    Polars DataFrame in source variant order.
+    Polars DataFrame in source variant order. The public schema is deliberately
+    limited to the columns needed to interpret matrix columns and dosage
+    orientation.
     """
     # Rust returns in-memory metadata records across the PyO3 boundary. Eager
     # DataFrame assembly is the adapter boundary here because there is no file
@@ -147,23 +149,33 @@ def sparse_matrix_from_rust(
 
 def read_result_tuple(
     genotype_matrix: Any,
-    samples: pl.DataFrame,
-    variants: pl.DataFrame,
+    samples: pl.DataFrame | None,
+    variants: pl.DataFrame | None,
     *,
     return_samples: bool,
     return_variants: bool,
 ) -> Any:
     r"""Attach optional metadata frames to a matrix result.
 
+    `samples` and `variants` are optional at this assembly boundary because
+    Rust metadata records are only converted when the corresponding return flag
+    is set.
+
     **Returns:**
 
     Matrix alone or tuple with requested metadata frames.
     """
     if return_samples and return_variants:
+        # These asserts document the flag/data invariant for static checkers;
+        # callers build metadata conditionally from the same flags.
+        assert samples is not None
+        assert variants is not None
         return genotype_matrix, samples, variants
     if return_samples:
+        assert samples is not None
         return genotype_matrix, samples
     if return_variants:
+        assert variants is not None
         return genotype_matrix, variants
     return genotype_matrix
 

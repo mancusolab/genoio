@@ -331,6 +331,7 @@ class Dataset:
             except ValueError as error:
                 raise InvalidSourceError(str(error)) from error
             object.__setattr__(self, "_metadata_cache", metadata)
+        assert self._metadata_cache is not None
         return self._metadata_cache
 
     def _validate_source_supports_kind(self, kind: str) -> None:
