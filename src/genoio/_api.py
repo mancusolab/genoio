@@ -165,11 +165,10 @@ class Dataset:
     def variants(self, *, stats: Any = None, **options: Any) -> Any:
         r"""Return variant metadata as a Polars DataFrame.
 
-        Columns are `chrom`, `pos`, `id`, `a0`, `a1`, `ref`, `alt`,
-        `source_a0`, `source_a1`, `flipped`, `qual`, `af`, `maf`, `mac`,
-        `missing_rate`, and `n_called`. Rows are ordered as they appear in the
-        source; variant frames returned by matrix reads are ordered to match
-        matrix columns after filtering.
+        Columns are `chrom`, `pos`, `id`, `a0`, and `a1`. Rows are ordered as
+        they appear in the source; variant frames returned by matrix reads are
+        ordered to match matrix columns after filtering. The `a1` allele is the
+        allele counted by returned genotype dosage values.
 
         The `stats` argument is reserved for future metadata-stat controls.
         Passing it currently raises `genoio.InvalidOptionError`.

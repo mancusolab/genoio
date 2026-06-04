@@ -34,14 +34,6 @@ def write_missing_vcf(tmp_path: Path) -> Path:
     return path
 
 
-def sparse_to_source_dense(matrix, variants):
-    dense = matrix.toarray().astype(np.float32)
-    for column, flipped in enumerate(variants["flipped"].to_list()):
-        if flipped:
-            dense[:, column] = 2.0 - dense[:, column]
-    return dense
-
-
 def test_sparse_true_returns_csc_and_preserves_tuple_metadata(tmp_path):
     import genoio
 
@@ -66,16 +58,18 @@ def test_sparse_csr_returns_csr_matrix(tmp_path):
     assert G.shape == (3, 2)
 
 
-def test_sparse_reconstructs_dense_after_accounting_for_default_flips(tmp_path):
+def test_sparse_metadata_reports_counted_alleles_for_sparse_orientation(tmp_path):
     import genoio
 
     dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
-    dense = dataset.read()
     sparse_matrix, variants = dataset.read(sparse="csc", missing="raise", return_variants=True)
 
-    assert variants["flipped"].to_list() == [False, True]
-    np.testing.assert_array_equal(sparse_to_source_dense(sparse_matrix, variants), dense)
+    assert variants.select("id", "a0", "a1").rows() == [("rs1", "A", "G"), ("rs2", "T", "C")]
+    np.testing.assert_array_equal(
+        sparse_matrix.toarray(),
+        np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 1.0]], dtype=np.float32),
+    )
 
 
 def test_sparse_missing_data_raises_structured_error(tmp_path):

@@ -168,14 +168,10 @@ samples = ds.samples()
 variants = ds.variants()
 ```
 
-`samples` and `variants` are Polars DataFrames. Variant metadata includes source
-alleles, normalized `a0`/`a1` alleles, optional `qual`, and genotype-derived
-statistics when a read computes them for filtering.
+`samples` and `variants` are Polars DataFrames. Variant metadata identifies
+matrix columns and dosage orientation.
 
-Sample metadata columns are `fid`, `iid`, `father`, `mother`, `sex`, and
-`phenotype`. Variant metadata columns are `chrom`, `pos`, `id`, `a0`, `a1`,
-`ref`, `alt`, `source_a0`, `source_a1`, `flipped`, `qual`, `af`, `maf`, `mac`,
-`missing_rate`, and `n_called`.
+See [Reading](docs/api/reading.md#metadata-frames) for the metadata schemas.
 
 Return metadata alongside a whole-matrix read:
 

@@ -274,4 +274,3 @@ def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):
     np.testing.assert_array_equal(G.toarray(), np.array([[0.0], [0.0], [1.0]], dtype=np.float32))
     assert variants["a0"].to_list() == ["G"]
     assert variants["a1"].to_list() == ["A"]
-    assert variants["flipped"].to_list() == [True]

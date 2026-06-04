@@ -117,10 +117,7 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
     )
 
     assert variants["id"].to_list() == expected_ids == ["rs1"]
-    assert variants["maf"].to_list() == [0.5]
-    assert variants["mac"].to_list() == [3]
-    assert variants["missing_rate"].to_list() == [0.0]
-    assert variants["n_called"].to_list() == [3]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
     np.testing.assert_array_equal(G, np.array([[0.0], [1.0], [2.0]], dtype=np.float32))
 
 
@@ -132,7 +129,7 @@ def test_qual_filter_matches_fixture_reference_results(tmp_path):
     G, variants = dataset.read(variants=genoio.qual(min=20) & genoio.biallelic(), return_variants=True)
 
     assert variants["id"].to_list() == ["rs1", "indel1"]
-    assert variants["qual"].to_list() == [30.0, 40.0]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
     np.testing.assert_array_equal(
         G,
         np.array(
@@ -175,12 +172,11 @@ def test_mac_filter_matches_called_genotype_reference_results(tmp_path):
     G, variants = dataset.read(variants=genoio.mac(min=1, max=1), return_variants=True)
 
     assert variants["id"].to_list() == ["indel1"]
-    assert variants["mac"].to_list() == [1]
-    assert variants["n_called"].to_list() == [3]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
     np.testing.assert_array_equal(G, np.array([[1.0], [0.0], [0.0]], dtype=np.float32))
 
 
-def test_plink2_genotype_filters_attach_public_stats(tmp_path):
+def test_plink2_genotype_filters_return_core_variant_metadata(tmp_path):
     import genoio
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
@@ -191,10 +187,7 @@ def test_plink2_genotype_filters_attach_public_stats(tmp_path):
     )
 
     assert variants["id"].to_list() == ["rs1", "rs2", "rs3"]
-    assert variants["maf"].to_list() == [0.5, pytest.approx(1.0 / 3.0), 0.5]
-    assert variants["mac"].to_list() == [2, 2, 3]
-    assert variants["missing_rate"].to_list() == [pytest.approx(1.0 / 3.0), 0.0, 0.0]
-    assert variants["n_called"].to_list() == [2, 3, 3]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
     np.testing.assert_array_equal(
         G,
         np.array([[0.0, 1.0, 2.0], [np.nan, 0.0, 1.0], [2.0, 1.0, 0.0]], dtype=np.float32),
@@ -209,7 +202,7 @@ def test_polymorphic_filter_matches_called_genotype_reference_results(tmp_path):
     G, variants = dataset.read(variants=genoio.polymorphic(), return_variants=True)
 
     assert variants["id"].to_list() == ["rs1", "indel1"]
-    assert variants["mac"].to_list() == [3, 1]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
     np.testing.assert_array_equal(
         G,
         np.array(

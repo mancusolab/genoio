@@ -9,13 +9,13 @@ sample ordering is unchanged.
 
 ## Metadata frames
 
-`Dataset.samples()` returns a Polars DataFrame in source sample order. The same
-schema is returned when `read(..., return_samples=True)` or
-`blocks(..., return_samples=True)` is used.
+`Dataset.samples()` returns a Polars DataFrame in source sample order. Genotype
+reads and blocks return the same sample columns when
+`return_samples=True`.
 
-Haplotype reads return one row per haplotype. Those returned sample frames also
-include `source_sample_index` and `haplotype_index` columns so each haplotype row
-can be mapped back to its original diploid sample.
+Haplotype reads return one row per haplotype. Their returned sample frames add
+`source_sample_index` and `haplotype_index` so each haplotype row can be mapped
+back to its original diploid sample.
 
 ??? info "Sample metadata schema"
     | Column | Meaning |
@@ -31,7 +31,7 @@ can be mapped back to its original diploid sample.
 
 `Dataset.variants()` returns a Polars DataFrame in source variant order.
 `read(..., return_variants=True)` and `blocks(..., return_variants=True)` return
-the same columns for the retained variants, in matrix-column order.
+the same five columns for the retained variants, in matrix-column order.
 
 ??? info "Variant metadata schema"
     | Column | Meaning |
@@ -41,17 +41,6 @@ the same columns for the retained variants, in matrix-column order.
     | `id` | Variant ID from the source. |
     | `a0` | Allele counted as dosage `0` in returned matrices. |
     | `a1` | Allele counted as dosage `1` or `2` in returned matrices. |
-    | `ref` | Reference allele when the source records one; otherwise null. |
-    | `alt` | Alternate allele string when the source records one; otherwise null. |
-    | `source_a0` | Original source allele corresponding to `a0`. |
-    | `source_a1` | Original source allele corresponding to `a1`. |
-    | `flipped` | Whether `genoio` flipped source allele orientation for normalized output. |
-    | `qual` | VCF `QUAL` value when available; otherwise null. |
-    | `af` | Alternate-allele frequency when genotype statistics were computed; otherwise null. |
-    | `maf` | Minor-allele frequency when genotype statistics were computed; otherwise null. |
-    | `mac` | Minor-allele count when genotype statistics were computed; otherwise null. |
-    | `missing_rate` | Missing-call fraction when genotype statistics were computed; otherwise null. |
-    | `n_called` | Number of called genotypes when genotype statistics were computed; otherwise null. |
 
 ::: genoio.Dataset
 

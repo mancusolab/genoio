@@ -20,32 +20,12 @@ def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
     assert samples["fid"].to_list() == [None, None, None]
 
     assert isinstance(variants, pl.DataFrame)
-    assert variants.columns == [
-        "chrom",
-        "pos",
-        "id",
-        "a0",
-        "a1",
-        "ref",
-        "alt",
-        "source_a0",
-        "source_a1",
-        "flipped",
-        "qual",
-        "af",
-        "maf",
-        "mac",
-        "missing_rate",
-        "n_called",
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
+    assert variants.rows() == [
+        ("1", 10, "rs1", "A", "G"),
+        ("1", 20, "rs2", "C", "T"),
+        ("2", 30, "indel1", "AT", "A"),
     ]
-    assert variants.select("chrom", "pos", "id", "a0", "a1", "ref", "alt").rows() == [
-        ("1", 10, "rs1", "A", "G", "A", "G"),
-        ("1", 20, "rs2", "C", "T", "C", "T,A"),
-        ("2", 30, "indel1", "AT", "A", "AT", "A"),
-    ]
-    assert variants["flipped"].to_list() == [False, False, False]
-    assert variants["qual"].to_list() == [None, None, None]
-    assert variants["af"].to_list() == [None, None, None]
 
 
 def test_plink1_samples_and_variants_normalize_metadata_without_decoding_bed():
@@ -61,10 +41,10 @@ def test_plink1_samples_and_variants_normalize_metadata_without_decoding_bed():
         ("F1", "S2", "S1", None, "2", "1.5"),
         ("F2", "S3", None, None, "0", "2.0"),
     ]
-    assert variants.select("chrom", "pos", "id", "a0", "a1", "ref", "alt").rows() == [
-        ("1", 10, "rs1", "A", "G", None, None),
-        ("1", 20, "rs2", "C", "T", None, None),
-        ("2", 30, "indel1", "AT", "A", None, None),
+    assert variants.rows() == [
+        ("1", 10, "rs1", "A", "G"),
+        ("1", 20, "rs2", "C", "T"),
+        ("2", 30, "indel1", "AT", "A"),
     ]
 
 

@@ -142,7 +142,6 @@ def test_dense_genotype_reads_do_not_minor_allele_flip_by_default(tmp_path):
     np.testing.assert_array_equal(G, np.array([[2.0], [2.0], [1.0]], dtype=np.float32))
     assert variants["a0"].to_list() == ["A"]
     assert variants["a1"].to_list() == ["G"]
-    assert variants["flipped"].to_list() == [False]
 
 
 def test_return_samples_and_variants_tuple_order_is_matrix_samples_variants(tmp_path):
@@ -208,7 +207,7 @@ def test_dense_plink2_read_matches_fixed_width_hardcall_fixture(tmp_path):
     )
     assert samples["iid"].to_list() == ["S1", "S2", "S3"]
     assert variants["id"].to_list() == ["rs1", "rs2", "rs3"]
-    assert variants["qual"].to_list() == [30.0, 40.0, 50.0]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
 
 
 def test_dense_plink2_sample_filter_keeps_source_order_and_values(tmp_path):
