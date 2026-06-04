@@ -6,12 +6,14 @@
 //! then return validated core structs. Python bindings call these functions
 //! through `genoio-py`.
 
+mod bgen;
 mod error;
 mod hardcall;
 mod plink1;
 mod plink2;
 mod vcf;
 
+pub use bgen::read_bgen_metadata;
 pub use error::Result;
 pub use plink1::{
     read_plink1_dense, read_plink1_dense_windowed, read_plink1_metadata, read_plink1_sparse,

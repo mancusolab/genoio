@@ -1,0 +1,355 @@
+// pattern: Mixed (unavoidable)
+// Reason: Format-local binary parsing is kept beside the filesystem entrypoint to match the
+// existing reader module pattern in this crate.
+
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+use genoio_core::{MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, VariantRecord};
+
+use crate::Result;
+
+const BGEN_MAGIC: &[u8; 4] = b"bgen";
+const ZERO_MAGIC: &[u8; 4] = &[0, 0, 0, 0];
+const MIN_HEADER_LENGTH: u32 = 20;
+const SAMPLE_IDENTIFIER_FLAG: u32 = 1 << 31;
+
+pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
+    let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
+        path: bgen.to_path_buf(),
+        source,
+    })?;
+    let header = BgenHeader::read_from(&mut reader, bgen)?;
+    header.validate(bgen)?;
+
+    let samples = if header.flags.has_sample_identifiers {
+        read_sample_identifier_block(&mut reader, bgen, header.sample_count)?
+    } else if sample.is_some() {
+        return Err(MetadataError::parse(
+            bgen,
+            "bgen companion sample parsing is not implemented",
+        ));
+    } else {
+        return Err(MetadataError::parse(
+            bgen,
+            "bgen sample identifiers require embedded identifiers or a companion sample path",
+        ));
+    };
+
+    reader
+        .seek(SeekFrom::Start(u64::from(header.offset) + 4))
+        .map_err(|source| MetadataError::Io {
+            path: bgen.to_path_buf(),
+            source,
+        })?;
+    let variants = read_layout2_variant_metadata(&mut reader, bgen, header.variant_count)?;
+
+    Ok(MetadataOutput {
+        samples,
+        variants,
+        capabilities: SourceCapabilities::genotype_only(),
+    })
+}
+
+struct BgenHeader {
+    offset: u32,
+    header_length: u32,
+    variant_count: u32,
+    sample_count: u32,
+    flags: BgenFlags,
+}
+
+impl BgenHeader {
+    fn read_from(reader: &mut impl Read, path: &Path) -> Result<Self> {
+        let offset = read_u32_le(reader, path)?;
+        let header_length = read_u32_le(reader, path)?;
+        let variant_count = read_u32_le(reader, path)?;
+        let sample_count = read_u32_le(reader, path)?;
+
+        let mut magic = [0_u8; 4];
+        reader
+            .read_exact(&mut magic)
+            .map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if &magic != BGEN_MAGIC && &magic != ZERO_MAGIC {
+            return Err(MetadataError::parse(path, "invalid bgen magic bytes"));
+        }
+
+        let flags = BgenFlags::from_raw(read_u32_le(reader, path)?);
+        Ok(Self {
+            offset,
+            header_length,
+            variant_count,
+            sample_count,
+            flags,
+        })
+    }
+
+    fn validate(&self, path: &Path) -> Result<()> {
+        if self.header_length < MIN_HEADER_LENGTH {
+            return Err(MetadataError::parse(
+                path,
+                "bgen header length is smaller than 20 bytes",
+            ));
+        }
+        if self.header_length > self.offset {
+            return Err(MetadataError::parse(
+                path,
+                "bgen header length exceeds variant data offset",
+            ));
+        }
+        if self.flags.layout != BgenLayout::Layout2 {
+            return Err(MetadataError::parse(
+                path,
+                "bgen metadata parsing requires layout 2",
+            ));
+        }
+        if self.flags.compression == BgenCompression::Reserved {
+            return Err(MetadataError::parse(
+                path,
+                "bgen compression value is reserved",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct BgenFlags {
+    compression: BgenCompression,
+    layout: BgenLayout,
+    has_sample_identifiers: bool,
+}
+
+impl BgenFlags {
+    fn from_raw(raw: u32) -> Self {
+        Self {
+            compression: BgenCompression::from_raw(raw & 0b11),
+            layout: BgenLayout::from_raw((raw >> 2) & 0b1111),
+            has_sample_identifiers: raw & SAMPLE_IDENTIFIER_FLAG != 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BgenCompression {
+    None,
+    Zlib,
+    Zstd,
+    Reserved,
+}
+
+impl BgenCompression {
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 => Self::None,
+            1 => Self::Zlib,
+            2 => Self::Zstd,
+            _ => Self::Reserved,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BgenLayout {
+    Layout1,
+    Layout2,
+    Reserved,
+}
+
+impl BgenLayout {
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            1 => Self::Layout1,
+            2 => Self::Layout2,
+            _ => Self::Reserved,
+        }
+    }
+}
+
+fn read_sample_identifier_block(
+    reader: &mut impl Read,
+    path: &Path,
+    expected_sample_count: u32,
+) -> Result<Vec<SampleRecord>> {
+    let block_length = read_u32_le(reader, path)?;
+    if block_length < 8 {
+        return Err(MetadataError::parse(
+            path,
+            "bgen sample identifiers block is too short",
+        ));
+    }
+
+    let sample_count = read_u32_le(reader, path)?;
+    if sample_count != expected_sample_count {
+        return Err(MetadataError::parse(
+            path,
+            "bgen sample identifiers count does not match header sample count",
+        ));
+    }
+
+    let mut records = Vec::with_capacity(usize::try_from(sample_count).map_err(|_| {
+        MetadataError::parse(path, "bgen sample identifiers count is out of range")
+    })?);
+    let mut seen = HashSet::with_capacity(records.capacity());
+    for _ in 0..sample_count {
+        let sample_id = read_len_prefixed_string_u16(reader, path, "sample identifier")?;
+        if sample_id.is_empty() {
+            return Err(MetadataError::parse(
+                path,
+                "bgen sample identifier is empty",
+            ));
+        }
+        if !seen.insert(sample_id.clone()) {
+            return Err(MetadataError::parse(
+                path,
+                format!("bgen duplicate sample identifier: {sample_id}"),
+            ));
+        }
+        records.push(SampleRecord {
+            fid: None,
+            iid: sample_id,
+            father: None,
+            mother: None,
+            sex: None,
+            phenotype: None,
+            source_sample_index: None,
+            haplotype_index: None,
+        });
+    }
+
+    Ok(records)
+}
+
+fn read_layout2_variant_metadata(
+    reader: &mut (impl Read + Seek),
+    path: &Path,
+    variant_count: u32,
+) -> Result<Vec<VariantRecord>> {
+    let mut variants = Vec::with_capacity(
+        usize::try_from(variant_count)
+            .map_err(|_| MetadataError::parse(path, "bgen variant count is out of range"))?,
+    );
+
+    for _ in 0..variant_count {
+        variants.push(read_layout2_variant_identifying_data(reader, path)?);
+        let probability_block_length = read_u32_le(reader, path)?;
+        reader
+            .seek(SeekFrom::Current(i64::from(probability_block_length)))
+            .map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+
+    Ok(variants)
+}
+
+fn read_layout2_variant_identifying_data(
+    reader: &mut impl Read,
+    path: &Path,
+) -> Result<VariantRecord> {
+    let id = read_len_prefixed_string_u16(reader, path, "variant id")?;
+    let rsid = read_len_prefixed_string_u16(reader, path, "variant rsid")?;
+    let chrom = read_len_prefixed_string_u16(reader, path, "variant chromosome")?;
+    let pos = read_u32_le(reader, path)?;
+    let allele_count = read_u16_le(reader, path)?;
+    if allele_count < 2 {
+        return Err(MetadataError::parse(
+            path,
+            "bgen variant must contain at least two alleles",
+        ));
+    }
+
+    let mut alleles = Vec::with_capacity(usize::from(allele_count));
+    for _ in 0..allele_count {
+        alleles.push(read_len_prefixed_string_u32(
+            reader,
+            path,
+            "variant allele",
+        )?);
+    }
+    let a0 = alleles[0].clone();
+    let a1 = alleles[1].clone();
+    let id = if rsid.is_empty() { id } else { rsid };
+
+    Ok(VariantRecord {
+        chrom,
+        pos,
+        id,
+        a0: a0.clone(),
+        a1: a1.clone(),
+        ref_allele: None,
+        alt_allele: None,
+        source_a0: a0,
+        source_a1: a1,
+        flipped: false,
+        qual: None,
+        af: None,
+        maf: None,
+        mac: None,
+        missing_rate: None,
+        n_called: None,
+    })
+}
+
+fn read_len_prefixed_string_u16(
+    reader: &mut impl Read,
+    path: &Path,
+    label: &str,
+) -> Result<String> {
+    let len = usize::from(read_u16_le(reader, path)?);
+    read_utf8_string(reader, path, label, len)
+}
+
+fn read_len_prefixed_string_u32(
+    reader: &mut impl Read,
+    path: &Path,
+    label: &str,
+) -> Result<String> {
+    let len = usize::try_from(read_u32_le(reader, path)?)
+        .map_err(|_| MetadataError::parse(path, format!("bgen {label} length is out of range")))?;
+    read_utf8_string(reader, path, label, len)
+}
+
+fn read_utf8_string(
+    reader: &mut impl Read,
+    path: &Path,
+    label: &str,
+    len: usize,
+) -> Result<String> {
+    let mut bytes = vec![0_u8; len];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    String::from_utf8(bytes)
+        .map_err(|error| MetadataError::parse(path, format!("bgen {label} is not UTF-8: {error}")))
+}
+
+fn read_u16_le(reader: &mut impl Read, path: &Path) -> Result<u16> {
+    let mut bytes = [0_u8; 2];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn read_u32_le(reader: &mut impl Read, path: &Path) -> Result<u32> {
+    let mut bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(u32::from_le_bytes(bytes))
+}
