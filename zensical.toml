@@ -1,0 +1,97 @@
+[project]
+site_name = "genoio"
+site_description = "Genotype matrix IO for Python."
+site_url = "https://mancusolab.github.io/genoio"
+
+repo_url = "https://github.com/mancusolab/genoio"
+repo_name = "mancusolab/genoio"
+edit_uri = ""
+
+strict = true
+extra_css = ["_static/custom_css.css"]
+
+nav = [
+    { "Home" = "index.md" },
+    { "Getting started" = "guide.md" },
+    { "Filtering" = "filtering.md" },
+    { "Performance" = "performance.md" },
+    { "Format support" = "formats.md" },
+    { "Release" = "release.md" },
+    { "API" = [
+        { "Overview" = "api/index.md" },
+        { "Reading" = "api/reading.md" },
+        { "Filters" = "api/filters.md" },
+        { "Errors" = "api/errors.md" },
+    ] },
+]
+
+[project.theme]
+variant = "classic"
+features = [
+    "navigation.sections",
+    "toc.integrate",
+    "header.autohide",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "white"
+accent = "blue"
+toggle.icon = "material/weather-night"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "black"
+accent = "blue"
+toggle.icon = "material/weather-sunny"
+toggle.name = "Switch to light mode"
+
+[project.theme.icon]
+repo = "fontawesome/brands/github"
+logo = "material/matrix"
+
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
+
+[project.markdown_extensions.pymdownx.superfences]
+
+[project.markdown_extensions.pymdownx.details]
+
+[project.markdown_extensions.pymdownx.snippets]
+base_path = "docs"
+
+[project.markdown_extensions.admonition]
+
+[project.markdown_extensions.toc]
+permalink = "¤"
+toc_depth = 4
+
+[project.plugins.search]
+
+[project.plugins.autorefs]
+
+[project.plugins.mkdocstrings]
+custom_templates = "docs/_templates"
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+load_external_modules = true
+
+[project.plugins.mkdocstrings.handlers.python.options]
+force_inspection = true
+show_source = false
+heading_level = 3
+show_root_heading = true
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+filters = ["!^_"]
+inherited_members = true
+members_order = "source"
+docstring_style = "google"
+show_if_no_docstring = true
+line_length = 88
+modernize_annotations = true
+show_overloads = false
+show_signature_annotations = true
+separate_signature = false

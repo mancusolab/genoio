@@ -45,12 +45,8 @@ dev = [
     "ruff>=0.5",
 ]
 docs = [
-    "hippogriffe>=0.2",
-    "mkdocs>=1.6",
-    "mkdocs-autorefs>=1.4",
-    "mkdocs-include-exclude-files>=0.0.1",
-    "mkdocs-material>=9.5",
-    "mkdocstrings[python]>=0.25",
+    "mkdocstrings-python>=1.12",
+    "zensical>=0.0.37",
 ]
 
 [tool.maturin]

@@ -47,8 +47,11 @@ After GitHub Pages is configured for the repository, deploy the docs from the
 release commit:
 
 ```bash
-mkdocs gh-deploy --strict
+zensical build --strict
 ```
+
+Publish the generated `site/` directory with the repository's GitHub Pages
+workflow or another static-site deployment step.
 
 The configured documentation URL is
 `https://mancusolab.github.io/genoio`.

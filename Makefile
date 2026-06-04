@@ -14,7 +14,7 @@ endif
 
 PYTHON ?= $(VENV_BIN)/python
 CARGO ?= cargo
-MKDOCS ?= $(VENV_BIN)/mkdocs
+ZENSICAL ?= $(VENV_BIN)/zensical
 PYRIGHT ?= $(VENV_BIN)/pyright
 PYTEST ?= $(VENV_BIN)/pytest
 MATURIN ?= $(PYTHON) -m maturin
@@ -50,7 +50,7 @@ pyright: requirements  ## Run Python type checks
 	$(PYRIGHT) src tests scripts
 
 docs: requirements  ## Build documentation with strict checks
-	$(MKDOCS) build --strict
+	$(ZENSICAL) build --strict
 	rm -rf site
 
 rust-fmt:  ## Check Rust formatting

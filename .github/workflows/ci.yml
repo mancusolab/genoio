@@ -30,4 +30,4 @@ jobs:
           components: clippy, rustfmt
 
       - name: Verify
-        run: make verify PYTHON=python MKDOCS=mkdocs PYRIGHT=pyright PYTEST=pytest
+        run: make verify PYTHON=python ZENSICAL=zensical PYRIGHT=pyright PYTEST=pytest
