@@ -30,7 +30,7 @@ venv:  ## Create the local Python virtual environment
 
 requirements: venv  ## Install development and documentation dependencies
 	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -e ".[dev,docs]"
+	$(RUST_ENV) $(PYTHON) -m pip install -e ".[dev,docs]"
 
 build: build-dev  ## Compile and install the extension for development
 

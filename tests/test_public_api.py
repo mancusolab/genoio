@@ -1,4 +1,5 @@
 import sys
+from importlib.metadata import metadata, version
 from inspect import signature
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def test_import_exposes_public_names_without_reference_packages():
     import genoio
 
     expected_names = {
+        "__version__",
         "vcf",
         "bfile",
         "pfile",
@@ -52,6 +54,21 @@ def test_import_exposes_public_names_without_reference_packages():
     assert expected_names <= set(dir(genoio))
     assert "jaxqtl" not in sys.modules
     assert "linear_dag" not in sys.modules
+
+
+def test_python_version_export_matches_installed_metadata():
+    import genoio
+
+    assert genoio.__version__ == version("genoio")
+
+
+def test_package_metadata_includes_release_urls_and_license():
+    package_metadata = metadata("genoio")
+    project_urls = package_metadata.get_all("Project-URL") or []
+
+    assert package_metadata["License-File"] == "LICENSE"
+    assert "Documentation, https://mancusolab.github.io/genoio" in project_urls
+    assert "Repository, https://github.com/mancusolab/genoio" in project_urls
 
 
 def test_open_returns_lightweight_dataset_for_vcf(tmp_path):

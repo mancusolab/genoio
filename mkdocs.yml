@@ -89,6 +89,7 @@ nav:
     - Filtering: filtering.md
     - Performance: performance.md
     - Format support: formats.md
+    - Release: release.md
     - API:
           - Overview: api/index.md
           - Reading: api/reading.md

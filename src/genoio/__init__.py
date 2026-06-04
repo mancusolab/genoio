@@ -2,6 +2,8 @@
 
 """Read VCF, PLINK1, and PLINK2 genotype matrices from Python."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from ._api import Dataset, bfile, pfile, vcf
 from ._errors import (
     GenoioError,
@@ -16,7 +18,13 @@ from ._errors import (
 )
 from ._filters import FilterExpr, biallelic, chrom, id_in, mac, maf, missing_rate, polymorphic, qual, region, snp
 
+try:
+    __version__ = version("genoio")
+except PackageNotFoundError:
+    __version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "Dataset",
     "vcf",
     "bfile",

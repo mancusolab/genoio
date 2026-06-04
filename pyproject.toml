@@ -8,11 +8,33 @@ version = "0.1.0"
 description = "Genotype IO tools for Python"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Mancuso Lab" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
     "numpy>=1.24",
     "polars>=1.0",
     "scipy>=1.10",
 ]
+
+[project.urls]
+Documentation = "https://mancusolab.github.io/genoio"
+Homepage = "https://github.com/mancusolab/genoio"
+Repository = "https://github.com/mancusolab/genoio"
+Issues = "https://github.com/mancusolab/genoio/issues"
 
 [project.optional-dependencies]
 dev = [
