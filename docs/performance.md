@@ -11,7 +11,7 @@ comparisons read the first 1,000 variants into a dense `float32` matrix.
 |---|---:|---:|---|
 | VCF vs `cyvcf2` | 0.1064 s | 0.2383 s | genoio 2.24x faster |
 | PLINK1 vs `pandas_plink` | 0.3968 s | 2.4382 s | genoio 6.15x faster |
-| PLINK2 matrix-only vs `pgenlib` | 0.0083 s | 0.0067 s | `pgenlib` 1.24x faster |
+| PLINK2 matrix-only vs `pgenlib` | 0.0094 s | 0.0069 s | `pgenlib` 1.36x faster |
 
 These numbers are workload- and machine-dependent. Treat them as local
 benchmarks, not universal claims.
@@ -35,10 +35,10 @@ scenarios measure the cost of returning metadata and applying filters:
 
 | Scenario | What it measures | Median |
 |---|---|---:|
-| matrix-only | Read only the genotype matrix. | 0.0083 s |
-| with variants | Return the matrix plus variant metadata. | 1.6233 s |
-| sample-filtered | Read half the samples, preserving source sample order. | 1.6080 s |
-| genotype-filtered | Apply genotype-stat filters before returning retained variants. | 7.7119 s |
+| matrix-only | Read only the genotype matrix. | 0.0094 s |
+| with variants | Return the matrix plus variant metadata. | 1.6101 s |
+| sample-filtered | Read half the samples, preserving source sample order. | 1.5683 s |
+| genotype-filtered | Apply genotype-stat filters before returning retained variants. | 0.5727 s |
 
 The matrix-only comparison produced exact agreement with `pgenlib` for shape
 `(3202, 1000)`, genotype sum `72577`, and zero missing values. At 10,000
@@ -46,8 +46,9 @@ variants, the matrix-only medians were 0.0879 s for `genoio` and 0.0500 s for
 `pgenlib`.
 
 The genotype-filtered scenario returned shape `(3202, 1000)`, genotype sum
-`447988`, and zero missing values. It is slower because it computes statistics
-for candidate variants before expanding retained variants.
+`447988`, and zero missing values. It computes statistics for candidate
+variants, but bounded block reads stop once the requested number of retained
+variants has been returned.
 
 ---
 

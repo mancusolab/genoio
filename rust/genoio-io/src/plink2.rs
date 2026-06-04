@@ -345,19 +345,25 @@ pub fn read_plink2_dense_windowed(
 
     let header = read_supported_pgen_header(pgen)?;
     let all_samples = parse_psam(psam)?;
-    let source_variants = parse_pvar(pvar)?;
-    validate_plink2_dimensions(pgen, &header, all_samples.len(), source_variants.len())?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
+    let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
-    let mut variants = Vec::new();
-    let mut variant_major_values = Vec::with_capacity(selection.samples.len() * header.variant_ct);
-    let mut variant_major_missing = Vec::with_capacity(selection.samples.len() * header.variant_ct);
+    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
+        window.len.min(header.variant_ct)
+    });
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut retained_index = 0_usize;
+    let mut stopped_after_window = false;
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
-    for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
+    while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         diagnostics.candidate_variants += 1;
         let mut decoded_packed = false;
         if requires_sequential_decode {
@@ -383,6 +389,10 @@ pub fn read_plink2_dense_windowed(
                     variant_window.is_none_or(|window| window.contains(retained_index));
                 retained_index += 1;
                 if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        stopped_after_window = true;
+                        break;
+                    }
                     continue;
                 }
             }
@@ -424,6 +434,10 @@ pub fn read_plink2_dense_windowed(
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
             if !include_in_window {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    stopped_after_window = true;
+                    break;
+                }
                 continue;
             }
         }
@@ -435,6 +449,13 @@ pub fn read_plink2_dense_windowed(
         variants.push(variant);
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            stopped_after_window = true;
+            break;
+        }
+    }
+    if !stopped_after_window {
+        pvar_reader.validate_count(header.variant_ct)?;
     }
 
     let n_samples = selection.samples.len();
@@ -484,21 +505,26 @@ pub fn read_plink2_sparse_windowed(
 
     let header = read_supported_pgen_header(pgen)?;
     let all_samples = parse_psam(psam)?;
-    let source_variants = parse_pvar(pvar)?;
-    validate_plink2_dimensions(pgen, &header, all_samples.len(), source_variants.len())?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
+    let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let n_samples = selection.samples.len();
-    let mut indptr = vec![0];
+    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
+        window.len.min(header.variant_ct)
+    });
+    let mut indptr = Vec::with_capacity(output_variant_capacity + 1);
+    indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = Vec::new();
+    let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut retained_index = 0_usize;
+    let mut stopped_after_window = false;
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
-    for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
+    while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         diagnostics.candidate_variants += 1;
         let mut decoded_packed = false;
         if requires_sequential_decode {
@@ -524,6 +550,10 @@ pub fn read_plink2_sparse_windowed(
                     variant_window.is_none_or(|window| window.contains(retained_index));
                 retained_index += 1;
                 if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        stopped_after_window = true;
+                        break;
+                    }
                     continue;
                 }
             }
@@ -565,6 +595,10 @@ pub fn read_plink2_sparse_windowed(
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
             if !include_in_window {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    stopped_after_window = true;
+                    break;
+                }
                 continue;
             }
         }
@@ -577,6 +611,13 @@ pub fn read_plink2_sparse_windowed(
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            stopped_after_window = true;
+            break;
+        }
+    }
+    if !stopped_after_window {
+        pvar_reader.validate_count(header.variant_ct)?;
     }
 
     let n_variants = variants.len();
@@ -2293,6 +2334,76 @@ fn parse_pvar_source_window(
     }
 
     Ok(records)
+}
+
+struct PvarRecordReader {
+    path: std::path::PathBuf,
+    lines: std::iter::Enumerate<std::io::Lines<BufReader<File>>>,
+    columns: Option<PvarColumns>,
+    body_started: bool,
+    source_index: usize,
+}
+
+impl PvarRecordReader {
+    fn new(path: &Path) -> Result<Self> {
+        let file = File::open(path).map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            lines: BufReader::new(file).lines().enumerate(),
+            columns: None,
+            body_started: false,
+            source_index: 0,
+        })
+    }
+
+    fn next_record(&mut self) -> Result<Option<(usize, VariantRecord)>> {
+        for (line_index, line_result) in self.lines.by_ref() {
+            let line = line_result.map_err(|source| MetadataError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("##") {
+                continue;
+            }
+            if trimmed.starts_with("#CHROM") {
+                self.columns = Some(parse_pvar_header(trimmed)?);
+                self.body_started = true;
+                continue;
+            }
+            if !self.body_started {
+                let (inferred, _) = infer_pvar_header(&self.path, Some(trimmed))?;
+                self.columns = Some(inferred);
+                self.body_started = true;
+            }
+
+            let columns = self
+                .columns
+                .as_ref()
+                .expect("pvar columns should be initialized before parsing body rows");
+            let variant = parse_pvar_line(&self.path, line_index + 1, columns, trimmed)?;
+            let source_index = self.source_index;
+            self.source_index += 1;
+            return Ok(Some((source_index, variant)));
+        }
+        Ok(None)
+    }
+
+    fn validate_count(&self, expected_variant_ct: usize) -> Result<()> {
+        if self.source_index != expected_variant_ct {
+            return Err(MetadataError::parse(
+                &self.path,
+                format!(
+                    "pvar variant count {} does not match pgen variant count {expected_variant_ct}",
+                    self.source_index
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

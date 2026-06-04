@@ -88,6 +88,42 @@ F1 S2 0 0 2 -9
     (bed, bim, fam)
 }
 
+fn fixed_width_pgen(records: &[u8], n_samples: u32, n_variants: u32) -> Vec<u8> {
+    let mut bytes = vec![0x6c, 0x1b, 0x02];
+    bytes.extend(n_variants.to_le_bytes());
+    bytes.extend(n_samples.to_le_bytes());
+    bytes.push(0);
+    bytes.extend(records);
+    bytes
+}
+
+fn write_plink2_filter_window_stop_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let pgen = dir.join("tiny.pgen");
+    let pvar = dir.join("tiny.pvar");
+    let psam = dir.join("tiny.psam");
+    fs::write(&pgen, fixed_width_pgen(&[0x11, 0x11, 0x00], 3, 3))
+        .expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 C T
+1 bad malformed A G
+",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+    (pgen, pvar, psam)
+}
+
 #[test]
 fn vcf_dense_window_stops_after_requested_retained_variants() {
     let dir = unique_dir("vcf-dense-window-stop");
@@ -234,4 +270,70 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
         vec!["rs2", "rs4"]
     );
     assert_eq!(block.values, vec![0.0, 2.0, 0.0, 2.0]);
+}
+
+#[test]
+fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
+    let dir = unique_dir("plink2-filtered-window-stop");
+    let (pgen, pvar, psam) = write_plink2_filter_window_stop_fixture(&dir);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        false,
+    )
+    .expect("windowed filtered plink2 should stop before later malformed metadata");
+
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1"]
+    );
+    assert_eq!(block.values, vec![1.0, 0.0, 1.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn plink2_sparse_filtered_window_stops_after_requested_retained_variants() {
+    let dir = unique_dir("plink2-sparse-filtered-window-stop");
+    let (pgen, pvar, psam) = write_plink2_filter_window_stop_fixture(&dir);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink2_sparse_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("windowed sparse filtered plink2 should stop before later malformed metadata");
+
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1"]
+    );
+    assert_eq!(block.diagnostics.candidate_variants, 1);
 }
