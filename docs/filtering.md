@@ -89,6 +89,10 @@ genoio.id_in(["rs123", "rs456"])
 Threshold predicates are inclusive. For example, `maf(max=0.05)` keeps variants
 with minor allele frequency less than or equal to `0.05`.
 
+Filters are allowed to retain zero variants. Whole reads return an empty
+variant axis with shape `(n_samples, 0)`, returned variant metadata keeps the
+standard columns with zero rows, and block reads yield no blocks.
+
 ---
 
 ## Advanced: filter IR

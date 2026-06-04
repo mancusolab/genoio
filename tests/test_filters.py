@@ -1,6 +1,8 @@
 # pattern: Imperative Shell
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +27,27 @@ def write_filter_vcf(tmp_path: Path) -> Path:
 """
     )
     return path
+
+
+def write_indexed_pushdown_vcf(tmp_path: Path) -> Path:
+    source = tmp_path / "indexed_pushdown.vcf"
+    source.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/0\t0/0
+1\t20\trs20\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t30\trs30\tG\tA\t.\tPASS\t.\tGT\t0/0\t./.\t0/0
+1\t40\tbad_outside_region\tT\tC\t.\tPASS\t.\tGT\t0/3\t0/0\t0/0
+"""
+    )
+    compressed = tmp_path / "indexed_pushdown.vcf.gz"
+    with compressed.open("wb") as output:
+        subprocess.run(["bgzip", "-c", str(source)], stdout=output, check=True)
+    subprocess.run(["tabix", "-f", "-p", "vcf", str(compressed)], check=True)
+    return compressed
 
 
 def write_plink1_equivalent_vcf(tmp_path: Path) -> Path:
@@ -251,6 +274,26 @@ def test_plink2_genotype_filters_return_core_variant_metadata(tmp_path):
         G,
         np.array([[0.0, 1.0, 2.0], [np.nan, 0.0, 1.0], [2.0, 1.0, 0.0]], dtype=np.float32),
     )
+
+
+@pytest.mark.skipif(
+    shutil.which("bgzip") is None or shutil.which("tabix") is None,
+    reason="indexed VCF public API test requires bgzip and tabix",
+)
+def test_indexed_vcf_region_pushdown_combines_with_genotype_stat_filter(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_indexed_pushdown_vcf(tmp_path))
+
+    G, variants = dataset.read(
+        variants=genoio.region("1:10-30") & genoio.maf(min=0.2),
+        return_variants=True,
+    )
+
+    assert variants["id"].to_list() == ["rs20"]
+    np.testing.assert_array_equal(G, np.array([[0.0], [1.0], [2.0]], dtype=np.float32))
+    with pytest.raises(genoio.InvalidSourceError, match="multiallelic GT"):
+        dataset.read(variants=genoio.maf(min=0.2))
 
 
 @pytest.mark.parametrize(

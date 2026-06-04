@@ -19,6 +19,185 @@ fn variant(id: &str, chrom: &str, pos: u32, a0: &str, a1: &str) -> genoio_core::
     }
 }
 
+#[derive(Clone)]
+enum LeafPredicate {
+    Chrom1,
+    IdRs1,
+    QualMin20,
+    MafMin40,
+}
+
+#[derive(Clone)]
+enum RefExpr {
+    Leaf(LeafPredicate),
+    And(Box<RefExpr>, Box<RefExpr>),
+    Or(Box<RefExpr>, Box<RefExpr>),
+    Not(Box<RefExpr>),
+}
+
+#[derive(Clone, Copy)]
+struct LeafValues {
+    chrom1: bool,
+    id_rs1: bool,
+    qual_min20: bool,
+    maf_min40: bool,
+}
+
+fn generated_boolean_expressions() -> Vec<RefExpr> {
+    let leaves = vec![
+        RefExpr::Leaf(LeafPredicate::Chrom1),
+        RefExpr::Leaf(LeafPredicate::IdRs1),
+        RefExpr::Leaf(LeafPredicate::QualMin20),
+        RefExpr::Leaf(LeafPredicate::MafMin40),
+    ];
+    let mut expressions = leaves.clone();
+    expressions.extend(
+        leaves
+            .iter()
+            .cloned()
+            .map(|expr| RefExpr::Not(Box::new(expr))),
+    );
+    for left in &leaves {
+        for right in &leaves {
+            expressions.push(RefExpr::And(
+                Box::new(left.clone()),
+                Box::new(right.clone()),
+            ));
+            expressions.push(RefExpr::Or(Box::new(left.clone()), Box::new(right.clone())));
+        }
+    }
+
+    let one_level = expressions.clone();
+    for left in &one_level {
+        for right in &one_level {
+            expressions.push(RefExpr::And(
+                Box::new(left.clone()),
+                Box::new(right.clone()),
+            ));
+            expressions.push(RefExpr::Or(Box::new(left.clone()), Box::new(right.clone())));
+        }
+    }
+    expressions.extend(
+        one_level
+            .into_iter()
+            .map(|expr| RefExpr::Not(Box::new(expr))),
+    );
+    expressions
+}
+
+fn ref_expr_to_json(expr: &RefExpr) -> serde_json::Value {
+    match expr {
+        RefExpr::Leaf(LeafPredicate::Chrom1) => serde_json::json!({
+            "op": "predicate",
+            "name": "chrom",
+            "params": {"value": "1"}
+        }),
+        RefExpr::Leaf(LeafPredicate::IdRs1) => serde_json::json!({
+            "op": "predicate",
+            "name": "id_in",
+            "params": {"values": ["rs1"]}
+        }),
+        RefExpr::Leaf(LeafPredicate::QualMin20) => serde_json::json!({
+            "op": "predicate",
+            "name": "qual",
+            "params": {"min": 20.0}
+        }),
+        RefExpr::Leaf(LeafPredicate::MafMin40) => serde_json::json!({
+            "op": "predicate",
+            "name": "maf",
+            "params": {"min": 0.4}
+        }),
+        RefExpr::And(left, right) => serde_json::json!({
+            "op": "and",
+            "left": ref_expr_to_json(left),
+            "right": ref_expr_to_json(right)
+        }),
+        RefExpr::Or(left, right) => serde_json::json!({
+            "op": "or",
+            "left": ref_expr_to_json(left),
+            "right": ref_expr_to_json(right)
+        }),
+        RefExpr::Not(expr) => serde_json::json!({
+            "op": "not",
+            "expr": ref_expr_to_json(expr)
+        }),
+    }
+}
+
+fn eval_ref_expr(expr: &RefExpr, values: LeafValues) -> bool {
+    match expr {
+        RefExpr::Leaf(LeafPredicate::Chrom1) => values.chrom1,
+        RefExpr::Leaf(LeafPredicate::IdRs1) => values.id_rs1,
+        RefExpr::Leaf(LeafPredicate::QualMin20) => values.qual_min20,
+        RefExpr::Leaf(LeafPredicate::MafMin40) => values.maf_min40,
+        RefExpr::And(left, right) => eval_ref_expr(left, values) && eval_ref_expr(right, values),
+        RefExpr::Or(left, right) => eval_ref_expr(left, values) || eval_ref_expr(right, values),
+        RefExpr::Not(expr) => !eval_ref_expr(expr, values),
+    }
+}
+
+fn eval_ref_metadata_decision(expr: &RefExpr, values: LeafValues) -> Option<bool> {
+    match expr {
+        RefExpr::Leaf(LeafPredicate::Chrom1) => Some(values.chrom1),
+        RefExpr::Leaf(LeafPredicate::IdRs1) => Some(values.id_rs1),
+        RefExpr::Leaf(LeafPredicate::QualMin20) => Some(values.qual_min20),
+        RefExpr::Leaf(LeafPredicate::MafMin40) => None,
+        RefExpr::And(left, right) => match (
+            eval_ref_metadata_decision(left, values),
+            eval_ref_metadata_decision(right, values),
+        ) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        },
+        RefExpr::Or(left, right) => match (
+            eval_ref_metadata_decision(left, values),
+            eval_ref_metadata_decision(right, values),
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        RefExpr::Not(expr) => eval_ref_metadata_decision(expr, values).map(|decision| !decision),
+    }
+}
+
+fn variant_for_values(values: LeafValues) -> genoio_core::VariantRecord {
+    let mut record = variant(
+        if values.id_rs1 { "rs1" } else { "rs2" },
+        if values.chrom1 { "1" } else { "2" },
+        10,
+        "A",
+        "G",
+    );
+    record.qual = Some(if values.qual_min20 { 30.0 } else { 10.0 });
+    record
+}
+
+fn stats_for_values(values: LeafValues) -> genoio_core::VariantStats {
+    genoio_core::VariantStats {
+        af: Some(if values.maf_min40 { 0.5 } else { 0.1 }),
+        maf: Some(if values.maf_min40 { 0.5 } else { 0.1 }),
+        mac: Some(if values.maf_min40 { 4 } else { 1 }),
+        missing_rate: 0.0,
+        n_called: 4,
+        polymorphic: true,
+    }
+}
+
+fn all_leaf_values() -> Vec<LeafValues> {
+    let mut values = Vec::new();
+    for bits in 0_u8..16 {
+        values.push(LeafValues {
+            chrom1: bits & 0b0001 != 0,
+            id_rs1: bits & 0b0010 != 0,
+            qual_min20: bits & 0b0100 != 0,
+            maf_min40: bits & 0b1000 != 0,
+        });
+    }
+    values
+}
+
 #[test]
 fn filter_ir_deserializes_composed_predicates() {
     let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
@@ -43,6 +222,46 @@ fn filter_ir_deserializes_composed_predicates() {
         filter.metadata_decision(&variant("rs3", "2", 30, "A", "G")),
         Some(false)
     );
+}
+
+#[test]
+fn boolean_filter_ir_matches_reference_truth_table_for_nested_expressions() {
+    for expr in generated_boolean_expressions() {
+        let filter = genoio_core::VariantFilter::from_json_value(ref_expr_to_json(&expr))
+            .expect("generated filter should parse");
+
+        for values in all_leaf_values() {
+            let variant = variant_for_values(values);
+            let stats = stats_for_values(values);
+
+            assert_eq!(
+                filter.evaluate(&variant, Some(&stats)),
+                eval_ref_expr(&expr, values)
+            );
+        }
+    }
+}
+
+#[test]
+fn partial_filter_decisions_match_reference_truth_table_when_metadata_is_decisive() {
+    for expr in generated_boolean_expressions() {
+        let filter = genoio_core::VariantFilter::from_json_value(ref_expr_to_json(&expr))
+            .expect("generated filter should parse");
+
+        for values in all_leaf_values() {
+            let variant = variant_for_values(values);
+            let expected = eval_ref_metadata_decision(&expr, values);
+            assert_eq!(filter.metadata_decision(&variant), expected);
+            assert_eq!(
+                filter.partial_decision(&variant),
+                match expected {
+                    Some(true) => genoio_core::PartialFilterDecision::Accept,
+                    Some(false) => genoio_core::PartialFilterDecision::Reject,
+                    None => genoio_core::PartialFilterDecision::NeedGenotypes,
+                }
+            );
+        }
+    }
 }
 
 #[test]

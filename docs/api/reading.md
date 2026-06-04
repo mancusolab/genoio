@@ -7,6 +7,11 @@ frames, or streaming blocks. Dense and sparse genotype matrices use samples as
 rows and variants as columns, so block reads can be concatenated by variant when
 sample ordering is unchanged.
 
+Filters may retain no variants. In that case, dense reads return an array with
+shape `(n_samples, 0)`, sparse reads return a SciPy sparse matrix with the same
+shape, and `return_variants=True` returns an empty variant frame with the normal
+schema. Block reads yield no blocks when no variant passes the filter.
+
 ## Metadata frames
 
 `Dataset.samples()` returns a Polars DataFrame in source sample order. Genotype
