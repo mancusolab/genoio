@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use flate2::read::ZlibDecoder;
 use genoio_core::{MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, VariantRecord};
 
 use crate::Result;
@@ -382,8 +383,22 @@ fn skip_layout2_probability_block(
                     "bgen compressed probability block length is smaller than decompressed length prefix",
                 ));
             }
-            let _decompressed_block_length = read_u32_le(reader, path)?;
-            skip_exact(reader, path, u64::from(block_length - 4))
+            let decompressed_block_length = read_u32_le(reader, path)?;
+            let compressed_payload_length = usize::try_from(block_length - 4).map_err(|_| {
+                MetadataError::parse(path, "bgen compressed probability block is out of range")
+            })?;
+            let compressed_payload = read_exact_vec(reader, path, compressed_payload_length)?;
+            let decompressed_payload = decompress_probability_block(
+                path,
+                compression,
+                &compressed_payload,
+                decompressed_block_length,
+            )?;
+            validate_decompressed_layout2_probability_block(
+                path,
+                &decompressed_payload,
+                expected_sample_count,
+            )
         }
         BgenCompression::Reserved => Err(MetadataError::parse(
             path,
@@ -456,6 +471,83 @@ fn validate_and_skip_uncompressed_layout2_probability_block(
     skip_exact(reader, path, u64::from(remaining))
 }
 
+fn decompress_probability_block(
+    path: &Path,
+    compression: BgenCompression,
+    compressed_payload: &[u8],
+    expected_decompressed_len: u32,
+) -> Result<Vec<u8>> {
+    let mut decompressed =
+        Vec::with_capacity(usize::try_from(expected_decompressed_len).map_err(|_| {
+            MetadataError::parse(
+                path,
+                "bgen decompressed probability block length is out of range",
+            )
+        })?);
+    match compression {
+        BgenCompression::Zlib => {
+            let mut decoder = ZlibDecoder::new(compressed_payload);
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|source| MetadataError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
+        BgenCompression::Zstd => {
+            let mut decoder =
+                zstd::stream::read::Decoder::new(compressed_payload).map_err(|source| {
+                    MetadataError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|source| MetadataError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
+        BgenCompression::None | BgenCompression::Reserved => {
+            return Err(MetadataError::parse(
+                path,
+                "bgen compression value is not a compressed probability block",
+            ));
+        }
+    }
+
+    let expected_decompressed_len = usize::try_from(expected_decompressed_len).map_err(|_| {
+        MetadataError::parse(
+            path,
+            "bgen decompressed probability block length is out of range",
+        )
+    })?;
+    if decompressed.len() != expected_decompressed_len {
+        return Err(MetadataError::parse(
+            path,
+            "bgen decompressed probability block length does not match length prefix",
+        ));
+    }
+    Ok(decompressed)
+}
+
+fn validate_decompressed_layout2_probability_block(
+    path: &Path,
+    payload: &[u8],
+    expected_sample_count: u32,
+) -> Result<()> {
+    let block_length = u32::try_from(payload.len()).map_err(|_| {
+        MetadataError::parse(path, "bgen decompressed probability block is out of range")
+    })?;
+    validate_and_skip_uncompressed_layout2_probability_block(
+        &mut &payload[..],
+        path,
+        block_length,
+        expected_sample_count,
+    )
+}
+
 fn skip_exact(reader: &mut impl Read, path: &Path, mut len: u64) -> Result<()> {
     let mut buffer = [0_u8; 8192];
     while len > 0 {
@@ -471,6 +563,17 @@ fn skip_exact(reader: &mut impl Read, path: &Path, mut len: u64) -> Result<()> {
         len -= u64::try_from(chunk_len).expect("skip chunk length should fit u64");
     }
     Ok(())
+}
+
+fn read_exact_vec(reader: &mut impl Read, path: &Path, len: usize) -> Result<Vec<u8>> {
+    let mut bytes = vec![0_u8; len];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(bytes)
 }
 
 fn read_len_prefixed_string_u16(

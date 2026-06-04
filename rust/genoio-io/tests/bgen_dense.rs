@@ -5,9 +5,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+
 const FLAG_LAYOUT2: u32 = 2 << 2;
 const FLAG_SAMPLE_IDENTIFIERS: u32 = 1 << 31;
 const FLAG_ZLIB_COMPRESSION: u32 = 1;
+const FLAG_ZSTD_COMPRESSION: u32 = 2;
 const FLAG_RESERVED_COMPRESSION: u32 = 3;
 
 fn unique_dir(name: &str) -> PathBuf {
@@ -167,35 +171,75 @@ fn write_layout2_probability_block_header(
     writer: &mut impl Write,
     header: ProbabilityBlockHeader<'_>,
 ) -> io::Result<()> {
-    let c = 10_u32
-        .checked_add(
-            u32::try_from(header.sample_ploidies.len())
-                .expect("sample ploidy count should fit u32"),
-        )
-        .expect("probability block length should fit u32");
+    let block = layout2_probability_block_header_bytes(header);
+    let c = u32::try_from(block.len()).expect("probability block length should fit u32");
     writer.write_all(&c.to_le_bytes())?;
-    writer.write_all(&header.n_samples.to_le_bytes())?;
-    writer.write_all(&header.allele_count.to_le_bytes())?;
-    writer.write_all(&header.min_ploidy.to_le_bytes())?;
-    writer.write_all(&header.max_ploidy.to_le_bytes())?;
-    writer.write_all(header.sample_ploidies)?;
-    writer.write_all(&header.phased.to_le_bytes())?;
-    writer.write_all(&header.bit_depth.to_le_bytes())?;
+    writer.write_all(&block)?;
     Ok(())
 }
 
-fn write_placeholder_compressed_probability_block(writer: &mut impl Write) -> io::Result<()> {
-    let compressed_payload = [0x11_u8, 0x22, 0x33];
+fn layout2_probability_block_header_bytes(header: ProbabilityBlockHeader<'_>) -> Vec<u8> {
+    let mut block = Vec::new();
+    block.extend_from_slice(&header.n_samples.to_le_bytes());
+    block.extend_from_slice(&header.allele_count.to_le_bytes());
+    block.extend_from_slice(&header.min_ploidy.to_le_bytes());
+    block.extend_from_slice(&header.max_ploidy.to_le_bytes());
+    block.extend_from_slice(header.sample_ploidies);
+    block.extend_from_slice(&header.phased.to_le_bytes());
+    block.extend_from_slice(&header.bit_depth.to_le_bytes());
+    block
+}
+
+#[derive(Clone, Copy)]
+enum TestCompression {
+    Zlib,
+    Zstd,
+}
+
+fn write_compressed_layout2_probability_block(
+    writer: &mut impl Write,
+    compression: TestCompression,
+    header: ProbabilityBlockHeader<'_>,
+) -> io::Result<()> {
+    let decompressed_payload = layout2_probability_block_header_bytes(header);
+    let compressed_payload = match compression {
+        TestCompression::Zlib => {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&decompressed_payload)?;
+            encoder.finish()?
+        }
+        TestCompression::Zstd => zstd::stream::encode_all(&decompressed_payload[..], 0)?,
+    };
     let c = 4_u32
         .checked_add(
             u32::try_from(compressed_payload.len())
                 .expect("compressed payload length should fit u32"),
         )
         .expect("compressed block length should fit u32");
-    let d = 10_u32;
+    let d = u32::try_from(decompressed_payload.len()).expect("decompressed length should fit u32");
     writer.write_all(&c.to_le_bytes())?;
     writer.write_all(&d.to_le_bytes())?;
-    writer.write_all(&compressed_payload)
+    writer.write_all(&compressed_payload)?;
+    Ok(())
+}
+
+fn write_valid_compressed_probability_block(
+    writer: &mut impl Write,
+    compression: TestCompression,
+) -> io::Result<()> {
+    write_compressed_layout2_probability_block(
+        writer,
+        compression,
+        ProbabilityBlockHeader {
+            n_samples: 2,
+            allele_count: 2,
+            min_ploidy: 2,
+            max_ploidy: 2,
+            sample_ploidies: &[2, 2],
+            phased: 0,
+            bit_depth: 0,
+        },
+    )
 }
 
 fn write_bgen_fixture(
@@ -433,11 +477,11 @@ fn bgen_metadata_skips_compressed_probability_blocks_before_next_variant() {
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 2, |writer| {
         write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
             .expect("first variant identifying data should write");
-        write_placeholder_compressed_probability_block(writer)
+        write_valid_compressed_probability_block(writer, TestCompression::Zlib)
             .expect("first compressed probability block should write");
         write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
             .expect("second variant identifying data should write");
-        write_placeholder_compressed_probability_block(writer)
+        write_valid_compressed_probability_block(writer, TestCompression::Zlib)
             .expect("second compressed probability block should write");
     });
 
@@ -550,6 +594,151 @@ fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
 
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("non-diploid BGEN should fail");
+
+    assert_metadata_error_contains(error, "variable-ploidy");
+}
+
+#[test]
+fn bgen_metadata_rejects_zlib_compressed_phased_probability_blocks() {
+    let dir = unique_dir("bgen-zlib-phased-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_compressed_layout2_probability_block(
+            writer,
+            TestCompression::Zlib,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 1,
+                bit_depth: 8,
+            },
+        )
+        .expect("compressed phased probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("zlib-compressed phased BGEN should fail");
+
+    assert_metadata_error_contains(error, "phased");
+}
+
+#[test]
+fn bgen_metadata_rejects_zlib_compressed_variable_ploidy_probability_blocks() {
+    let dir = unique_dir("bgen-zlib-variable-ploidy-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_compressed_layout2_probability_block(
+            writer,
+            TestCompression::Zlib,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 1,
+                max_ploidy: 2,
+                sample_ploidies: &[1, 2],
+                phased: 0,
+                bit_depth: 8,
+            },
+        )
+        .expect("compressed variable-ploidy probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("zlib-compressed variable-ploidy BGEN should fail");
+
+    assert_metadata_error_contains(error, "variable-ploidy");
+}
+
+#[test]
+fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
+    let dir = unique_dir("bgen-zlib-non-diploid-sample-ploidy");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_compressed_layout2_probability_block(
+            writer,
+            TestCompression::Zlib,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 1],
+                phased: 0,
+                bit_depth: 8,
+            },
+        )
+        .expect("compressed non-diploid probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("zlib-compressed non-diploid BGEN should fail");
+
+    assert_metadata_error_contains(error, "variable-ploidy");
+}
+
+#[test]
+fn bgen_metadata_rejects_zstd_compressed_phased_probability_blocks() {
+    let dir = unique_dir("bgen-zstd-phased-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_compressed_layout2_probability_block(
+            writer,
+            TestCompression::Zstd,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 1,
+                bit_depth: 8,
+            },
+        )
+        .expect("compressed phased probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("zstd-compressed phased BGEN should fail");
+
+    assert_metadata_error_contains(error, "phased");
+}
+
+#[test]
+fn bgen_metadata_rejects_zstd_compressed_variable_ploidy_probability_blocks() {
+    let dir = unique_dir("bgen-zstd-variable-ploidy-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_compressed_layout2_probability_block(
+            writer,
+            TestCompression::Zstd,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 1,
+                max_ploidy: 2,
+                sample_ploidies: &[1, 2],
+                phased: 0,
+                bit_depth: 8,
+            },
+        )
+        .expect("compressed variable-ploidy probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("zstd-compressed variable-ploidy BGEN should fail");
 
     assert_metadata_error_contains(error, "variable-ploidy");
 }

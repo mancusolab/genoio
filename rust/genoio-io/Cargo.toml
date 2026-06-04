@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+flate2 = "1"
 genoio-core = { path = "../genoio-core" }
 rust-htslib = { version = "1.0.0", default-features = false }
 zstd = "0.13"
