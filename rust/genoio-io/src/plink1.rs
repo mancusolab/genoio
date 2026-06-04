@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
+    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
     PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
@@ -13,6 +13,7 @@ use genoio_core::{
 };
 
 use crate::error::Result;
+use crate::hardcall::{HardcallBatch, PackedHardcalls};
 
 /// Read PLINK1 sample and variant metadata without decoding BED genotypes.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
@@ -50,6 +51,10 @@ pub fn read_plink1_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    if let (None, Some(window)) = (variant_filter, variant_window) {
+        return read_plink1_dense_source_window(bed, bim, fam, requested_samples, window);
+    }
+
     let mut bed_file = open_bed_file(bed)?;
 
     let all_samples = parse_fam(fam)?;
@@ -67,9 +72,16 @@ pub fn read_plink1_dense_windowed(
         bytes_per_variant,
     )?;
 
-    let mut variants = Vec::new();
-    let mut variant_major_values = Vec::with_capacity(selection.samples.len() * n_source_variants);
-    let mut variant_major_missing = Vec::with_capacity(selection.samples.len() * n_source_variants);
+    let output_variant_capacity = variant_window.map_or(n_source_variants, |window| {
+        window.len.min(n_source_variants)
+    });
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut decoder_state =
+        Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
     let mut retained_index = 0_usize;
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
@@ -86,6 +98,9 @@ pub fn read_plink1_dense_windowed(
                     variant_window.is_none_or(|window| window.contains(retained_index));
                 retained_index += 1;
                 if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        break;
+                    }
                     continue;
                 }
             }
@@ -95,18 +110,21 @@ pub fn read_plink1_dense_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
-        // PLINK1 BED is variant-major and fixed-width, so random access by
-        // source variant index is cheap once BIM/FAM metadata has been parsed.
-        let (current_values, current_missing) = read_plink1_variant_values(
+        read_plink1_variant_packed(
             bed,
             &mut bed_file,
             variant_index,
             bytes_per_variant,
-            &selection.source_indices,
+            n_source_samples,
+            &mut decoder_state,
         )?;
 
         let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(&current_values, &current_missing)?)
+            Some(
+                decoder_state
+                    .packed
+                    .stats_for_selected(&selection.source_indices)?,
+            )
         } else {
             None
         };
@@ -124,12 +142,23 @@ pub fn read_plink1_dense_windowed(
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
             if !include_in_window {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    break;
+                }
                 continue;
             }
         }
+        decoder_state.packed.expand_selected(
+            &selection.source_indices,
+            &mut decoder_state.values,
+            &mut decoder_state.missing,
+        );
         variants.push(variant);
-        variant_major_values.extend(current_values);
-        variant_major_missing.extend(current_missing);
+        variant_major_values.extend_from_slice(&decoder_state.values);
+        variant_major_missing.extend_from_slice(&decoder_state.missing);
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
     }
 
     let n_samples = selection.samples.len();
@@ -140,6 +169,78 @@ pub fn read_plink1_dense_windowed(
     let missing_mask =
         transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
 
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+fn read_plink1_dense_source_window(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+    window: VariantWindow,
+) -> Result<DenseGenotypeMatrix> {
+    let mut bed_file = open_bed_file(bed)?;
+    let all_samples = parse_fam(fam)?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
+    let mut diagnostics = selection.diagnostics;
+    let n_source_samples = all_samples.len();
+    let bytes_per_variant = n_source_samples.div_ceil(4);
+    let n_source_variants =
+        infer_bed_variant_count(bed, &bed_file, n_source_samples, bytes_per_variant)?;
+    let n_variants = n_source_variants
+        .saturating_sub(window.start)
+        .min(window.len);
+    let variants = parse_bim_source_window(bim, window, n_variants)?;
+
+    let n_samples = selection.samples.len();
+    let mut values = vec![0.0; n_samples * n_variants];
+    let mut missing_mask = vec![false; n_samples * n_variants];
+    let mut decoder_state =
+        Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
+    let mut batch = HardcallBatch::new(n_source_samples);
+    let mut batch_start = 0_usize;
+    seek_plink1_variant(bed, &mut bed_file, window.start, bytes_per_variant)?;
+    for variant_offset in 0..n_variants {
+        read_plink1_variant_packed_sequential(
+            bed,
+            &mut bed_file,
+            bytes_per_variant,
+            n_source_samples,
+            &mut decoder_state,
+        )?;
+        batch.push(&decoder_state.packed);
+        if batch.is_full() {
+            batch.expand_into_sample_major(
+                &selection.source_indices,
+                batch_start,
+                n_variants,
+                &mut values,
+                &mut missing_mask,
+            );
+            batch_start += batch.len();
+            batch.clear();
+        }
+        diagnostics.candidate_variants = variant_offset + 1;
+    }
+    if !batch.is_empty() {
+        batch.expand_into_sample_major(
+            &selection.source_indices,
+            batch_start,
+            n_variants,
+            &mut values,
+            &mut missing_mask,
+        );
+    }
+
+    diagnostics.retained_variants = n_variants;
     DenseGenotypeMatrix::new(
         n_samples,
         n_variants,
@@ -189,10 +290,16 @@ pub fn read_plink1_sparse_windowed(
     )?;
 
     let n_samples = selection.samples.len();
-    let mut indptr = vec![0];
+    let output_variant_capacity = variant_window.map_or(n_source_variants, |window| {
+        window.len.min(n_source_variants)
+    });
+    let mut indptr = Vec::with_capacity(output_variant_capacity + 1);
+    indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = Vec::new();
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut decoder_state =
+        Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
     let mut retained_index = 0_usize;
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         diagnostics.candidate_variants += 1;
@@ -209,6 +316,9 @@ pub fn read_plink1_sparse_windowed(
                     variant_window.is_none_or(|window| window.contains(retained_index));
                 retained_index += 1;
                 if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        break;
+                    }
                     continue;
                 }
             }
@@ -218,15 +328,20 @@ pub fn read_plink1_sparse_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
-        let (mut current_values, current_missing) = read_plink1_variant_values(
+        read_plink1_variant_packed(
             bed,
             &mut bed_file,
             variant_index,
             bytes_per_variant,
-            &selection.source_indices,
+            n_source_samples,
+            &mut decoder_state,
         )?;
         let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(&current_values, &current_missing)?)
+            Some(
+                decoder_state
+                    .packed
+                    .stats_for_selected(&selection.source_indices)?,
+            )
         } else {
             None
         };
@@ -244,13 +359,24 @@ pub fn read_plink1_sparse_windowed(
                 variant_window.is_none_or(|window| window.contains(retained_index));
             retained_index += 1;
             if !include_in_window {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    break;
+                }
                 continue;
             }
         }
-        reject_sparse_missing_values(&current_missing)?;
-        flip_values_to_minor_allele(&mut current_values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &current_values);
+        decoder_state.packed.expand_selected(
+            &selection.source_indices,
+            &mut decoder_state.values,
+            &mut decoder_state.missing,
+        );
+        reject_sparse_missing_values(&decoder_state.missing)?;
+        flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
     }
 
     let n_variants = variants.len();
@@ -326,13 +452,79 @@ fn validate_bed_payload_len(
     Ok(())
 }
 
-fn read_plink1_variant_values(
+fn infer_bed_variant_count(
+    path: &Path,
+    file: &File,
+    n_source_samples: usize,
+    bytes_per_variant: usize,
+) -> Result<usize> {
+    let actual_len = file
+        .metadata()
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    if actual_len < 3 {
+        return Err(MetadataError::parse(
+            path,
+            "bed payload length is out of range",
+        ));
+    }
+    let payload_len = actual_len - 3;
+    let bytes_per_variant_u64 = u64::try_from(bytes_per_variant)
+        .map_err(|_| MetadataError::parse(path, "bed payload length is out of range"))?;
+    if bytes_per_variant_u64 == 0 || payload_len % bytes_per_variant_u64 != 0 {
+        return Err(MetadataError::parse(
+            path,
+            format!("bed payload length {actual_len} does not match {n_source_samples} samples"),
+        ));
+    }
+    usize::try_from(payload_len / bytes_per_variant_u64)
+        .map_err(|_| MetadataError::parse(path, "bed payload length is out of range"))
+}
+
+#[derive(Debug, Clone)]
+struct Plink1DecoderState {
+    payload: Vec<u8>,
+    packed: PackedHardcalls,
+    values: Vec<f32>,
+    missing: Vec<bool>,
+}
+
+impl Plink1DecoderState {
+    fn new(sample_ct: usize, bytes_per_variant: usize, selected_sample_ct: usize) -> Self {
+        Self {
+            payload: Vec::with_capacity(bytes_per_variant),
+            packed: {
+                let mut packed = PackedHardcalls::default();
+                packed.resize(sample_ct);
+                packed
+            },
+            values: Vec::with_capacity(selected_sample_ct),
+            missing: Vec::with_capacity(selected_sample_ct),
+        }
+    }
+}
+
+fn read_plink1_variant_packed(
     path: &Path,
     file: &mut File,
     variant_index: usize,
     bytes_per_variant: usize,
-    source_indices: &[usize],
-) -> Result<(Vec<f32>, Vec<bool>)> {
+    sample_ct: usize,
+    decoder_state: &mut Plink1DecoderState,
+) -> Result<()> {
+    seek_plink1_variant(path, file, variant_index, bytes_per_variant)?;
+    read_plink1_variant_packed_sequential(path, file, bytes_per_variant, sample_ct, decoder_state)
+}
+
+fn seek_plink1_variant(
+    path: &Path,
+    file: &mut File,
+    variant_index: usize,
+    bytes_per_variant: usize,
+) -> Result<()> {
     let offset = 3 + variant_index * bytes_per_variant;
     file.seek(SeekFrom::Start(u64::try_from(offset).map_err(|_| {
         MetadataError::parse(path, "bed variant offset is out of range")
@@ -341,33 +533,26 @@ fn read_plink1_variant_values(
         path: path.to_path_buf(),
         source,
     })?;
-    let mut payload = vec![0_u8; bytes_per_variant];
-    file.read_exact(&mut payload)
+    Ok(())
+}
+
+fn read_plink1_variant_packed_sequential(
+    path: &Path,
+    file: &mut File,
+    bytes_per_variant: usize,
+    sample_ct: usize,
+    decoder_state: &mut Plink1DecoderState,
+) -> Result<()> {
+    decoder_state.payload.resize(bytes_per_variant, 0);
+    file.read_exact(&mut decoder_state.payload)
         .map_err(|source| MetadataError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-
-    let mut current_values = Vec::with_capacity(source_indices.len());
-    let mut current_missing = Vec::with_capacity(source_indices.len());
-    for source_index in source_indices {
-        let byte = payload[source_index / 4];
-        let code = (byte >> ((source_index % 4) * 2)) & 0b11;
-        let (value, missing) = decode_plink1_code(code);
-        current_values.push(value);
-        current_missing.push(missing);
-    }
-    Ok((current_values, current_missing))
-}
-
-fn decode_plink1_code(code: u8) -> (f32, bool) {
-    match code {
-        0b00 => (2.0, false),
-        0b01 => (0.0, true),
-        0b10 => (1.0, false),
-        0b11 => (0.0, false),
-        _ => unreachable!("two-bit PLINK1 code should be masked"),
-    }
+    decoder_state
+        .packed
+        .load_plink1_bed_payload(&decoder_state.payload, sample_ct);
+    Ok(())
 }
 
 fn parse_fam(path: &Path) -> Result<Vec<SampleRecord>> {
@@ -415,6 +600,42 @@ fn parse_bim(path: &Path) -> Result<Vec<VariantRecord>> {
         .filter(|(_, line)| !line.trim().is_empty())
         .map(|(index, line)| parse_bim_line(path, index + 1, line))
         .collect()
+}
+
+fn parse_bim_source_window(
+    path: &Path,
+    window: VariantWindow,
+    expected_records: usize,
+) -> Result<Vec<VariantRecord>> {
+    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut records = Vec::with_capacity(expected_records);
+    let end = window.start.saturating_add(expected_records);
+    let mut source_index = 0_usize;
+    for (line_index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if source_index >= end {
+            break;
+        }
+        if source_index >= window.start {
+            records.push(parse_bim_line(path, line_index + 1, line)?);
+        }
+        source_index += 1;
+    }
+    if records.len() != expected_records {
+        return Err(MetadataError::parse(
+            path,
+            format!(
+                "bim source window contains {} variants but expected {expected_records}",
+                records.len()
+            ),
+        ));
+    }
+    Ok(records)
 }
 
 fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<VariantRecord> {

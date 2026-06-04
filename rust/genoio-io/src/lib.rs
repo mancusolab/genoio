@@ -7,6 +7,7 @@
 //! through `genoio-py`.
 
 mod error;
+mod hardcall;
 mod plink1;
 mod plink2;
 mod vcf;

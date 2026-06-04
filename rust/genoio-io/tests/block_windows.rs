@@ -88,6 +88,29 @@ F1 S2 0 0 2 -9
     (bed, bim, fam)
 }
 
+fn write_plink_source_window_stop_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let bed = dir.join("tiny.bed");
+    let bim = dir.join("tiny.bim");
+    let fam = dir.join("tiny.fam");
+    fs::write(&bed, [0x6c, 0x1b, 0x01, 0x04, 0x0d, 0x03]).expect("bed fixture should be written");
+    write_text(
+        &bim,
+        "\
+1 rs1 0 10 A G
+1 rs2 0 20 C T
+1 bad malformed
+",
+    );
+    write_text(
+        &fam,
+        "\
+F1 S1 0 0 1 -9
+F1 S2 0 0 2 -9
+",
+    );
+    (bed, bim, fam)
+}
+
 fn fixed_width_pgen(records: &[u8], n_samples: u32, n_variants: u32) -> Vec<u8> {
     let mut bytes = vec![0x6c, 0x1b, 0x02];
     bytes.extend(n_variants.to_le_bytes());
@@ -270,6 +293,33 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
         vec!["rs2", "rs4"]
     );
     assert_eq!(block.values, vec![0.0, 2.0, 0.0, 2.0]);
+}
+
+#[test]
+fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
+    let dir = unique_dir("plink1-source-window-stop");
+    let (bed, bim, fam) = write_plink_source_window_stop_fixture(&dir);
+
+    let block = genoio_io::read_plink1_dense_windowed(
+        &bed,
+        &bim,
+        &fam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("unfiltered plink1 source window should stop before later malformed metadata");
+
+    assert_eq!(
+        block
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1"]
+    );
+    assert_eq!(block.values, vec![2.0, 0.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 
 #[test]

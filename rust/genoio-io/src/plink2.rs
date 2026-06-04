@@ -7,19 +7,23 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, variant_stats_from_counts, DenseGenotypeMatrix,
-    MetadataError, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
+    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
+#[cfg(test)]
+use crate::hardcall::HARDCALL_BATCH_SIZE;
+use crate::hardcall::{HardcallBatch as PackedVariantBatch, PackedHardcalls as PackedGenotypes};
 
 const PGEN_MAGIC: [u8; 2] = [0x6c, 0x1b];
 const PGEN_MODE_FIXED_WIDTH_HARDCALLS: u8 = 0x02;
 const PGEN_MODE_VARIABLE_WIDTH: u8 = 0x10;
 const PGEN_HEADER_LEN: u64 = 12;
 const PGEN_VARIANT_BLOCK_SIZE: usize = 65_536;
-const PGEN_PACKED_TRANSPOSE_BATCH: usize = 64;
+#[cfg(test)]
+const PGEN_PACKED_TRANSPOSE_BATCH: usize = HARDCALL_BATCH_SIZE;
 
 #[derive(Debug, Clone)]
 struct PgenHeader {
@@ -29,192 +33,6 @@ struct PgenHeader {
     bytes_per_variant: usize,
     record_types: Vec<u8>,
     record_offsets: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct PackedGenotypes {
-    words: Vec<u64>,
-    sample_ct: usize,
-}
-
-impl PackedGenotypes {
-    const SAMPLES_PER_WORD: usize = 32;
-    const BITS_PER_SAMPLE: usize = 2;
-
-    fn resize(&mut self, sample_ct: usize) {
-        self.sample_ct = sample_ct;
-        self.words
-            .resize(sample_ct.div_ceil(Self::SAMPLES_PER_WORD), 0);
-        self.mask_unused_slots();
-    }
-
-    fn load_pgen_payload(&mut self, payload: &[u8], sample_ct: usize) {
-        self.resize(sample_ct);
-        for (word_index, word) in self.words.iter_mut().enumerate() {
-            let start = word_index * 8;
-            let end = payload.len().min(start + 8);
-            let mut bytes = [0_u8; 8];
-            if start < end {
-                bytes[..end - start].copy_from_slice(&payload[start..end]);
-            }
-            *word = u64::from_le_bytes(bytes);
-        }
-        self.mask_unused_slots();
-    }
-
-    fn clear_to(&mut self, category: u8) {
-        let category = u64::from(category & 0b11);
-        let mut word = 0_u64;
-        for slot_index in 0..Self::SAMPLES_PER_WORD {
-            word |= category << (slot_index * Self::BITS_PER_SAMPLE);
-        }
-        self.words.fill(word);
-        self.mask_unused_slots();
-    }
-
-    fn set(&mut self, sample_index: usize, category: u8) {
-        debug_assert!(sample_index < self.sample_ct);
-        let word_index = sample_index / Self::SAMPLES_PER_WORD;
-        let shift = (sample_index % Self::SAMPLES_PER_WORD) * Self::BITS_PER_SAMPLE;
-        let mask = 0b11_u64 << shift;
-        self.words[word_index] =
-            (self.words[word_index] & !mask) | (u64::from(category & 0b11) << shift);
-    }
-
-    fn get(&self, sample_index: usize) -> u8 {
-        debug_assert!(sample_index < self.sample_ct);
-        let word_index = sample_index / Self::SAMPLES_PER_WORD;
-        let shift = (sample_index % Self::SAMPLES_PER_WORD) * Self::BITS_PER_SAMPLE;
-        ((self.words[word_index] >> shift) & 0b11) as u8
-    }
-
-    fn copy_from(&mut self, other: &Self) {
-        self.sample_ct = other.sample_ct;
-        self.words.clear();
-        self.words.extend_from_slice(&other.words);
-    }
-
-    fn invert_0_2(&mut self) {
-        for sample_index in 0..self.sample_ct {
-            match self.get(sample_index) {
-                0 => self.set(sample_index, 2),
-                2 => self.set(sample_index, 0),
-                _ => {}
-            }
-        }
-    }
-
-    fn expand_selected(
-        &self,
-        source_indices: &[usize],
-        values: &mut Vec<f32>,
-        missing: &mut Vec<bool>,
-    ) {
-        values.clear();
-        missing.clear();
-        for source_index in source_indices {
-            let (value, is_missing) = decode_pgen_code(self.get(*source_index));
-            values.push(value);
-            missing.push(is_missing);
-        }
-    }
-
-    fn stats_for_selected(&self, source_indices: &[usize]) -> Result<genoio_core::VariantStats> {
-        let mut hom_ref_count = 0_u64;
-        let mut het_count = 0_u64;
-        let mut hom_alt_count = 0_u64;
-        let mut missing_count = 0_u64;
-        for source_index in source_indices {
-            if *source_index >= self.sample_ct {
-                return Err(MetadataError::parse(
-                    "<plink2>",
-                    "selected sample index is outside pgen sample count",
-                ));
-            }
-            match self.get(*source_index) {
-                0 => hom_ref_count += 1,
-                1 => het_count += 1,
-                2 => hom_alt_count += 1,
-                3 => missing_count += 1,
-                _ => unreachable!("two-bit PGEN code should be masked"),
-            }
-        }
-        variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
-    }
-
-    fn mask_unused_slots(&mut self) {
-        let used_slots = self.sample_ct % Self::SAMPLES_PER_WORD;
-        if used_slots == 0 || self.words.is_empty() {
-            return;
-        }
-        let used_bits = used_slots * Self::BITS_PER_SAMPLE;
-        let mask = (1_u64 << used_bits) - 1;
-        if let Some(last_word) = self.words.last_mut() {
-            *last_word &= mask;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PackedVariantBatch {
-    variants: Vec<PackedGenotypes>,
-    sample_ct: usize,
-}
-
-impl PackedVariantBatch {
-    fn new(sample_ct: usize) -> Self {
-        Self {
-            variants: Vec::with_capacity(PGEN_PACKED_TRANSPOSE_BATCH),
-            sample_ct,
-        }
-    }
-
-    fn push(&mut self, packed: &PackedGenotypes) {
-        debug_assert_eq!(packed.sample_ct, self.sample_ct);
-        let mut copy = PackedGenotypes::default();
-        copy.copy_from(packed);
-        self.variants.push(copy);
-    }
-
-    fn len(&self) -> usize {
-        self.variants.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.variants.is_empty()
-    }
-
-    fn is_full(&self) -> bool {
-        self.variants.len() == PGEN_PACKED_TRANSPOSE_BATCH
-    }
-
-    fn clear(&mut self) {
-        self.variants.clear();
-    }
-
-    fn expand_into_sample_major(
-        &self,
-        source_indices: &[usize],
-        variant_start: usize,
-        n_variants: usize,
-        out_values: &mut [f32],
-        out_missing: &mut [bool],
-    ) {
-        debug_assert!(variant_start + self.variants.len() <= n_variants);
-        debug_assert_eq!(out_values.len(), source_indices.len() * n_variants);
-        debug_assert_eq!(out_missing.len(), source_indices.len() * n_variants);
-
-        for (sample_index, source_index) in source_indices.iter().copied().enumerate() {
-            debug_assert!(source_index < self.sample_ct);
-            let row_start = sample_index * n_variants;
-            for (batch_variant_index, packed) in self.variants.iter().enumerate() {
-                let variant_index = variant_start + batch_variant_index;
-                let (value, is_missing) = decode_pgen_code(packed.get(source_index));
-                out_values[row_start + variant_index] = value;
-                out_missing[row_start + variant_index] = is_missing;
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1692,7 +1510,7 @@ fn read_variable_width_variant_packed(
             ));
         }
     }
-    if decoder_state.packed.sample_ct != header.sample_ct {
+    if decoder_state.packed.sample_ct() != header.sample_ct {
         return Err(MetadataError::parse(
             path,
             "pgen decoded category count does not match sample count",
@@ -1760,7 +1578,7 @@ fn decode_ld_compressed_record(
     inverted: bool,
     packed: &mut PackedGenotypes,
 ) -> Result<()> {
-    if previous_non_ld_packed.sample_ct != sample_ct {
+    if previous_non_ld_packed.sample_ct() != sample_ct {
         return Err(MetadataError::parse(
             path,
             "pgen LD state length does not match sample count",
@@ -1943,16 +1761,6 @@ fn ensure_record_bytes(path: &Path, record: &[u8], cursor: usize, len: usize) ->
 
 fn bit_is_set(bytes: &[u8], bit_index: usize) -> bool {
     bytes[bit_index / 8] & (1 << (bit_index % 8)) != 0
-}
-
-fn decode_pgen_code(code: u8) -> (f32, bool) {
-    match code {
-        0b00 => (0.0, false),
-        0b01 => (1.0, false),
-        0b10 => (2.0, false),
-        0b11 => (0.0, true),
-        _ => unreachable!("two-bit PGEN code should be masked"),
-    }
 }
 
 #[cfg(test)]

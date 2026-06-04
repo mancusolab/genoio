@@ -10,7 +10,7 @@ comparisons read the first 1,000 variants into a dense `float32` matrix.
 | Source | genoio median | comparison median | Result |
 |---|---:|---:|---|
 | VCF vs `cyvcf2` | 0.1064 s | 0.2383 s | genoio 2.24x faster |
-| PLINK1 vs `pandas_plink` | 0.3968 s | 2.4382 s | genoio 6.15x faster |
+| PLINK1 vs `pandas_plink` | 0.0163 s | 2.5449 s | genoio 156.13x faster |
 | PLINK2 matrix-only vs `pgenlib` | 0.0094 s | 0.0069 s | `pgenlib` 1.36x faster |
 
 These numbers are workload- and machine-dependent. Treat them as local
