@@ -157,6 +157,78 @@ fn write_empty_layout2_probability_block(
     )
 }
 
+fn write_layout2_dosage_probability_block(
+    writer: &mut impl Write,
+    bit_depth: u8,
+    calls: &[Option<(u32, u32)>],
+) -> io::Result<()> {
+    let sample_ploidies = calls
+        .iter()
+        .map(|call| if call.is_some() { 2 } else { 0b1000_0010 })
+        .collect::<Vec<_>>();
+    let mut block = layout2_probability_block_header_bytes(ProbabilityBlockHeader {
+        n_samples: u32::try_from(calls.len()).expect("call count should fit u32"),
+        allele_count: 2,
+        min_ploidy: 2,
+        max_ploidy: 2,
+        sample_ploidies: &sample_ploidies,
+        phased: 0,
+        bit_depth,
+    });
+    append_packed_probabilities(&mut block, bit_depth, calls);
+
+    let c = u32::try_from(block.len()).expect("probability block length should fit u32");
+    writer.write_all(&c.to_le_bytes())?;
+    writer.write_all(&block)?;
+    Ok(())
+}
+
+fn append_packed_probabilities(output: &mut Vec<u8>, bit_depth: u8, calls: &[Option<(u32, u32)>]) {
+    let mut current_byte = 0_u8;
+    let mut bits_in_current_byte = 0_u8;
+    for &(p_aa, p_ab) in calls.iter().flatten() {
+        append_packed_probability_value(
+            output,
+            &mut current_byte,
+            &mut bits_in_current_byte,
+            bit_depth,
+            p_aa,
+        );
+        append_packed_probability_value(
+            output,
+            &mut current_byte,
+            &mut bits_in_current_byte,
+            bit_depth,
+            p_ab,
+        );
+    }
+    if bits_in_current_byte > 0 {
+        output.push(current_byte);
+    }
+}
+
+fn append_packed_probability_value(
+    output: &mut Vec<u8>,
+    current_byte: &mut u8,
+    bits_in_current_byte: &mut u8,
+    bit_depth: u8,
+    value: u32,
+) {
+    assert!(bit_depth <= 32);
+    assert!(bit_depth == 32 || value < (1_u32 << bit_depth));
+
+    for bit_index in 0..bit_depth {
+        let bit = ((value >> bit_index) & 1) as u8;
+        *current_byte |= bit << *bits_in_current_byte;
+        *bits_in_current_byte += 1;
+        if *bits_in_current_byte == 8 {
+            output.push(*current_byte);
+            *current_byte = 0;
+            *bits_in_current_byte = 0;
+        }
+    }
+}
+
 struct ProbabilityBlockHeader<'a> {
     n_samples: u32,
     allele_count: u16,
@@ -288,6 +360,30 @@ fn write_two_sample_two_variant_bgen_with_sample_ids(path: &Path, has_sample_ids
     fs::write(path, bgen).expect("bgen fixture should be written");
 }
 
+fn write_two_sample_two_variant_dosage_bgen(
+    path: &Path,
+    bit_depth: u8,
+    variant_calls: &[[Option<(u32, u32)>; 2]; 2],
+) {
+    write_bgen_fixture(path, FLAG_LAYOUT2, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[0])
+            .expect("first dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[1])
+            .expect("second dosage probability block should write");
+    });
+}
+
+fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
+    let denominator = ((1_u64 << bit_depth) - 1) as f32;
+    let p_aa = p_aa as f32 / denominator;
+    let p_ab = p_ab as f32 / denominator;
+    p_ab + 2.0 * (1.0 - p_aa - p_ab)
+}
+
 fn write_sample_file(path: &Path, rows: &[&str]) {
     let mut contents = String::from("ID_1 ID_2 missing\n0 0 0\n");
     for row in rows {
@@ -303,6 +399,85 @@ fn assert_metadata_error_contains(error: genoio_core::MetadataError, expected: &
         message.contains(expected),
         "expected error containing {expected:?}, got {message:?}"
     );
+}
+
+#[test]
+fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
+    let dir = unique_dir("bgen-dosage-bit-depth-8");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None)
+        .expect("bgen dosage should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values.len(), 4);
+    let expected = vec![
+        expected_dosage(8, 204, 26),
+        expected_dosage(8, 0, 255),
+        expected_dosage(8, 51, 128),
+        expected_dosage(8, 102, 102),
+    ];
+    for (observed, expected) in dense.values.iter().zip(expected) {
+        assert!((observed - expected).abs() <= 2.0 / 255.0);
+    }
+    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
+    let dir = unique_dir("bgen-dosage-bit-depth-16");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((52_428, 6_554)), Some((13_107, 32_768))],
+        [Some((0, 65_535)), Some((26_214, 26_214))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 16, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None)
+        .expect("bgen dosage should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    let expected = vec![
+        expected_dosage(16, 52_428, 6_554),
+        expected_dosage(16, 0, 65_535),
+        expected_dosage(16, 13_107, 32_768),
+        expected_dosage(16, 26_214, 26_214),
+    ];
+    for (observed, expected) in dense.values.iter().zip(expected) {
+        assert!((observed - expected).abs() <= 2.0 / 65_535.0);
+    }
+    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_preserves_missing_sample_calls() {
+    let dir = unique_dir("bgen-dosage-missing");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [[Some((204, 26)), None], [Some((0, 255)), Some((102, 102))]];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None)
+        .expect("bgen dosage should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(
+        dense.values,
+        vec![
+            expected_dosage(8, 204, 26),
+            expected_dosage(8, 0, 255),
+            0.0,
+            expected_dosage(8, 102, 102),
+        ]
+    );
+    assert_eq!(dense.missing_mask, vec![false, false, true, false]);
 }
 
 #[test]

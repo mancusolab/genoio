@@ -82,6 +82,104 @@ def write_ds_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_bgen_dosage(tmp_path: Path, *, missing: bool = False) -> Path:
+    path = tmp_path / "dosage.bgen"
+    contents = bytearray()
+    flags = (2 << 2) | (1 << 31)
+
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((2).to_bytes(4, "little"))
+    contents.extend((2).to_bytes(4, "little"))
+    contents.extend(b"bgen")
+    contents.extend(flags.to_bytes(4, "little"))
+    contents.extend(_bgen_sample_identifier_block(["sample_1", "sample_2"]))
+    variant_offset = len(contents) - 4
+    contents[0:4] = variant_offset.to_bytes(4, "little")
+
+    variant_1_calls: list[tuple[int, int] | None] = [(204, 26), None if missing else (51, 128)]
+    variant_2_calls: list[tuple[int, int] | None] = [(0, 255), (102, 102)]
+    contents.extend(_bgen_variant_identifying_data("var1", "rs1", "1", 10, ["A", "G"]))
+    contents.extend(_bgen_dosage_probability_block(8, variant_1_calls))
+    contents.extend(_bgen_variant_identifying_data("var2", "rs2", "2", 20, ["C", "T"]))
+    contents.extend(_bgen_dosage_probability_block(8, variant_2_calls))
+
+    path.write_bytes(contents)
+    return path
+
+
+def _bgen_sample_identifier_block(sample_ids: list[str]) -> bytes:
+    contents = bytearray()
+    block_len = 8 + sum(2 + len(sample_id.encode()) for sample_id in sample_ids)
+    contents.extend(block_len.to_bytes(4, "little"))
+    contents.extend(len(sample_ids).to_bytes(4, "little"))
+    for sample_id in sample_ids:
+        encoded = sample_id.encode()
+        contents.extend(len(encoded).to_bytes(2, "little"))
+        contents.extend(encoded)
+    return bytes(contents)
+
+
+def _bgen_variant_identifying_data(
+    variant_id: str,
+    rsid: str,
+    chrom: str,
+    pos: int,
+    alleles: list[str],
+) -> bytes:
+    contents = bytearray()
+    for value in (variant_id, rsid, chrom):
+        encoded = value.encode()
+        contents.extend(len(encoded).to_bytes(2, "little"))
+        contents.extend(encoded)
+    contents.extend(pos.to_bytes(4, "little"))
+    contents.extend(len(alleles).to_bytes(2, "little"))
+    for allele in alleles:
+        encoded = allele.encode()
+        contents.extend(len(encoded).to_bytes(4, "little"))
+        contents.extend(encoded)
+    return bytes(contents)
+
+
+def _bgen_dosage_probability_block(bit_depth: int, calls: list[tuple[int, int] | None]) -> bytes:
+    payload = bytearray()
+    payload.extend(len(calls).to_bytes(4, "little"))
+    payload.extend((2).to_bytes(2, "little"))
+    payload.extend((2).to_bytes(1, "little"))
+    payload.extend((2).to_bytes(1, "little"))
+    payload.extend((2 if call is not None else 0b1000_0010) for call in calls)
+    payload.extend((0).to_bytes(1, "little"))
+    payload.extend(bit_depth.to_bytes(1, "little"))
+    _append_bgen_packed_probabilities(payload, bit_depth, calls)
+
+    contents = bytearray()
+    contents.extend(len(payload).to_bytes(4, "little"))
+    contents.extend(payload)
+    return bytes(contents)
+
+
+def _append_bgen_packed_probabilities(
+    output: bytearray,
+    bit_depth: int,
+    calls: list[tuple[int, int] | None],
+) -> None:
+    current_byte = 0
+    bits_in_current_byte = 0
+    for call in calls:
+        if call is None:
+            continue
+        for value in call:
+            for bit_index in range(bit_depth):
+                current_byte |= ((value >> bit_index) & 1) << bits_in_current_byte
+                bits_in_current_byte += 1
+                if bits_in_current_byte == 8:
+                    output.append(current_byte)
+                    current_byte = 0
+                    bits_in_current_byte = 0
+    if bits_in_current_byte:
+        output.append(current_byte)
+
+
 def write_gt_only_vcf(tmp_path: Path) -> Path:
     path = tmp_path / "gt_only.vcf"
     path.write_text(
@@ -227,6 +325,51 @@ def test_dense_vcf_dosage_reads_ds_values_without_gt_fallback(tmp_path):
     )
     assert variants["id"].to_list() == ["rs1", "rs2"]
     assert variants["a1"].to_list() == ["G", "T"]
+
+
+def test_dense_bgen_dosage_read_returns_sample_by_variant_matrix(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    G = dataset.read(dosage="dosage")
+
+    assert G.shape == (2, 2)
+    assert G.dtype == np.dtype("float32")
+    np.testing.assert_allclose(
+        G,
+        np.array(
+            [
+                [0.29803923, 1.0],
+                [1.0980392, 0.8],
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=2.0 / 255.0,
+    )
+
+
+def test_dense_bgen_dosage_default_missing_policy_returns_nan(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, missing=True))
+
+    G = dataset.read(dosage="dosage")
+
+    assert G.shape == (2, 2)
+    np.testing.assert_allclose(G[0], np.array([0.29803923, 1.0], dtype=np.float32), rtol=0, atol=2.0 / 255.0)
+    assert np.isnan(G[1, 0])
+    assert np.isclose(G[1, 1], 0.8, atol=2.0 / 255.0)
+
+
+def test_dense_bgen_dosage_missing_raise_rejects_missing_calls(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, missing=True))
+
+    with pytest.raises(genoio.MissingDataError, match="missing genotype"):
+        dataset.read(dosage="dosage", missing="raise")
 
 
 def test_dense_vcf_dosage_sample_filter_uses_selected_samples(tmp_path):
