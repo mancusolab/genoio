@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *.so
 
-.plans
+.plans/
 data
 
 /rust/target/
