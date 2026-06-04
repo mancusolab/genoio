@@ -24,6 +24,14 @@ def write_blocks_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def placeholder_bgen_dataset(tmp_path: Path):
+    import genoio
+
+    path = tmp_path / "cohort.bgen"
+    path.touch()
+    return genoio.bgen(path)
+
+
 def test_import_exposes_public_names_without_reference_packages():
     import genoio
 
@@ -31,6 +39,7 @@ def test_import_exposes_public_names_without_reference_packages():
         "__version__",
         "vcf",
         "bfile",
+        "bgen",
         "pfile",
         "chrom",
         "region",
@@ -127,6 +136,42 @@ def test_dataset_read_rejects_haplotype_dosage_source(tmp_path):
 
     with pytest.raises(genoio.UnsupportedRepresentation, match='kind="haplo"'):
         dataset.read(kind="haplo", dosage="dosage")
+
+
+def test_bgen_dataset_read_rejects_hardcall_genotypes(tmp_path):
+    import genoio
+
+    dataset = placeholder_bgen_dataset(tmp_path)
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="hardcall"):
+        dataset.read(dosage="hardcall")
+
+
+def test_bgen_dataset_read_rejects_sparse_hardcall_genotypes(tmp_path):
+    import genoio
+
+    dataset = placeholder_bgen_dataset(tmp_path)
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse"):
+        dataset.read(sparse=True, dosage="hardcall")
+
+
+def test_bgen_dataset_read_rejects_haplotypes(tmp_path):
+    import genoio
+
+    dataset = placeholder_bgen_dataset(tmp_path)
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="haplo"):
+        dataset.read(kind="haplo")
+
+
+def test_bgen_dataset_read_dosage_reaches_backend_until_parser_exists(tmp_path):
+    import genoio
+
+    dataset = placeholder_bgen_dataset(tmp_path)
+
+    with pytest.raises(genoio.InvalidSourceError):
+        dataset.read(dosage="dosage")
 
 
 def test_dataset_blocks_accepts_explicit_hardcall_dosage_source(tmp_path):
