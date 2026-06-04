@@ -46,6 +46,12 @@ The returned array has samples on rows and variants on columns:
 n_samples, n_variants = X.shape
 ```
 
+By default, genotype matrices contain hardcall allele counts: `0`, `1`, or `2`
+copies of `a1`. Pass `dosage="hardcall"` explicitly when code should document
+that contract. For VCF sources with `FORMAT/DS`, pass `dosage="dosage"` to read
+dense dosage-backed genotype values. No fallback to `GT` is attempted when DS is
+missing.
+
 Ask for metadata when you need to preserve row and column labels:
 
 ```python

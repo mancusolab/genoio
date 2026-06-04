@@ -1,10 +1,12 @@
 # Format support
 
 `genoio` exposes one matrix API across VCF, PLINK1, and PLINK2 sources.
+Genotype reads return hardcall allele counts by default. Dense VCF reads can
+instead use `FORMAT/DS` dosage values with `dosage="dosage"`.
 
 | Format | Inputs | Genotype reads | Haplotype reads | Notes |
 |---|---|---:|---:|---|
-| VCF/BCF | `.vcf`, `.vcf.gz`, `.bcf` | yes | phased VCF only | Indexed region filters use `.tbi` or `.csi` when available. |
+| VCF/BCF | `.vcf`, `.vcf.gz`, `.bcf` | yes; dense `FORMAT/DS` dosage supported | phased VCF only | Indexed region filters use `.tbi` or `.csi` when available. |
 | PLINK1 | `.bed` + `.bim` + `.fam` | yes | no | Variant-major BED files are supported. |
 | PLINK2 | `.pgen` + `.pvar` or `.pvar.zst` + `.psam` | yes | no | Biallelic hard-call PGEN records are supported. |
 
@@ -36,8 +38,11 @@ For PLINK2, `genoio` accepts either an uncompressed `.pvar` or a zstd-compressed
 
 ## Current limitations
 
-- PLINK2 support is limited to biallelic hard-call records. Dosage tracks are
-  not implemented yet.
+- `dosage="dosage"` currently supports dense VCF `FORMAT/DS` reads only.
+  Sparse dosage reads are not implemented.
+- PLINK2 dosage tracks are not implemented yet. PLINK1 has no dosage
+  representation in BED files.
+- PLINK2 support is limited to biallelic hard-call records.
 - Sparse reads do not preserve missing-value masks.
 - Haplotype reads are currently VCF-only.
 - Region pushdown is implemented for concrete indexed VCF/BCF region filters,

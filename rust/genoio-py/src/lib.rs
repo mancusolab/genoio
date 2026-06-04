@@ -63,14 +63,27 @@ fn read_dense(
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
-            genoio_io::read_vcf_dense_windowed(
-                &path,
-                read_options.requested_samples.as_deref(),
-                read_options.variant_filter.as_ref(),
-                read_options.variant_window,
-            )
+            match read_options.dosage {
+                DosageSource::Hardcall => genoio_io::read_vcf_dense_windowed(
+                    &path,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                ),
+                DosageSource::Dosage => genoio_io::read_vcf_dosage_dense_windowed(
+                    &path,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                ),
+            }
         }
         "plink1" => {
+            if read_options.dosage != DosageSource::Hardcall {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "plink1 does not support dosage-backed genotype reads",
+                ));
+            }
             let bed = member_path(members, "bed")?;
             let bim = member_path(members, "bim")?;
             let fam = member_path(members, "fam")?;
@@ -84,6 +97,11 @@ fn read_dense(
             )
         }
         "plink2" => {
+            if read_options.dosage != DosageSource::Hardcall {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "plink2 dosage-backed genotype reads are not implemented",
+                ));
+            }
             let pgen = member_path(members, "pgen")?;
             let pvar = member_path(members, "pvar")?;
             let psam = member_path(members, "psam")?;
@@ -122,6 +140,11 @@ fn read_sparse(
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
+    if read_options.dosage != DosageSource::Hardcall {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "sparse dosage-backed genotype reads are not implemented",
+        ));
+    }
     let output = match format {
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
@@ -270,9 +293,16 @@ struct ReadOptions {
     requested_samples: Option<Vec<String>>,
     variant_filter: Option<genoio_core::VariantFilter>,
     variant_window: Option<genoio_core::VariantWindow>,
+    dosage: DosageSource,
     return_samples: bool,
     return_variants: bool,
     matrix_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DosageSource {
+    Hardcall,
+    Dosage,
 }
 
 fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
@@ -280,6 +310,7 @@ fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
         requested_samples: samples_option(options)?,
         variant_filter: variants_option(options)?,
         variant_window: variant_window_option(options)?,
+        dosage: dosage_option(options)?,
         return_samples: bool_option(options, "return_samples")?,
         return_variants: bool_option(options, "return_variants")?,
         matrix_only: required_bool_option(options, "matrix_only")?,
@@ -331,6 +362,19 @@ fn variant_window_option(
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing variant_window.len"))?
         .extract::<usize>()?;
     Ok(Some(genoio_core::VariantWindow { start, len }))
+}
+
+fn dosage_option(options: &Bound<'_, PyDict>) -> PyResult<DosageSource> {
+    let value = options
+        .get_item("dosage")?
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing option: dosage"))?;
+    match value.extract::<String>()?.as_str() {
+        "hardcall" => Ok(DosageSource::Hardcall),
+        "dosage" => Ok(DosageSource::Dosage),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unsupported dosage source: {other}"
+        ))),
+    }
 }
 
 fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {

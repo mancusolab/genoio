@@ -12,6 +12,14 @@ shape `(n_samples, 0)`, sparse reads return a SciPy sparse matrix with the same
 shape, and `return_variants=True` returns an empty variant frame with the normal
 schema. Block reads yield no blocks when no variant passes the filter.
 
+By default, `kind="geno"` returns diploid hardcall allele counts: `0`, `1`, or
+`2` copies of `a1`, with missing calls handled by the selected missing-data
+policy. The `dosage` option controls this genotype value source:
+`dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
+dosage-backed values. This release supports dense VCF `FORMAT/DS` dosage reads.
+Sparse dosage, haplotype dosage, PLINK1 dosage, and PLINK2 dosage are not
+implemented yet and raise `genoio.UnsupportedRepresentation`.
+
 ## Metadata frames
 
 `Dataset.samples()` returns a Polars DataFrame in source sample order. Genotype
@@ -37,8 +45,8 @@ back to its original diploid sample.
 `Dataset.variants()` returns a Polars DataFrame in source variant order.
 `read(..., return_variants=True)` and `blocks(..., return_variants=True)` return
 the same five columns for the retained variants, in matrix-column order. The
-schema is format-neutral: `a1` is the allele counted by returned dosage values,
-not necessarily the VCF ALT allele.
+schema is format-neutral: `a1` is the allele counted by returned genotype
+values, not necessarily the VCF ALT allele.
 
 ??? info "Variant metadata schema"
     | Column | Meaning |
@@ -46,8 +54,8 @@ not necessarily the VCF ALT allele.
     | `chrom` | Chromosome or contig label. |
     | `pos` | 1-based variant position. |
     | `id` | Variant ID from the source. |
-    | `a0` | Allele counted as dosage `0` in returned matrices. |
-    | `a1` | Allele counted as dosage `1` or `2` in returned matrices. |
+    | `a0` | Allele counted as `0` in returned genotype matrices. |
+    | `a1` | Allele counted as `1` or `2` in returned genotype matrices. |
 
 ::: genoio.Dataset
 

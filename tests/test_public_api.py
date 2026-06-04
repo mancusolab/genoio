@@ -94,6 +94,52 @@ def test_dataset_read_recognizes_sparse_options_and_validates_missing_policy(tmp
         dataset.read(sparse="csc", missing="nan")
 
 
+def test_dataset_read_accepts_explicit_hardcall_dosage_source(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    np.testing.assert_array_equal(dataset.read(), dataset.read(dosage="hardcall"))
+
+
+def test_dataset_read_rejects_unknown_dosage_source(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    with pytest.raises(genoio.InvalidOptionError, match="unsupported dosage source"):
+        dataset.read(dosage="posterior")
+
+
+def test_dataset_read_rejects_dosage_source_for_formats_without_reader_support(tmp_path):
+    import genoio
+
+    dataset = genoio.bfile(FIXTURE_ROOT / "plink1" / "tiny")
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="does not support dosage-backed genotype reads"):
+        dataset.read(dosage="dosage")
+
+
+def test_dataset_read_rejects_haplotype_dosage_source(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match='kind="haplo"'):
+        dataset.read(kind="haplo", dosage="dosage")
+
+
+def test_dataset_blocks_accepts_explicit_hardcall_dosage_source(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    blocks = list(dataset.blocks(1, dosage="hardcall"))
+
+    assert len(blocks) == 2
+    np.testing.assert_array_equal(blocks[0], np.array([[0.0], [1.0]], dtype=np.float32))
+
+
 def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_path):
     import genoio
     import genoio._api as api
@@ -139,6 +185,7 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
             "samples": None,
             "variants": None,
             "variant_window": None,
+            "dosage": "hardcall",
             "return_samples": False,
             "return_variants": False,
             "matrix_only": True,

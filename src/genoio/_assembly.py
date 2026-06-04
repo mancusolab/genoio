@@ -62,8 +62,8 @@ def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
     **Returns:**
 
     Polars DataFrame in source variant order. The public schema is deliberately
-    limited to the columns needed to interpret matrix columns and dosage
-    orientation.
+    limited to the columns needed to interpret matrix columns and counted
+    allele orientation.
     """
     # Rust returns in-memory columns across the PyO3 boundary. Eager DataFrame
     # assembly is the adapter boundary here because there is no file scan or

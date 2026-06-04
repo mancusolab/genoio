@@ -9,7 +9,10 @@ use genoio_core::{
     PartialFilterDecision, RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
     VariantFilter, VariantRecord, VariantWindow,
 };
-use rust_htslib::bcf::{record::GenotypeAllele, IndexedReader, Read, Reader};
+use rust_htslib::bcf::{
+    record::{GenotypeAllele, Numeric},
+    IndexedReader, Read, Reader,
+};
 
 use crate::error::Result;
 
@@ -84,6 +87,49 @@ pub fn read_vcf_dense_windowed(
     let mut reader = Reader::from_path(path)
         .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
     read_vcf_dense_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
+/// Read retained VCF/BCF FORMAT/DS values as dense sample-by-variant dosages.
+pub fn read_vcf_dosage_dense_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<DenseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
+        return Err(MetadataError::parse(
+            path,
+            "dosage-backed genotype reads do not support genotype-stat filters yet",
+        ));
+    }
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        let reader = Reader::from_path(path)
+            .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        return empty_vcf_dense(path, reader.header(), requested_samples);
+    }
+
+    if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
+        if has_vcf_index(path) {
+            return read_indexed_vcf_dosage_dense(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+            );
+        }
+    }
+
+    reject_unindexed_compressed_region(path, variant_filter)?;
+    let mut reader = Reader::from_path(path)
+        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+    read_vcf_dosage_dense_records(
         path,
         requested_samples,
         variant_filter,
@@ -228,6 +274,38 @@ fn read_indexed_vcf_dense(
     )
 }
 
+fn read_indexed_vcf_dosage_dense(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    region: &RegionPredicate,
+) -> Result<DenseGenotypeMatrix> {
+    let mut reader = IndexedReader::from_path(path).map_err(|error| {
+        MetadataError::parse(path, format!("indexed vcf reader error: {error}"))
+    })?;
+    let header = reader.header().clone();
+    let rid = match header.name2rid(region.chrom.as_bytes()) {
+        Ok(rid) => rid,
+        Err(_) => return empty_vcf_dense(path, &header, requested_samples),
+    };
+    reader
+        .fetch(
+            rid,
+            u64::from(region.start - 1),
+            Some(u64::from(region.end - 1)),
+        )
+        .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
+
+    read_vcf_dosage_dense_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
 fn read_indexed_vcf_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -353,6 +431,80 @@ fn read_vcf_dense_records<R: Read>(
         variants.push(variant);
         variant_major_values.extend(current_values);
         variant_major_missing.extend(current_missing);
+    }
+
+    let n_samples = selection.samples.len();
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+fn read_vcf_dosage_dense_records<R: Read>(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    reader: &mut R,
+) -> Result<DenseGenotypeMatrix> {
+    let header = reader.header().clone();
+    let all_samples = sample_records_from_header(&header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut diagnostics = selection.diagnostics;
+
+    let mut variants = Vec::new();
+    let mut variant_major_values = Vec::new();
+    let mut variant_major_missing = Vec::new();
+    let mut retained_index = 0_usize;
+    for record_result in reader.records() {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
+        let record = record_result
+            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let variant = variant_record_from_record(path, &header, &record)?;
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {
+                return Err(MetadataError::parse(
+                    path,
+                    "dosage-backed genotype reads do not support genotype-stat filters yet",
+                ));
+            }
+        }
+
+        validate_dense_biallelic_record(path, &record)?;
+        let decoded = decode_ds_dosage_record(path, &record, &selection.source_indices)?;
+        variants.push(variant);
+        variant_major_values.extend(decoded.values);
+        variant_major_missing.extend(decoded.missing);
     }
 
     let n_samples = selection.samples.len();
@@ -930,6 +1082,54 @@ fn decode_diploid_genotype_record(
         let (value, is_missing) = decode_raw_diploid_gt(path, record, genotypes[*source_index])?;
         values.push(value);
         missing.push(is_missing);
+    }
+
+    Ok(DecodedDiploidGenotypeRecord { values, missing })
+}
+
+fn decode_ds_dosage_record(
+    path: &Path,
+    record: &rust_htslib::bcf::Record,
+    source_indices: &[usize],
+) -> Result<DecodedDiploidGenotypeRecord> {
+    let dosages = record.format(b"DS").float().map_err(|error| {
+        MetadataError::parse(
+            path,
+            format!("vcf dosage reads require FORMAT/DS values: {error}"),
+        )
+    })?;
+    let mut values = Vec::with_capacity(source_indices.len());
+    let mut missing = Vec::with_capacity(source_indices.len());
+
+    for source_index in source_indices {
+        let dosage = dosages[*source_index];
+        if dosage.len() != 1 {
+            return Err(MetadataError::parse(
+                path,
+                format!(
+                    "vcf record {} has FORMAT/DS with {} values for a sample; expected one",
+                    String::from_utf8_lossy(&record.id()),
+                    dosage.len()
+                ),
+            ));
+        }
+        let value = dosage[0];
+        if value.is_missing() {
+            values.push(0.0);
+            missing.push(true);
+            continue;
+        }
+        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+            return Err(MetadataError::parse(
+                path,
+                format!(
+                    "vcf record {} has invalid FORMAT/DS value {value}; expected finite value in [0, 2]",
+                    String::from_utf8_lossy(&record.id())
+                ),
+            ));
+        }
+        values.push(value);
+        missing.push(false);
     }
 
     Ok(DecodedDiploidGenotypeRecord { values, missing })

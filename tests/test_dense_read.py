@@ -66,6 +66,36 @@ def write_common_a1_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_ds_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "dosage.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DS,Number=1,Type=Float,Description="Expected alternate allele dosage">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DS\t0/0:0.2\t0/1:1.4\t1/1:1.8
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT:DS\t0/0:0\t0/0:.\t0/1:0.7
+"""
+    )
+    return path
+
+
+def write_gt_only_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "gt_only.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1
+"""
+    )
+    return path
+
+
 def write_fixed_width_plink2(tmp_path: Path) -> Path:
     prefix = tmp_path / "tiny"
     prefix.with_suffix(".pgen").write_bytes(
@@ -142,6 +172,86 @@ def test_dense_genotype_reads_do_not_minor_allele_flip_by_default(tmp_path):
     np.testing.assert_array_equal(G, np.array([[2.0], [2.0], [1.0]], dtype=np.float32))
     assert variants["a0"].to_list() == ["A"]
     assert variants["a1"].to_list() == ["G"]
+
+
+def test_dense_vcf_dosage_reads_ds_values_without_gt_fallback(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+
+    G, variants = dataset.read(dosage="dosage", missing="nan", return_variants=True)
+
+    np.testing.assert_array_equal(
+        G,
+        np.array([[0.2, 0.0], [1.4, np.nan], [1.8, 0.7]], dtype=np.float32),
+    )
+    assert variants["id"].to_list() == ["rs1", "rs2"]
+    assert variants["a1"].to_list() == ["G", "T"]
+
+
+def test_dense_vcf_dosage_sample_filter_uses_selected_samples(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+
+    G, samples = dataset.read(dosage="dosage", missing="nan", samples=["S3", "S1"], return_samples=True)
+
+    np.testing.assert_array_equal(G, np.array([[0.2, 0.0], [1.8, 0.7]], dtype=np.float32))
+    assert samples["iid"].to_list() == ["S1", "S3"]
+
+
+def test_dense_vcf_dosage_accepts_metadata_only_variant_filters(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+
+    G, variants = dataset.read(
+        dosage="dosage",
+        missing="nan",
+        variants=genoio.id_in(["rs2"]),
+        return_variants=True,
+    )
+
+    np.testing.assert_array_equal(G, np.array([[0.0], [np.nan], [0.7]], dtype=np.float32))
+    assert variants["id"].to_list() == ["rs2"]
+
+
+def test_dense_vcf_dosage_missing_policy_raise_rejects_missing_ds(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+
+    with pytest.raises(genoio.MissingDataError, match="missing genotype"):
+        dataset.read(dosage="dosage", missing="raise")
+
+
+def test_dense_vcf_dosage_requires_ds_field_without_gt_fallback(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_gt_only_vcf(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="FORMAT/DS"):
+        dataset.read(dosage="dosage")
+
+
+def test_dense_vcf_dosage_blocks_match_full_dosage_read(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+
+    full = dataset.read(dosage="dosage", missing="nan")
+    blocks = list(dataset.blocks(1, dosage="dosage", missing="nan"))
+
+    np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+
+
+def test_vcf_dosage_rejects_genotype_stat_filters_until_semantics_are_defined(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="genotype-stat filters"):
+        dataset.read(dosage="dosage", variants=genoio.maf(min=0.01))
 
 
 def test_return_samples_and_variants_tuple_order_is_matrix_samples_variants(tmp_path):

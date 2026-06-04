@@ -31,6 +31,7 @@ from ._filters import FilterExpr, id_in
 from ._source import ResolvedSource, resolve_bfile, resolve_pfile, resolve_vcf
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
+_SUPPORTED_DOSAGE_SOURCES = {"hardcall", "dosage"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
 
 
@@ -45,6 +46,7 @@ _DEFAULT_MISSING = _DefaultMissing()
 @dataclass(frozen=True)
 class _ReadOptions:
     kind: str
+    dosage: str
     sparse: bool | str
     variants: Any
     samples: list[str] | tuple[str, ...] | set[str] | None
@@ -85,6 +87,7 @@ class Dataset:
         self,
         *,
         kind: str = "geno",
+        dosage: str = "hardcall",
         sparse: bool | str = False,
         variants: Any = None,
         samples: list[str] | tuple[str, ...] | set[str] | None = None,
@@ -102,8 +105,13 @@ class Dataset:
 
         **Arguments:**
 
-        - `kind`: `"geno"` for diploid genotype dosage or `"haplo"` for
-          phased haplotype rows. Haplotype reads currently require phased VCF.
+        - `kind`: `"geno"` for diploid sample-by-variant genotype values or
+          `"haplo"` for phased haplotype rows. Haplotype reads currently require
+          phased VCF.
+        - `dosage`: `"hardcall"` reads allele counts from hard calls.
+          `"dosage"` reads dosage-backed genotype values when the source
+          supports them. This release supports dense VCF `FORMAT/DS` dosage
+          reads. Haplotype and sparse reads only support `"hardcall"`.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant
@@ -132,6 +140,7 @@ class Dataset:
         """
         read_options = _ReadOptions(
             kind=kind,
+            dosage=dosage,
             sparse=sparse,
             variants=variants,
             samples=samples,
@@ -142,6 +151,7 @@ class Dataset:
         )
         validated_options = _validate_read_options(read_options)
         self._validate_source_supports_kind(read_options.kind)
+        self._validate_source_supports_dosage(read_options.kind, read_options.dosage)
 
         return self._read_validated(
             read_options=read_options,
@@ -172,7 +182,7 @@ class Dataset:
         Columns are `chrom`, `pos`, `id`, `a0`, and `a1`. Rows are ordered as
         they appear in the source; variant frames returned by matrix reads are
         ordered to match matrix columns after filtering. The `a1` allele is the
-        allele counted by returned genotype dosage values.
+        allele counted by returned genotype values.
 
         The `stats` argument is reserved for future metadata-stat controls.
         Passing it currently raises `genoio.InvalidOptionError`.
@@ -211,6 +221,7 @@ class Dataset:
         normalized_options = _read_options_with_defaults(read_options)
         validated_options = _validate_read_options(normalized_options)
         self._validate_source_supports_kind(normalized_options.kind)
+        self._validate_source_supports_dosage(normalized_options.kind, normalized_options.dosage)
         return self._block_iterator(size, normalized_options, validated_options)
 
     def _block_iterator(
@@ -249,6 +260,7 @@ class Dataset:
             "samples": None if read_options.samples is None else list(read_options.samples),
             "variants": validated_options.variant_filter_ir,
             "variant_window": variant_window,
+            "dosage": read_options.dosage,
             "return_samples": read_options.return_samples,
             "return_variants": read_options.return_variants,
             "matrix_only": (
@@ -347,6 +359,15 @@ class Dataset:
         if not capabilities["supports_haplo"]:
             raise _unsupported_haplotype_source(self.source.format.value)
 
+    def _validate_source_supports_dosage(self, kind: str, dosage: str) -> None:
+        if dosage == "hardcall":
+            return
+        if kind == "haplo":
+            raise UnsupportedRepresentation('kind="haplo" does not support dosage-backed reads')
+        if self.source.format.value == "vcf":
+            return
+        raise UnsupportedRepresentation(f"{self.source.format.value} does not support dosage-backed genotype reads")
+
 
 def vcf(path: str | Path) -> Dataset:
     r"""Resolve a VCF/BCF file and return a reusable dataset.
@@ -402,10 +423,12 @@ def pfile(path: str | Path) -> Dataset:
 
 def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:
     _validate_kind(options.kind)
+    _validate_dosage_source(options.dosage)
     sparse_format = _validate_sparse(options.sparse)
     normalized_missing = _normalize_missing(options.missing, sparse_format=sparse_format)
     variant_filter_ir = _variant_filter_ir(options.variants)
     normalized_dtype = _normalize_dtype(options.dtype)
+    _validate_dosage_compatibility(options.dosage, sparse_format, variant_filter_ir)
     _validate_sparse_missing_compatibility(sparse_format, normalized_missing)
     _validate_missing_dtype_compatibility(normalized_missing, normalized_dtype)
     _validate_sample_filter(options.samples)
@@ -433,6 +456,37 @@ def _validate_variant_stats(stats: Any) -> None:
 def _validate_kind(kind: str) -> None:
     if not isinstance(kind, str) or kind not in _SUPPORTED_KINDS:
         raise UnsupportedRepresentation(f"unsupported genotype kind: {kind}")
+
+
+def _validate_dosage_source(dosage: str) -> None:
+    if not isinstance(dosage, str) or dosage not in _SUPPORTED_DOSAGE_SOURCES:
+        raise InvalidOptionError(f"unsupported dosage source: {dosage!r}")
+
+
+def _validate_dosage_compatibility(
+    dosage: str,
+    sparse_format: str | None,
+    variant_filter_ir: dict[str, Any] | None,
+) -> None:
+    if dosage == "hardcall":
+        return
+    if sparse_format is not None:
+        raise UnsupportedRepresentation("sparse dosage-backed genotype reads are not implemented")
+    if variant_filter_ir is not None and _filter_ir_has_genotype_stat_predicate(variant_filter_ir):
+        raise UnsupportedRepresentation("dosage-backed genotype reads do not support genotype-stat filters yet")
+
+
+def _filter_ir_has_genotype_stat_predicate(expr: dict[str, Any]) -> bool:
+    op = expr.get("op")
+    if op == "predicate":
+        return expr.get("name") in {"maf", "mac", "missing_rate", "polymorphic"}
+    if op in {"and", "or"}:
+        return _filter_ir_has_genotype_stat_predicate(expr["left"]) or _filter_ir_has_genotype_stat_predicate(
+            expr["right"]
+        )
+    if op == "not":
+        return _filter_ir_has_genotype_stat_predicate(expr["expr"])
+    return False
 
 
 def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:
@@ -516,6 +570,8 @@ def _public_read_error(error: ValueError) -> Exception:
         return SampleFilterError(message)
     if "sparse missing values" in message:
         return MissingDataError(message)
+    if "FORMAT/DS" in message:
+        return UnsupportedRepresentation(message)
     return InvalidSourceError(message)
 
 
@@ -541,6 +597,7 @@ def _validate_block_size(size: int) -> None:
 def _read_options_with_defaults(read_options: dict[str, Any]) -> _ReadOptions:
     defaults = {
         "kind": "geno",
+        "dosage": "hardcall",
         "sparse": False,
         "variants": None,
         "samples": None,
