@@ -3,7 +3,7 @@
 // existing reader module pattern in this crate.
 
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -26,11 +26,8 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
 
     let samples = if header.flags.has_sample_identifiers {
         read_sample_identifier_block(&mut reader, bgen, header.sample_count)?
-    } else if sample.is_some() {
-        return Err(MetadataError::parse(
-            bgen,
-            "bgen companion sample parsing is not implemented",
-        ));
+    } else if let Some(sample) = sample {
+        read_companion_sample_file(sample, header.sample_count)?
     } else {
         return Err(MetadataError::parse(
             bgen,
@@ -209,19 +206,72 @@ fn read_sample_identifier_block(
                 format!("bgen duplicate sample identifier: {sample_id}"),
             ));
         }
-        records.push(SampleRecord {
-            fid: None,
-            iid: sample_id,
-            father: None,
-            mother: None,
-            sex: None,
-            phenotype: None,
-            source_sample_index: None,
-            haplotype_index: None,
-        });
+        records.push(sample_record(sample_id));
     }
 
     Ok(records)
+}
+
+fn read_companion_sample_file(
+    path: &Path,
+    expected_sample_count: u32,
+) -> Result<Vec<SampleRecord>> {
+    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let capacity = usize::try_from(expected_sample_count)
+        .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+    let mut records = Vec::with_capacity(capacity);
+    let mut seen = HashSet::with_capacity(capacity);
+
+    for line in contents.lines().skip(2) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let sample_id = line.split_whitespace().next().ok_or_else(|| {
+            MetadataError::parse(path, "bgen companion sample identifier is empty")
+        })?;
+        if sample_id.is_empty() {
+            return Err(MetadataError::parse(
+                path,
+                "bgen companion sample identifier is empty",
+            ));
+        }
+        if !seen.insert(sample_id.to_owned()) {
+            return Err(MetadataError::parse(
+                path,
+                format!("bgen duplicate sample identifier: {sample_id}"),
+            ));
+        }
+        records.push(sample_record(sample_id.to_owned()));
+    }
+
+    if records.len() != capacity {
+        return Err(MetadataError::parse(
+            path,
+            format!(
+                "bgen companion sample count does not match header sample count: expected {capacity}, found {}",
+                records.len()
+            ),
+        ));
+    }
+
+    Ok(records)
+}
+
+fn sample_record(iid: String) -> SampleRecord {
+    SampleRecord {
+        fid: None,
+        iid,
+        father: None,
+        mother: None,
+        sex: None,
+        phenotype: None,
+        source_sample_index: None,
+        haplotype_index: None,
+    }
 }
 
 fn read_layout2_variant_metadata(

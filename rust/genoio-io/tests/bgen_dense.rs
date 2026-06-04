@@ -44,11 +44,20 @@ fn write_sample_identifier_block(writer: &mut impl Write, sample_ids: &[&str]) -
         .iter()
         .map(|sample_id| 2 + sample_id.len())
         .sum::<usize>();
+    let block_len = u32::try_from(block_len).expect("sample block length should fit u32");
 
-    writer.write_all(&(block_len as u32).to_le_bytes())?;
-    writer.write_all(&(sample_ids.len() as u32).to_le_bytes())?;
+    writer.write_all(&block_len.to_le_bytes())?;
+    writer.write_all(
+        &u32::try_from(sample_ids.len())
+            .expect("sample count should fit u32")
+            .to_le_bytes(),
+    )?;
     for sample_id in sample_ids {
-        writer.write_all(&(sample_id.len() as u16).to_le_bytes())?;
+        writer.write_all(
+            &u16::try_from(sample_id.len())
+                .expect("sample id length should fit u16")
+                .to_le_bytes(),
+        )?;
         writer.write_all(sample_id.as_bytes())?;
     }
     Ok(())
@@ -62,16 +71,36 @@ fn write_layout2_variant_identifying_data(
     pos: u32,
     alleles: &[&str],
 ) -> io::Result<()> {
-    writer.write_all(&(id.len() as u16).to_le_bytes())?;
+    writer.write_all(
+        &u16::try_from(id.len())
+            .expect("variant id length should fit u16")
+            .to_le_bytes(),
+    )?;
     writer.write_all(id.as_bytes())?;
-    writer.write_all(&(rsid.len() as u16).to_le_bytes())?;
+    writer.write_all(
+        &u16::try_from(rsid.len())
+            .expect("variant rsid length should fit u16")
+            .to_le_bytes(),
+    )?;
     writer.write_all(rsid.as_bytes())?;
-    writer.write_all(&(chrom.len() as u16).to_le_bytes())?;
+    writer.write_all(
+        &u16::try_from(chrom.len())
+            .expect("variant chromosome length should fit u16")
+            .to_le_bytes(),
+    )?;
     writer.write_all(chrom.as_bytes())?;
     writer.write_all(&pos.to_le_bytes())?;
-    writer.write_all(&(alleles.len() as u16).to_le_bytes())?;
+    writer.write_all(
+        &u16::try_from(alleles.len())
+            .expect("allele count should fit u16")
+            .to_le_bytes(),
+    )?;
     for allele in alleles {
-        writer.write_all(&(allele.len() as u32).to_le_bytes())?;
+        writer.write_all(
+            &u32::try_from(allele.len())
+                .expect("allele length should fit u32")
+                .to_le_bytes(),
+        )?;
         writer.write_all(allele.as_bytes())?;
     }
     Ok(())
@@ -84,7 +113,7 @@ fn write_empty_layout2_probability_block(
 ) -> io::Result<()> {
     writer.write_all(&10_u32.to_le_bytes())?;
     writer.write_all(&n_samples.to_le_bytes())?;
-    writer.write_all(&(allele_count as u16).to_le_bytes())?;
+    writer.write_all(&allele_count.to_le_bytes())?;
     writer.write_all(&2_u8.to_le_bytes())?;
     writer.write_all(&2_u8.to_le_bytes())?;
     writer.write_all(&0_u8.to_le_bytes())?;
@@ -93,11 +122,21 @@ fn write_empty_layout2_probability_block(
 }
 
 fn write_two_sample_two_variant_bgen(path: &Path) {
+    write_two_sample_two_variant_bgen_with_sample_ids(path, true);
+}
+
+fn write_two_sample_two_variant_bgen_without_sample_ids(path: &Path) {
+    write_two_sample_two_variant_bgen_with_sample_ids(path, false);
+}
+
+fn write_two_sample_two_variant_bgen_with_sample_ids(path: &Path, has_sample_ids: bool) {
     let mut bgen = Vec::new();
-    write_bgen_header(&mut bgen, 2, 2, FLAG_LAYOUT2, true).expect("header should write");
-    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
-        .expect("sample block should write");
-    let variant_offset = (bgen.len() - 4) as u32;
+    write_bgen_header(&mut bgen, 2, 2, FLAG_LAYOUT2, has_sample_ids).expect("header should write");
+    if has_sample_ids {
+        write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
+            .expect("sample block should write");
+    }
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
     bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
 
     write_layout2_variant_identifying_data(&mut bgen, "var1", "rs1", "1", 10, &["A", "G"])
@@ -110,6 +149,23 @@ fn write_two_sample_two_variant_bgen(path: &Path) {
         .expect("second probability block should write");
 
     fs::write(path, bgen).expect("bgen fixture should be written");
+}
+
+fn write_sample_file(path: &Path, rows: &[&str]) {
+    let mut contents = String::from("ID_1 ID_2 missing\n0 0 0\n");
+    for row in rows {
+        contents.push_str(row);
+        contents.push('\n');
+    }
+    fs::write(path, contents).expect("sample fixture should be written");
+}
+
+fn assert_metadata_error_contains(error: genoio_core::MetadataError, expected: &str) {
+    let message = error.to_string();
+    assert!(
+        message.contains(expected),
+        "expected error containing {expected:?}, got {message:?}"
+    );
 }
 
 #[test]
@@ -147,4 +203,66 @@ fn bgen_metadata_reads_embedded_sample_ids_and_variant_rows() {
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
     assert!(!metadata.capabilities.phased);
+}
+
+#[test]
+fn bgen_metadata_reads_companion_sample_ids_when_not_embedded() {
+    let dir = unique_dir("bgen-companion-sample");
+    let bgen = dir.join("tiny.bgen");
+    let sample = dir.join("tiny.sample");
+    write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
+    write_sample_file(&sample, &["sample_a sample_a 0", "sample_b sample_b 0"]);
+
+    let metadata =
+        genoio_io::read_bgen_metadata(&bgen, Some(&sample)).expect("metadata should parse");
+
+    assert_eq!(
+        metadata
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample_a", "sample_b"]
+    );
+    assert_eq!(metadata.variants.len(), 2);
+}
+
+#[test]
+fn bgen_metadata_rejects_companion_sample_count_mismatch() {
+    let dir = unique_dir("bgen-companion-count-mismatch");
+    let bgen = dir.join("tiny.bgen");
+    let sample = dir.join("tiny.sample");
+    write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
+    write_sample_file(&sample, &["sample_a sample_a 0"]);
+
+    let error = genoio_io::read_bgen_metadata(&bgen, Some(&sample))
+        .expect_err("sample count mismatch should fail");
+
+    assert_metadata_error_contains(error, "sample count");
+}
+
+#[test]
+fn bgen_metadata_rejects_duplicate_companion_sample_ids() {
+    let dir = unique_dir("bgen-companion-duplicates");
+    let bgen = dir.join("tiny.bgen");
+    let sample = dir.join("tiny.sample");
+    write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
+    write_sample_file(&sample, &["sample_a sample_a 0", "sample_a sample_a 0"]);
+
+    let error = genoio_io::read_bgen_metadata(&bgen, Some(&sample))
+        .expect_err("duplicate sample ids should fail");
+
+    assert_metadata_error_contains(error, "duplicate sample identifier");
+}
+
+#[test]
+fn bgen_metadata_rejects_missing_companion_path_when_sample_ids_not_embedded() {
+    let dir = unique_dir("bgen-missing-companion");
+    let bgen = dir.join("tiny.bgen");
+    write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
+
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("missing sample IDs should fail");
+
+    assert_metadata_error_contains(error, "companion sample path");
 }
