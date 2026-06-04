@@ -97,23 +97,28 @@ fn read_dense(
             )
         }
         "plink2" => {
-            if read_options.dosage != DosageSource::Hardcall {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "plink2 dosage-backed genotype reads are not implemented",
-                ));
-            }
             let pgen = member_path(members, "pgen")?;
             let pvar = member_path(members, "pvar")?;
             let psam = member_path(members, "psam")?;
-            genoio_io::read_plink2_dense_windowed(
-                &pgen,
-                &pvar,
-                &psam,
-                read_options.requested_samples.as_deref(),
-                read_options.variant_filter.as_ref(),
-                read_options.variant_window,
-                read_options.matrix_only,
-            )
+            match read_options.dosage {
+                DosageSource::Hardcall => genoio_io::read_plink2_dense_windowed(
+                    &pgen,
+                    &pvar,
+                    &psam,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                    read_options.matrix_only,
+                ),
+                DosageSource::Dosage => genoio_io::read_plink2_dosage_dense_windowed(
+                    &pgen,
+                    &pvar,
+                    &psam,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                ),
+            }
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(

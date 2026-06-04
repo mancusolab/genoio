@@ -16,9 +16,9 @@ By default, `kind="geno"` returns diploid hardcall allele counts: `0`, `1`, or
 `2` copies of `a1`, with missing calls handled by the selected missing-data
 policy. The `dosage` option controls this genotype value source:
 `dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
-dosage-backed values. This release supports dense VCF `FORMAT/DS` dosage reads.
-Sparse dosage, haplotype dosage, PLINK1 dosage, and PLINK2 dosage are not
-implemented yet and raise `genoio.UnsupportedRepresentation`.
+dosage-backed values. This release supports dense VCF `FORMAT/DS` and PLINK2
+unphased biallelic dosage reads. Sparse dosage, haplotype dosage, and PLINK1
+dosage are not implemented yet and raise `genoio.UnsupportedRepresentation`.
 
 ## Metadata frames
 

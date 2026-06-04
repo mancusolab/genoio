@@ -18,8 +18,8 @@ pub use plink1::{
     read_plink1_sparse_windowed,
 };
 pub use plink2::{
-    read_plink2_dense, read_plink2_dense_windowed, read_plink2_metadata, read_plink2_sparse,
-    read_plink2_sparse_windowed,
+    read_plink2_dense, read_plink2_dense_windowed, read_plink2_dosage_dense_windowed,
+    read_plink2_metadata, read_plink2_sparse, read_plink2_sparse_windowed,
 };
 pub use vcf::{
     read_vcf_dense, read_vcf_dense_windowed, read_vcf_dosage_dense_windowed,

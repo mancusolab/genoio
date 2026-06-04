@@ -79,6 +79,11 @@ fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -
     bytes
 }
 
+fn scaled_dosage(value: f32) -> [u8; 2] {
+    let raw = (value / 2.0 * 32768.0).round() as u16;
+    raw.to_le_bytes()
+}
+
 fn write_bad_variable_width_block_offset_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let dir = unique_dir(name);
     let mut pgen_bytes = variable_width_pgen(&[0], &[&[0x00]], 4);
@@ -210,7 +215,7 @@ fn plink2_dense_filters_samples_in_source_order() {
 fn plink2_dense_rejects_unsupported_pgen_modes() {
     let dir = unique_dir("plink2-dense-unsupported-mode");
     let mut pgen_bytes = fixed_width_pgen(&[0x00], 1, 1);
-    pgen_bytes[2] = 0x03;
+    pgen_bytes[2] = 0x05;
     let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
 
     let error = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
@@ -269,6 +274,49 @@ S4
             false, false, false, false, false, false, false, false, true, false, false, false,
             false, false, false, true, false, false, false, false,
         ]
+    );
+}
+
+#[test]
+fn plink2_dosage_dense_decodes_variable_width_full_dosage_records() {
+    let dir = unique_dir("plink2-dosage-variable-width");
+    let mut record_1 = vec![0x24];
+    record_1.extend(scaled_dosage(0.2));
+    record_1.extend(scaled_dosage(1.4));
+    record_1.extend(scaled_dosage(1.8));
+    let mut record_2 = vec![0x0c];
+    record_2.extend(scaled_dosage(0.0));
+    record_2.extend(u16::MAX.to_le_bytes());
+    record_2.extend(scaled_dosage(0.7));
+    let mut record_3 = vec![0x06];
+    record_3.extend(scaled_dosage(2.0));
+    record_3.extend(scaled_dosage(1.0));
+    record_3.extend(scaled_dosage(0.0));
+    let pgen_bytes =
+        variable_width_pgen(&[0x40, 0x40, 0x40], &[&record_1, &record_2, &record_3], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
+
+    let dense = genoio_io::read_plink2_dosage_dense_windowed(&pgen, &pvar, &psam, None, None, None)
+        .expect("variable-width dosage pgen should decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 3);
+    let scale = 2.0 / 32768.0;
+    let expected = vec![
+        f32::from(u16::from_le_bytes(scaled_dosage(0.2))) * scale,
+        0.0,
+        2.0,
+        f32::from(u16::from_le_bytes(scaled_dosage(1.4))) * scale,
+        0.0,
+        1.0,
+        f32::from(u16::from_le_bytes(scaled_dosage(1.8))) * scale,
+        f32::from(u16::from_le_bytes(scaled_dosage(0.7))) * scale,
+        0.0,
+    ];
+    assert_eq!(dense.values, expected);
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, false, true, false, false, false, false]
     );
 }
 

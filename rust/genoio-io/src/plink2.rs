@@ -19,6 +19,7 @@ use crate::hardcall::{HardcallBatch as PackedVariantBatch, PackedHardcalls as Pa
 
 const PGEN_MAGIC: [u8; 2] = [0x6c, 0x1b];
 const PGEN_MODE_FIXED_WIDTH_HARDCALLS: u8 = 0x02;
+const PGEN_MODE_FIXED_WIDTH_DOSAGE: u8 = 0x03;
 const PGEN_MODE_VARIABLE_WIDTH: u8 = 0x10;
 const PGEN_HEADER_LEN: u64 = 12;
 const PGEN_VARIANT_BLOCK_SIZE: usize = 65_536;
@@ -43,6 +44,43 @@ struct PgenDecoderState {
     packed: PackedGenotypes,
     values: Vec<f32>,
     missing: Vec<bool>,
+}
+
+struct DosageOverlayTarget<'a> {
+    source_indices: &'a [usize],
+    values: &'a mut [f32],
+    missing: &'a mut [bool],
+}
+
+struct SelectedSampleCursor<'a> {
+    source_indices: &'a [usize],
+    selected_index: usize,
+}
+
+impl<'a> SelectedSampleCursor<'a> {
+    fn new(source_indices: &'a [usize]) -> Self {
+        Self {
+            source_indices,
+            selected_index: 0,
+        }
+    }
+
+    fn selected_index_for(&mut self, source_index: usize) -> Option<usize> {
+        // source_indices are stored in PGEN source order, so a forward-only
+        // cursor avoids a search for every stored dosage.
+        while self
+            .source_indices
+            .get(self.selected_index)
+            .is_some_and(|selected_source_index| *selected_source_index < source_index)
+        {
+            self.selected_index += 1;
+        }
+        self.source_indices
+            .get(self.selected_index)
+            .copied()
+            .filter(|selected_source_index| *selected_source_index == source_index)
+            .map(|_| self.selected_index)
+    }
 }
 
 impl PgenDecoderState {
@@ -104,6 +142,7 @@ fn flush_packed_variant_batch(
 #[derive(Debug, Clone)]
 enum PgenLayout {
     FixedWidth,
+    FixedWidthDosage,
     VariableWidth,
 }
 
@@ -280,6 +319,127 @@ pub fn read_plink2_dense_windowed(
             &mut decoder_state.values,
             &mut decoder_state.missing,
         );
+        variants.push(variant);
+        variant_major_values.extend_from_slice(&decoder_state.values);
+        variant_major_missing.extend_from_slice(&decoder_state.missing);
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            stopped_after_window = true;
+            break;
+        }
+    }
+    if !stopped_after_window {
+        pvar_reader.validate_count(header.variant_ct)?;
+    }
+
+    let n_samples = selection.samples.len();
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+/// Read retained PLINK2 unphased biallelic dosages as a dense matrix.
+pub fn read_plink2_dosage_dense_windowed(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<DenseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
+        return Err(MetadataError::parse(
+            pgen,
+            "dosage-backed genotype reads do not support genotype-stat filters yet",
+        ));
+    }
+
+    let header = read_supported_pgen_header(pgen)?;
+    let all_samples = parse_psam(psam)?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let mut diagnostics = selection.diagnostics;
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+            path: pvar.to_path_buf(),
+            source,
+        })?;
+        diagnostics.retained_variants = 0;
+        return DenseGenotypeMatrix::new(
+            selection.samples.len(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            selection.samples,
+            Vec::new(),
+            diagnostics,
+        );
+    }
+
+    let mut pvar_reader = PvarRecordReader::new(pvar)?;
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
+    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
+        window.len.min(header.variant_ct)
+    });
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut retained_index = 0_usize;
+    let mut stopped_after_window = false;
+
+    while let Some((variant_index, variant)) = pvar_reader.next_record()? {
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        stopped_after_window = true;
+                        break;
+                    }
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {
+                return Err(MetadataError::parse(
+                    pgen,
+                    "dosage-backed genotype reads do not support genotype-stat filters yet",
+                ));
+            }
+        }
+
+        read_plink2_variant_dosage(
+            pgen,
+            &mut file,
+            &header,
+            variant_index,
+            &selection.source_indices,
+            &mut decoder_state,
+        )?;
         variants.push(variant);
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
@@ -516,7 +676,7 @@ fn read_plink2_dense_matrix_only_source_window(
     // Unfiltered source windows know their final retained width up front, so
     // construct the public sample-major buffers directly.
     match header.layout {
-        PgenLayout::FixedWidth => {
+        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
             if n_variants > 0 {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
             }
@@ -622,7 +782,7 @@ fn read_plink2_dense_source_window(
     // This metadata-bearing source-window path uses the same packed batch
     // expansion as matrix-only windows while preserving metadata alignment.
     match header.layout {
-        PgenLayout::FixedWidth => {
+        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
             if let Some((first_variant_index, _)) = window_variants.first() {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, *first_variant_index)?;
             }
@@ -739,7 +899,7 @@ fn read_plink2_sparse_source_window(
     let mut variants = Vec::new();
 
     match header.layout {
-        PgenLayout::FixedWidth => {
+        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
             // Fixed-width records can be decoded by direct source index.
             for (variant_index, mut variant) in window_variants {
                 read_plink2_variant_values(
@@ -841,6 +1001,28 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
                 record_offsets: Vec::new(),
             })
         }
+        PGEN_MODE_FIXED_WIDTH_DOSAGE => {
+            if header[11] != 0 {
+                return Err(MetadataError::parse(
+                    path,
+                    "unsupported pgen header flags; only fixed-width biallelic dosage without header extensions is supported",
+                ));
+            }
+            validate_fixed_width_pgen_payload_len(
+                path,
+                &file,
+                variant_ct,
+                fixed_width_dosage_record_len(sample_ct),
+            )?;
+            Ok(PgenHeader {
+                layout: PgenLayout::FixedWidthDosage,
+                variant_ct,
+                sample_ct,
+                bytes_per_variant,
+                record_types: Vec::new(),
+                record_offsets: Vec::new(),
+            })
+        }
         PGEN_MODE_VARIABLE_WIDTH => {
             let (record_types, record_offsets) =
                 read_variable_width_header_body(path, &mut file, variant_ct, header[11])?;
@@ -903,6 +1085,28 @@ fn read_supported_pgen_header_prefix(
                 record_offsets: Vec::new(),
             })
         }
+        PGEN_MODE_FIXED_WIDTH_DOSAGE => {
+            if header[11] != 0 {
+                return Err(MetadataError::parse(
+                    path,
+                    "unsupported pgen header flags; only fixed-width biallelic dosage without header extensions is supported",
+                ));
+            }
+            validate_fixed_width_pgen_payload_len(
+                path,
+                &file,
+                variant_ct,
+                fixed_width_dosage_record_len(sample_ct),
+            )?;
+            Ok(PgenHeader {
+                layout: PgenLayout::FixedWidthDosage,
+                variant_ct,
+                sample_ct,
+                bytes_per_variant,
+                record_types: Vec::new(),
+                record_offsets: Vec::new(),
+            })
+        }
         PGEN_MODE_VARIABLE_WIDTH => {
             let (record_types, record_offsets) = read_variable_width_header_body_prefix(
                 path,
@@ -923,7 +1127,7 @@ fn read_supported_pgen_header_prefix(
         mode => Err(MetadataError::parse(
             path,
             format!(
-                "unsupported pgen mode 0x{mode:02x}; only fixed-width and variable-width biallelic hardcalls are supported"
+                "unsupported pgen mode 0x{mode:02x}; only fixed-width and variable-width biallelic hardcalls or unphased dosages are supported"
             ),
         )),
     }
@@ -1295,8 +1499,12 @@ fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Resu
             "unsupported pgen multiallelic hard-call patch set",
         ));
     }
-    if (record_type >> 5) & 0x03 != 0 {
-        return Err(MetadataError::parse(path, "unsupported pgen dosage track"));
+    let dosage_bits = (record_type >> 5) & 0x03;
+    if dosage_bits != 0 && record_type & 0x10 != 0 {
+        return Err(MetadataError::parse(
+            path,
+            "unsupported pgen hardcall-phase track with dosage",
+        ));
     }
     if record_type & 0x80 != 0 {
         return Err(MetadataError::parse(
@@ -1313,14 +1521,26 @@ fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Resu
     }
 }
 
+fn fixed_width_dosage_record_len(sample_ct: usize) -> usize {
+    sample_ct.div_ceil(4) + sample_ct * 2
+}
+
+fn fixed_width_record_len(header: &PgenHeader) -> usize {
+    match header.layout {
+        PgenLayout::FixedWidth => header.bytes_per_variant,
+        PgenLayout::FixedWidthDosage => fixed_width_dosage_record_len(header.sample_ct),
+        PgenLayout::VariableWidth => header.bytes_per_variant,
+    }
+}
+
 fn validate_fixed_width_pgen_payload_len(
     path: &Path,
     file: &File,
     variant_ct: usize,
-    bytes_per_variant: usize,
+    bytes_per_record: usize,
 ) -> Result<()> {
     let payload_len = variant_ct
-        .checked_mul(bytes_per_variant)
+        .checked_mul(bytes_per_record)
         .ok_or_else(|| MetadataError::parse(path, "pgen payload length is out of range"))?;
     let expected_len = PGEN_HEADER_LEN
         .checked_add(
@@ -1406,6 +1626,38 @@ fn read_plink2_variant_values(
     Ok(())
 }
 
+fn read_plink2_variant_dosage(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    match header.layout {
+        PgenLayout::FixedWidthDosage => read_fixed_width_dosage_variant_values(
+            path,
+            file,
+            header,
+            variant_index,
+            source_indices,
+            decoder_state,
+        ),
+        PgenLayout::VariableWidth => read_variable_width_dosage_variant_values(
+            path,
+            file,
+            header,
+            variant_index,
+            source_indices,
+            decoder_state,
+        ),
+        PgenLayout::FixedWidth => Err(MetadataError::parse(
+            path,
+            "pgen does not contain dosage values",
+        )),
+    }
+}
+
 fn read_plink2_variant_packed(
     path: &Path,
     file: &mut File,
@@ -1414,7 +1666,7 @@ fn read_plink2_variant_packed(
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
     match header.layout {
-        PgenLayout::FixedWidth => {
+        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
             read_fixed_width_variant_packed(path, file, header, variant_index, decoder_state)
         }
         PgenLayout::VariableWidth => {
@@ -1441,7 +1693,7 @@ fn seek_fixed_width_variant_record(
     variant_index: usize,
 ) -> Result<()> {
     let payload_offset = variant_index
-        .checked_mul(header.bytes_per_variant)
+        .checked_mul(fixed_width_record_len(header))
         .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
     let offset = PGEN_HEADER_LEN
         .checked_add(
@@ -1463,16 +1715,19 @@ fn read_fixed_width_variant_packed_sequential(
     header: &PgenHeader,
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
-    decoder_state.record.resize(header.bytes_per_variant, 0);
+    decoder_state
+        .record
+        .resize(fixed_width_record_len(header), 0);
     file.read_exact(&mut decoder_state.record)
         .map_err(|source| MetadataError::Io {
             path: path.to_path_buf(),
             source,
         })?;
 
-    decoder_state
-        .packed
-        .load_pgen_payload(&decoder_state.record, header.sample_ct);
+    decoder_state.packed.load_pgen_payload(
+        &decoder_state.record[..header.bytes_per_variant],
+        header.sample_ct,
+    );
     Ok(())
 }
 
@@ -1556,6 +1811,456 @@ fn read_variable_width_variant_packed(
         decoder_state.has_previous_non_ld = true;
     }
     Ok(())
+}
+
+fn read_fixed_width_dosage_variant_values(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    let record_len = fixed_width_dosage_record_len(header.sample_ct);
+    let payload_offset = variant_index
+        .checked_mul(record_len)
+        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+    let offset = PGEN_HEADER_LEN
+        .checked_add(
+            u64::try_from(payload_offset)
+                .map_err(|_| MetadataError::parse(path, "pgen variant offset is out of range"))?,
+        )
+        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    decoder_state.record.resize(record_len, 0);
+    file.read_exact(&mut decoder_state.record)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    decoder_state.packed.load_pgen_payload(
+        &decoder_state.record[..header.bytes_per_variant],
+        header.sample_ct,
+    );
+    decoder_state.packed.expand_selected(
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing,
+    );
+    overlay_fixed_width_dosages(
+        path,
+        &decoder_state.record[header.bytes_per_variant..],
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing,
+    )
+}
+
+fn read_variable_width_dosage_variant_values(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    let start = header.record_offsets[variant_index];
+    let end = header.record_offsets[variant_index + 1];
+    let record_len = usize::try_from(
+        end.checked_sub(start)
+            .ok_or_else(|| MetadataError::parse(path, "pgen record length is out of range"))?,
+    )
+    .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    decoder_state.record.resize(record_len, 0);
+    file.read_exact(&mut decoder_state.record)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let record = decoder_state.record.as_slice();
+    let record_type = header.record_types[variant_index];
+    let dosage_bits = (record_type >> 5) & 0x03;
+    if dosage_bits == 0 {
+        return Err(MetadataError::parse(
+            path,
+            "pgen record does not contain dosage values",
+        ));
+    }
+    let cursor = decode_variable_width_main_track(
+        path,
+        record,
+        record_type,
+        header.sample_ct,
+        &decoder_state.previous_non_ld_packed,
+        decoder_state.has_previous_non_ld,
+        &mut decoder_state.packed,
+    )?;
+    if !matches!(record_type & 0x07, 2 | 3) {
+        decoder_state
+            .previous_non_ld_packed
+            .copy_from(&decoder_state.packed);
+        decoder_state.has_previous_non_ld = true;
+    }
+
+    decoder_state.packed.expand_selected(
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing,
+    );
+    overlay_variable_width_dosages(
+        path,
+        record,
+        cursor,
+        dosage_bits,
+        header.sample_ct,
+        DosageOverlayTarget {
+            source_indices,
+            values: &mut decoder_state.values,
+            missing: &mut decoder_state.missing,
+        },
+    )
+}
+
+fn decode_variable_width_main_track(
+    path: &Path,
+    record: &[u8],
+    record_type: u8,
+    sample_ct: usize,
+    previous_non_ld_packed: &PackedGenotypes,
+    has_previous_non_ld: bool,
+    packed: &mut PackedGenotypes,
+) -> Result<usize> {
+    let compression = record_type & 0x07;
+    match compression {
+        0 => {
+            let bytes_per_variant = sample_ct.div_ceil(4);
+            if record.len() < bytes_per_variant {
+                return Err(MetadataError::parse(
+                    path,
+                    "pgen uncompressed record is shorter than expected",
+                ));
+            }
+            packed.load_pgen_payload(&record[..bytes_per_variant], sample_ct);
+            Ok(bytes_per_variant)
+        }
+        1 => decode_one_bit_record_with_cursor(path, record, sample_ct, packed),
+        2 | 3 => {
+            if !has_previous_non_ld {
+                return Err(MetadataError::parse(
+                    path,
+                    "pgen LD-compressed record appears before any non-LD record",
+                ));
+            }
+            let mut cursor = 0;
+            let entries = decode_difflist(path, record, &mut cursor, sample_ct, true)?;
+            if previous_non_ld_packed.sample_ct() != sample_ct {
+                return Err(MetadataError::parse(
+                    path,
+                    "pgen LD state length does not match sample count",
+                ));
+            }
+            packed.copy_from(previous_non_ld_packed);
+            for (sample_index, category) in entries {
+                packed.set(sample_index, category);
+            }
+            if compression == 3 {
+                packed.invert_0_2();
+            }
+            Ok(cursor)
+        }
+        4 => decode_difflist_record_with_cursor(path, record, sample_ct, 0, packed),
+        6 => decode_difflist_record_with_cursor(path, record, sample_ct, 2, packed),
+        7 => decode_difflist_record_with_cursor(path, record, sample_ct, 3, packed),
+        other => Err(MetadataError::parse(
+            path,
+            format!("unsupported pgen main-track compression type {other}"),
+        )),
+    }
+}
+
+fn decode_one_bit_record_with_cursor(
+    path: &Path,
+    record: &[u8],
+    sample_ct: usize,
+    packed: &mut PackedGenotypes,
+) -> Result<usize> {
+    let common_categories = *record.first().ok_or_else(|| {
+        MetadataError::parse(path, "pgen 1-bit record is missing common-category byte")
+    })?;
+    let (low_category, high_category) = match common_categories {
+        1 => (0, 1),
+        2 => (0, 2),
+        3 => (0, 3),
+        5 => (1, 2),
+        6 => (1, 3),
+        9 => (2, 3),
+        other => {
+            return Err(MetadataError::parse(
+                path,
+                format!("invalid pgen 1-bit common-category byte {other}"),
+            ));
+        }
+    };
+    let bitarray_len = sample_ct.div_ceil(8);
+    if record.len() < 1 + bitarray_len {
+        return Err(MetadataError::parse(
+            path,
+            "pgen 1-bit record is shorter than expected",
+        ));
+    }
+    let bitarray = &record[1..1 + bitarray_len];
+    packed.resize(sample_ct);
+    packed.clear_to(low_category);
+    for sample_index in 0..sample_ct {
+        if bit_is_set(bitarray, sample_index) {
+            packed.set(sample_index, high_category);
+        }
+    }
+    let mut cursor = 1 + bitarray_len;
+    for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
+        packed.set(sample_index, category);
+    }
+    Ok(cursor)
+}
+
+fn decode_difflist_record_with_cursor(
+    path: &Path,
+    record: &[u8],
+    sample_ct: usize,
+    base_category: u8,
+    packed: &mut PackedGenotypes,
+) -> Result<usize> {
+    packed.resize(sample_ct);
+    packed.clear_to(base_category);
+    let mut cursor = 0;
+    for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
+        packed.set(sample_index, category);
+    }
+    Ok(cursor)
+}
+
+fn overlay_variable_width_dosages(
+    path: &Path,
+    record: &[u8],
+    mut cursor: usize,
+    dosage_bits: u8,
+    sample_ct: usize,
+    mut target: DosageOverlayTarget<'_>,
+) -> Result<()> {
+    let mut selected_samples = SelectedSampleCursor::new(target.source_indices);
+    match dosage_bits {
+        1 => overlay_difflist_dosages(
+            path,
+            record,
+            &mut cursor,
+            sample_ct,
+            &mut selected_samples,
+            &mut target,
+        )?,
+        2 => {
+            let dosage_bytes_len = sample_ct.checked_mul(2).ok_or_else(|| {
+                MetadataError::parse(path, "pgen dosage byte count is out of range")
+            })?;
+            ensure_record_bytes(path, record, cursor, dosage_bytes_len)?;
+            for sample_index in 0..sample_ct {
+                let byte_index = cursor + sample_index * 2;
+                let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
+                overlay_selected_pgen_dosage(sample_index, raw, &mut selected_samples, &mut target);
+            }
+        }
+        3 => {
+            let bitarray_len = sample_ct.div_ceil(8);
+            ensure_record_bytes(path, record, cursor, bitarray_len)?;
+            let bitarray = &record[cursor..cursor + bitarray_len];
+            cursor += bitarray_len;
+            let dosage_ct = (0..sample_ct)
+                .filter(|sample_index| bit_is_set(bitarray, *sample_index))
+                .count();
+            let dosage_bytes_len = dosage_ct.checked_mul(2).ok_or_else(|| {
+                MetadataError::parse(path, "pgen dosage byte count is out of range")
+            })?;
+            ensure_record_bytes(path, record, cursor, dosage_bytes_len)?;
+            let mut dosage_index = 0;
+            for sample_index in 0..sample_ct {
+                if bit_is_set(bitarray, sample_index) {
+                    let byte_index = cursor + dosage_index * 2;
+                    let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
+                    overlay_selected_pgen_dosage(
+                        sample_index,
+                        raw,
+                        &mut selected_samples,
+                        &mut target,
+                    );
+                    dosage_index += 1;
+                }
+            }
+        }
+        other => {
+            return Err(MetadataError::parse(
+                path,
+                format!("unsupported pgen dosage track type {other}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn overlay_difflist_dosages(
+    path: &Path,
+    record: &[u8],
+    cursor: &mut usize,
+    sample_ct: usize,
+    selected_samples: &mut SelectedSampleCursor<'_>,
+    target: &mut DosageOverlayTarget<'_>,
+) -> Result<()> {
+    let list_len = read_base128_varint(path, record, cursor)?;
+    if list_len == 0 {
+        return Ok(());
+    }
+    if list_len > sample_ct {
+        return Err(MetadataError::parse(
+            path,
+            "pgen difflist length exceeds sample count",
+        ));
+    }
+
+    let group_ct = list_len.div_ceil(64);
+    let sample_id_width = sample_id_width(sample_ct);
+    let mut first_ids = Vec::with_capacity(group_ct);
+    for _ in 0..group_ct {
+        first_ids.push(read_fixed_width_sample_id(
+            path,
+            record,
+            cursor,
+            sample_id_width,
+        )?);
+    }
+    ensure_record_bytes(path, record, *cursor, group_ct.saturating_sub(1))?;
+    *cursor += group_ct.saturating_sub(1);
+
+    let deltas_start = *cursor;
+    let mut values_start = deltas_start;
+    walk_difflist_ids(
+        path,
+        record,
+        &mut values_start,
+        sample_ct,
+        list_len,
+        &first_ids,
+        |_, _| {},
+    )?;
+
+    let dosage_bytes_len = list_len
+        .checked_mul(2)
+        .ok_or_else(|| MetadataError::parse(path, "pgen dosage byte count is out of range"))?;
+    ensure_record_bytes(path, record, values_start, dosage_bytes_len)?;
+
+    let mut ids_cursor = deltas_start;
+    // The values follow the encoded sample IDs, so we first walk IDs to find
+    // values_start, then walk them again while overlaying selected samples.
+    walk_difflist_ids(
+        path,
+        record,
+        &mut ids_cursor,
+        sample_ct,
+        list_len,
+        &first_ids,
+        |sample_index, dosage_index| {
+            let byte_index = values_start + dosage_index * 2;
+            let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
+            overlay_selected_pgen_dosage(sample_index, raw, selected_samples, target);
+        },
+    )?;
+    *cursor = values_start + dosage_bytes_len;
+    Ok(())
+}
+
+fn walk_difflist_ids(
+    path: &Path,
+    record: &[u8],
+    cursor: &mut usize,
+    sample_ct: usize,
+    list_len: usize,
+    first_ids: &[usize],
+    mut visit: impl FnMut(usize, usize),
+) -> Result<()> {
+    let mut previous_sample_id = None;
+    let mut entry_index = 0;
+    for (group_index, first_id) in first_ids.iter().copied().enumerate() {
+        let group_len = (list_len - group_index * 64).min(64);
+        let mut sample_id = first_id;
+        validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
+        visit(sample_id, entry_index);
+        entry_index += 1;
+        for _ in 1..group_len {
+            let delta = read_base128_varint(path, record, cursor)?;
+            sample_id = sample_id.checked_add(delta).ok_or_else(|| {
+                MetadataError::parse(path, "pgen difflist sample id is out of range")
+            })?;
+            validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
+            visit(sample_id, entry_index);
+            entry_index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn overlay_selected_pgen_dosage(
+    source_index: usize,
+    raw: u16,
+    selected_samples: &mut SelectedSampleCursor<'_>,
+    target: &mut DosageOverlayTarget<'_>,
+) {
+    if let Some(selected_index) = selected_samples.selected_index_for(source_index) {
+        apply_pgen_dosage(
+            raw,
+            &mut target.values[selected_index],
+            &mut target.missing[selected_index],
+        );
+    }
+}
+
+fn overlay_fixed_width_dosages(
+    path: &Path,
+    dosage_bytes: &[u8],
+    source_indices: &[usize],
+    values: &mut [f32],
+    missing: &mut [bool],
+) -> Result<()> {
+    for (selected_index, source_index) in source_indices.iter().copied().enumerate() {
+        let byte_index = source_index
+            .checked_mul(2)
+            .ok_or_else(|| MetadataError::parse(path, "pgen dosage offset is out of range"))?;
+        ensure_record_bytes(path, dosage_bytes, byte_index, 2)?;
+        let raw = u16::from_le_bytes([dosage_bytes[byte_index], dosage_bytes[byte_index + 1]]);
+        apply_pgen_dosage(
+            raw,
+            &mut values[selected_index],
+            &mut missing[selected_index],
+        );
+    }
+    Ok(())
+}
+
+fn apply_pgen_dosage(raw: u16, value: &mut f32, is_missing: &mut bool) {
+    if raw == u16::MAX {
+        *value = 0.0;
+        *is_missing = true;
+        return;
+    }
+    *value = f32::from(raw) * (2.0 / 32768.0);
+    *is_missing = false;
 }
 
 fn decode_one_bit_record(
@@ -1993,6 +2698,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn variable_width_dosage_overlay_preserves_hardcall_inferred_values() {
+        let path = Path::new("test.pgen");
+        let mut record = vec![0b0000_0110];
+        record.extend(100_u16.to_le_bytes());
+        record.extend(200_u16.to_le_bytes());
+        let mut values = vec![0.0, 2.0, 0.0];
+        let mut missing = vec![false, false, true];
+
+        overlay_variable_width_dosages(
+            path,
+            &record,
+            0,
+            3,
+            4,
+            DosageOverlayTarget {
+                source_indices: &[0, 2, 3],
+                values: &mut values,
+                missing: &mut missing,
+            },
+        )
+        .expect("dosage overlay should decode");
+
+        assert_eq!(values, vec![0.0, f32::from(200_u16) * (2.0 / 32768.0), 0.0]);
+        assert_eq!(missing, vec![false, false, true]);
+    }
+
+    #[test]
+    fn variable_width_dosage_list_overlay_uses_source_order_without_dense_index() {
+        let path = Path::new("test.pgen");
+        let mut record = vec![3, 1, 3, 5];
+        record.extend(100_u16.to_le_bytes());
+        record.extend(200_u16.to_le_bytes());
+        record.extend(300_u16.to_le_bytes());
+        let mut values = vec![0.0, 1.0];
+        let mut missing = vec![false, false];
+
+        overlay_variable_width_dosages(
+            path,
+            &record,
+            0,
+            1,
+            10,
+            DosageOverlayTarget {
+                source_indices: &[4, 9],
+                values: &mut values,
+                missing: &mut missing,
+            },
+        )
+        .expect("dosage-list overlay should decode");
+
+        assert_eq!(
+            values,
+            vec![
+                f32::from(200_u16) * (2.0 / 32768.0),
+                f32::from(300_u16) * (2.0 / 32768.0),
+            ]
+        );
+        assert_eq!(missing, vec![false, false]);
     }
 }
 

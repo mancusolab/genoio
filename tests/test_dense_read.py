@@ -138,6 +138,46 @@ F2 S3 0 0 0 2.0
     return prefix
 
 
+def write_fixed_width_plink2_dosage(tmp_path: Path) -> Path:
+    prefix = tmp_path / "dosage"
+
+    def scaled(value: float) -> bytes:
+        return round(value / 2.0 * 32768.0).to_bytes(2, "little")
+
+    variant_1_hardcalls = bytes([0x24])
+    variant_2_hardcalls = bytes([0x0C])
+    prefix.with_suffix(".pgen").write_bytes(
+        bytes([0x6C, 0x1B, 0x03])
+        + (2).to_bytes(4, "little")
+        + (3).to_bytes(4, "little")
+        + bytes([0])
+        + variant_1_hardcalls
+        + scaled(0.2)
+        + scaled(1.4)
+        + scaled(1.8)
+        + variant_2_hardcalls
+        + scaled(0.0)
+        + (65535).to_bytes(2, "little")
+        + scaled(0.7)
+    )
+    prefix.with_suffix(".pvar").write_text(
+        """\
+#CHROM POS ID REF ALT QUAL
+1 10 rs1 A G 30
+1 20 rs2 C T 40
+"""
+    )
+    prefix.with_suffix(".psam").write_text(
+        """\
+#FID IID PAT MAT SEX PHENO
+F1 S1 0 0 1 -9
+F1 S2 S1 0 2 1.5
+F2 S3 0 0 0 2.0
+"""
+    )
+    return prefix
+
+
 def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_path):
     import genoio
 
@@ -338,6 +378,74 @@ def test_dense_plink2_sample_filter_keeps_source_order_and_values(tmp_path):
         ),
     )
     assert samples["iid"].to_list() == ["S1", "S3"]
+
+
+def test_dense_plink2_dosage_requires_pgen_dosage_track(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="dosage"):
+        dataset.read(dosage="dosage")
+
+
+def test_dense_plink2_dosage_reads_stored_a1_dosage_values(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2_dosage(tmp_path))
+
+    G, variants = dataset.read(dosage="dosage", missing="nan", return_variants=True)
+
+    np.testing.assert_allclose(
+        G,
+        np.array([[0.2, 0.0], [1.4, np.nan], [1.8, 0.7]], dtype=np.float32),
+        rtol=0,
+        atol=2.0 / 32768.0,
+    )
+    assert variants["id"].to_list() == ["rs1", "rs2"]
+    assert variants["a1"].to_list() == ["G", "T"]
+
+
+def test_dense_plink2_dosage_sample_and_variant_filters_apply_before_decode(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2_dosage(tmp_path))
+
+    G, samples, variants = dataset.read(
+        dosage="dosage",
+        missing="nan",
+        samples=["S3", "S1"],
+        variants=genoio.id_in(["rs2"]),
+        return_samples=True,
+        return_variants=True,
+    )
+
+    np.testing.assert_allclose(G, np.array([[0.0], [0.7]], dtype=np.float32), rtol=0, atol=2.0 / 32768.0)
+    assert samples["iid"].to_list() == ["S1", "S3"]
+    assert variants["id"].to_list() == ["rs2"]
+
+
+def test_dense_plink2_dosage_file_default_read_uses_hardcalls(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2_dosage(tmp_path))
+
+    G, samples, variants = dataset.read(missing="nan", return_samples=True, return_variants=True)
+
+    np.testing.assert_array_equal(G, np.array([[0.0, 0.0], [1.0, np.nan], [2.0, 0.0]], dtype=np.float32))
+    assert samples["iid"].to_list() == ["S1", "S2", "S3"]
+    assert variants["id"].to_list() == ["rs1", "rs2"]
+
+
+def test_dense_plink2_dosage_blocks_match_full_dosage_read(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2_dosage(tmp_path))
+
+    full = dataset.read(dosage="dosage", missing="nan")
+    blocks = list(dataset.blocks(1, dosage="dosage", missing="nan"))
+
+    np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
 
 
 @pytest.mark.parametrize(

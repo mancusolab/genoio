@@ -110,8 +110,9 @@ class Dataset:
           phased VCF.
         - `dosage`: `"hardcall"` reads allele counts from hard calls.
           `"dosage"` reads dosage-backed genotype values when the source
-          supports them. This release supports dense VCF `FORMAT/DS` dosage
-          reads. Haplotype and sparse reads only support `"hardcall"`.
+          supports them. This release supports dense VCF `FORMAT/DS` and
+          PLINK2 unphased biallelic dosage reads. Haplotype and sparse reads
+          only support `"hardcall"`.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant
@@ -364,7 +365,7 @@ class Dataset:
             return
         if kind == "haplo":
             raise UnsupportedRepresentation('kind="haplo" does not support dosage-backed reads')
-        if self.source.format.value == "vcf":
+        if self.source.format.value in {"vcf", "plink2"}:
             return
         raise UnsupportedRepresentation(f"{self.source.format.value} does not support dosage-backed genotype reads")
 
@@ -570,7 +571,12 @@ def _public_read_error(error: ValueError) -> Exception:
         return SampleFilterError(message)
     if "sparse missing values" in message:
         return MissingDataError(message)
-    if "FORMAT/DS" in message:
+    if (
+        "FORMAT/DS" in message
+        or "pgen does not contain dosage values" in message
+        or "pgen record does not contain dosage values" in message
+        or ("unsupported pgen" in message and "dosage" in message)
+    ):
         return UnsupportedRepresentation(message)
     return InvalidSourceError(message)
 
