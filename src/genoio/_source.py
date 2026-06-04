@@ -16,6 +16,7 @@ class SourceFormat(Enum):
 
     VCF = "vcf"
     BCF = "bcf"
+    BGEN = "bgen"
     PLINK1 = "plink1"
     PLINK2 = "plink2"
 
@@ -44,6 +45,8 @@ class ResolvedSource:
 _PLINK1_SUFFIXES = {"bed": ".bed", "bim": ".bim", "fam": ".fam"}
 _PLINK2_SUFFIXES = {"pgen": ".pgen", "pvar": ".pvar", "psam": ".psam"}
 _PLINK2_COMPRESSED_PVAR_SUFFIX = ".pvar.zst"
+_BGEN_SUFFIX = ".bgen"
+_BGEN_SAMPLE_SUFFIX = ".sample"
 
 
 def resolve_vcf(path: str | Path) -> ResolvedSource:
@@ -83,6 +86,25 @@ def resolve_bfile(path: str | Path) -> ResolvedSource:
     return _resolve_plink(Path(path), SourceFormat.PLINK1)
 
 
+def resolve_bgen(path: str | Path) -> ResolvedSource:
+    r"""Resolve a BGEN source file from a prefix or `.bgen` member path.
+
+    **Arguments:**
+
+    - `path`: BGEN prefix or `.bgen` member path.
+
+    **Returns:**
+
+    `ResolvedSource` with the required `.bgen` member and optional same-prefix
+    `.sample` member.
+    """
+    source_path = Path(path)
+    if source_path.suffix and source_path.suffix != _BGEN_SUFFIX:
+        raise UnsupportedFormatError(f"source path {source_path} is not bgen")
+    prefix = source_path.with_suffix("") if source_path.suffix == _BGEN_SUFFIX else source_path
+    return _resolve_bgen_prefix(prefix)
+
+
 def resolve_pfile(path: str | Path) -> ResolvedSource:
     r"""Resolve a PLINK2 PGEN/PVAR/PSAM file set from a prefix or member path.
 
@@ -97,6 +119,22 @@ def resolve_pfile(path: str | Path) -> ResolvedSource:
     as the logical `"pvar"` member.
     """
     return _resolve_plink(Path(path), SourceFormat.PLINK2)
+
+
+def _resolve_bgen_prefix(prefix: Path) -> ResolvedSource:
+    bgen_path = prefix.with_suffix(_BGEN_SUFFIX)
+    if not bgen_path.exists():
+        raise InvalidSourceError(f"source path does not exist: {bgen_path}")
+    if not bgen_path.is_file():
+        raise InvalidSourceError(f"source path is not a file: {bgen_path}")
+
+    members = {"bgen": bgen_path}
+    sample_path = prefix.with_suffix(_BGEN_SAMPLE_SUFFIX)
+    if sample_path.exists():
+        if not sample_path.is_file():
+            raise InvalidSourceError(f"source member is not a file: {sample_path}")
+        members["sample"] = sample_path
+    return ResolvedSource(format=SourceFormat.BGEN, path=bgen_path, members=members, prefix=prefix)
 
 
 def _detect_single_file_format(path: Path) -> SourceFormat | None:

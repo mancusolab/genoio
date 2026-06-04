@@ -1,10 +1,10 @@
 # pattern: Functional Core
 
-"""Read VCF, PLINK1, and PLINK2 genotype matrices from Python."""
+"""Read VCF, BGEN, PLINK1, and PLINK2 genotype matrices from Python."""
 
 from importlib.metadata import PackageNotFoundError, version
 
-from ._api import Dataset, bfile, pfile, vcf
+from ._api import Dataset, bfile, bgen, pfile, vcf
 from ._errors import (
     GenoioError,
     InvalidOptionError,
@@ -28,6 +28,7 @@ __all__ = [
     "Dataset",
     "vcf",
     "bfile",
+    "bgen",
     "pfile",
     "FilterExpr",
     "chrom",

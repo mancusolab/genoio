@@ -28,7 +28,7 @@ from ._errors import (
     UnsupportedRepresentation,
 )
 from ._filters import FilterExpr, id_in
-from ._source import ResolvedSource, resolve_bfile, resolve_pfile, resolve_vcf
+from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile, resolve_vcf
 
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_DOSAGE_SOURCES = {"hardcall", "dosage"}
@@ -402,6 +402,23 @@ def bfile(path: str | Path) -> Dataset:
     [`genoio.Dataset`][] backed by the PLINK1 source.
     """
     return Dataset(source=resolve_bfile(path))
+
+
+def bgen(path: str | Path) -> Dataset:
+    r"""Resolve a BGEN source and return a reusable dataset.
+
+    `path` may be the shared prefix or the `.bgen` member. If a same-prefix
+    `.sample` file exists, it is recorded as an optional companion.
+
+    **Arguments:**
+
+    - `path`: BGEN prefix or `.bgen` member path.
+
+    **Returns:**
+
+    [`genoio.Dataset`][] backed by the BGEN source.
+    """
+    return Dataset(source=resolve_bgen(path))
 
 
 def pfile(path: str | Path) -> Dataset:
