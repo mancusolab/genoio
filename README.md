@@ -20,8 +20,8 @@ From a local checkout:
 pip install .
 ```
 
-For development, use the Makefile to create `.venv`, install development
-dependencies, and build the Rust extension:
+For development, install `uv`, then use the Makefile to sync `.venv` from
+`uv.lock` and build the Rust extension:
 
 ```bash
 make build
@@ -33,6 +33,7 @@ Useful development targets:
 make help
 make build-release
 make build-wheel
+make lock
 make verify
 ```
 

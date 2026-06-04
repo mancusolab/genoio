@@ -22,7 +22,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -30,4 +34,8 @@ jobs:
           components: clippy, rustfmt
 
       - name: Verify
-        run: make verify PYTHON=python ZENSICAL=zensical PYRIGHT=pyright PYTEST=pytest
+        run: make verify
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci

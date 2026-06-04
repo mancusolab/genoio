@@ -12,9 +12,10 @@ Run the full local verification suite from a clean worktree:
 make verify
 ```
 
-This builds the Rust extension, checks Rust formatting and lints, runs Rust and
-Python tests, runs Pyright, builds the MkDocs site with strict checks, and builds
-Rust docs with warnings treated as errors.
+This syncs the locked Python environment, builds the Rust extension, checks Rust
+formatting and lints, runs Rust and Python tests, runs Pyright, builds the
+Zensical site with strict checks, and builds Rust docs with warnings treated as
+errors.
 
 ## Build a wheel
 
@@ -34,8 +35,8 @@ Install the repaired wheel into a fresh environment and test each supported
 format with a small fixture:
 
 ```bash
-python -m venv /tmp/genoio-wheel-test
-/tmp/genoio-wheel-test/bin/python -m pip install dist/genoio-*.whl
+uv venv /tmp/genoio-wheel-test
+uv pip install --python /tmp/genoio-wheel-test/bin/python dist/genoio-*.whl
 /tmp/genoio-wheel-test/bin/python -c "import genoio; print(genoio.__version__)"
 ```
 

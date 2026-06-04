@@ -1,10 +1,11 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: build build-dev build-release build-wheel check clean docs fresh help pyright requirements rust-check rust-doc rust-fmt rust-test test venv verify
+.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock pyright requirements rust-check rust-doc rust-fmt rust-test test venv verify
 
 VENV ?= .venv
 SYSTEM_PYTHON ?= python3
+UV ?= uv
 
 ifeq ($(OS),Windows_NT)
 	VENV_BIN := $(VENV)/Scripts
@@ -17,7 +18,7 @@ CARGO ?= cargo
 ZENSICAL ?= $(VENV_BIN)/zensical
 PYRIGHT ?= $(VENV_BIN)/pyright
 PYTEST ?= $(VENV_BIN)/pytest
-MATURIN ?= $(PYTHON) -m maturin
+MATURIN ?= env -u CONDA_PREFIX VIRTUAL_ENV=$(abspath $(VENV)) $(PYTHON) -m maturin
 DIST_DIR ?= dist
 CODESIGN_ALLOCATE ?= /usr/bin/codesign_allocate
 ARGS ?=
@@ -25,12 +26,13 @@ ARGS ?=
 RUST_ENV ?= env CC=clang AR=ar
 REPAIR_ENV ?= env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) CC=clang AR=ar
 
-venv:  ## Create the local Python virtual environment
-	$(SYSTEM_PYTHON) -m venv $(VENV)
+venv: requirements  ## Create and sync the local Python virtual environment
 
-requirements: venv  ## Install development and documentation dependencies
-	$(PYTHON) -m pip install --upgrade pip
-	$(RUST_ENV) $(PYTHON) -m pip install -e ".[dev,docs]"
+lock:  ## Update uv.lock from pyproject.toml
+	$(UV) lock
+
+requirements: uv.lock  ## Sync development and documentation dependencies
+	$(RUST_ENV) UV_PROJECT_ENVIRONMENT=$(VENV) $(UV) sync --frozen --all-extras --no-install-project --python $(SYSTEM_PYTHON)
 
 build: build-dev  ## Compile and install the extension for development
 
@@ -43,13 +45,13 @@ build-release: requirements  ## Compile and install an optimized development ext
 build-wheel: requirements  ## Build a repaired redistributable wheel
 	$(REPAIR_ENV) $(MATURIN) build --release --auditwheel=repair -o $(DIST_DIR) $(ARGS)
 
-test: requirements  ## Run Python tests
+test: build-dev  ## Run Python tests
 	$(PYTEST) -q
 
 pyright: requirements  ## Run Python type checks
 	$(PYRIGHT) src tests scripts
 
-docs: requirements  ## Build documentation with strict checks
+docs: build-dev  ## Build documentation with strict checks
 	$(ZENSICAL) build --strict
 	rm -rf site
 
@@ -69,7 +71,7 @@ check: rust-fmt rust-check rust-test pyright test docs  ## Run the standard vali
 
 verify: build-dev check rust-doc  ## Build the extension and run all validation checks
 
-fresh: clean requirements build-dev  ## Recreate the local environment and rebuild the extension
+fresh: clean build-dev  ## Recreate the local environment and rebuild the extension
 
 clean:  ## Remove local build and test artifacts
 	rm -rf build dist dist-repaired dist-repaired-ok site .mypy_cache .pytest_cache .ruff_cache
@@ -79,4 +81,5 @@ help:  ## Display this help screen
 	@echo "Available commands:"
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' | sort
 	@echo
+	@echo 'Run make lock after changing Python dependencies.'
 	@echo 'Build targets accept ARGS, for example: make build-wheel ARGS="--sdist"'
