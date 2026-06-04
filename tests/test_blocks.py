@@ -60,6 +60,43 @@ def write_blocks_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def empty_dense_rust_result() -> dict:
+    return {
+        "values": [],
+        "shape": (1, 0),
+        "missing_mask": [],
+        "samples": {
+            "fid": [],
+            "iid": [],
+            "father": [],
+            "mother": [],
+            "sex": [],
+            "phenotype": [],
+            "source_sample_index": [],
+            "haplotype_index": [],
+        },
+        "variants": {
+            "chrom": [],
+            "pos": [],
+            "id": [],
+            "a0": [],
+            "a1": [],
+            "ref_allele": [],
+            "alt_allele": [],
+            "source_a0": [],
+            "source_a1": [],
+            "flipped": [],
+            "qual": [],
+            "af": [],
+            "maf": [],
+            "mac": [],
+            "missing_rate": [],
+            "n_called": [],
+        },
+        "diagnostics": {},
+    }
+
+
 def test_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
     import genoio
 
@@ -158,14 +195,7 @@ def test_plink2_matrix_only_blocks_pass_private_matrix_only_option(tmp_path, mon
 
     def fake_read_dense_from_rust(self, members, options):
         calls.append(dict(options))
-        return {
-            "values": [],
-            "shape": (1, 0),
-            "missing_mask": [],
-            "samples": [],
-            "variants": [],
-            "diagnostics": {},
-        }
+        return empty_dense_rust_result()
 
     monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
 
@@ -192,14 +222,7 @@ def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(t
 
     def fake_read_dense_from_rust(self, members, options):
         calls.append(dict(options))
-        return {
-            "values": [],
-            "shape": (1, 0),
-            "missing_mask": [],
-            "samples": [],
-            "variants": [],
-            "diagnostics": {},
-        }
+        return empty_dense_rust_result()
 
     monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
 

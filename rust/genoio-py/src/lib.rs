@@ -493,49 +493,97 @@ fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<
 fn sample_records_to_py(
     py: Python<'_>,
     samples: Vec<genoio_core::SampleRecord>,
-) -> PyResult<Bound<'_, PyList>> {
-    let py_samples = PyList::empty(py);
+) -> PyResult<Bound<'_, PyDict>> {
+    let mut fids = Vec::with_capacity(samples.len());
+    let mut iids = Vec::with_capacity(samples.len());
+    let mut fathers = Vec::with_capacity(samples.len());
+    let mut mothers = Vec::with_capacity(samples.len());
+    let mut sexes = Vec::with_capacity(samples.len());
+    let mut phenotypes = Vec::with_capacity(samples.len());
+    let mut source_sample_indices = Vec::with_capacity(samples.len());
+    let mut haplotype_indices = Vec::with_capacity(samples.len());
+
     for sample in samples {
-        let sample_dict = PyDict::new(py);
-        sample_dict.set_item("fid", sample.fid)?;
-        sample_dict.set_item("iid", sample.iid)?;
-        sample_dict.set_item("father", sample.father)?;
-        sample_dict.set_item("mother", sample.mother)?;
-        sample_dict.set_item("sex", sample.sex)?;
-        sample_dict.set_item("phenotype", sample.phenotype)?;
-        sample_dict.set_item("source_sample_index", sample.source_sample_index)?;
-        sample_dict.set_item("haplotype_index", sample.haplotype_index)?;
-        py_samples.append(sample_dict)?;
+        fids.push(sample.fid);
+        iids.push(sample.iid);
+        fathers.push(sample.father);
+        mothers.push(sample.mother);
+        sexes.push(sample.sex);
+        phenotypes.push(sample.phenotype);
+        source_sample_indices.push(sample.source_sample_index);
+        haplotype_indices.push(sample.haplotype_index);
     }
-    Ok(py_samples)
+
+    let columns = PyDict::new(py);
+    columns.set_item("fid", fids)?;
+    columns.set_item("iid", iids)?;
+    columns.set_item("father", fathers)?;
+    columns.set_item("mother", mothers)?;
+    columns.set_item("sex", sexes)?;
+    columns.set_item("phenotype", phenotypes)?;
+    columns.set_item("source_sample_index", source_sample_indices)?;
+    columns.set_item("haplotype_index", haplotype_indices)?;
+    Ok(columns)
 }
 
 fn variant_records_to_py(
     py: Python<'_>,
     variants: Vec<genoio_core::VariantRecord>,
-) -> PyResult<Bound<'_, PyList>> {
-    let py_variants = PyList::empty(py);
+) -> PyResult<Bound<'_, PyDict>> {
+    let mut chroms = Vec::with_capacity(variants.len());
+    let mut positions = Vec::with_capacity(variants.len());
+    let mut ids = Vec::with_capacity(variants.len());
+    let mut a0s = Vec::with_capacity(variants.len());
+    let mut a1s = Vec::with_capacity(variants.len());
+    let mut ref_alleles = Vec::with_capacity(variants.len());
+    let mut alt_alleles = Vec::with_capacity(variants.len());
+    let mut source_a0s = Vec::with_capacity(variants.len());
+    let mut source_a1s = Vec::with_capacity(variants.len());
+    let mut flipped = Vec::with_capacity(variants.len());
+    let mut quals = Vec::with_capacity(variants.len());
+    let mut afs = Vec::with_capacity(variants.len());
+    let mut mafs = Vec::with_capacity(variants.len());
+    let mut macs = Vec::with_capacity(variants.len());
+    let mut missing_rates = Vec::with_capacity(variants.len());
+    let mut n_called = Vec::with_capacity(variants.len());
+
     for variant in variants {
-        let variant_dict = PyDict::new(py);
-        variant_dict.set_item("chrom", variant.chrom)?;
-        variant_dict.set_item("pos", variant.pos)?;
-        variant_dict.set_item("id", variant.id)?;
-        variant_dict.set_item("a0", variant.a0)?;
-        variant_dict.set_item("a1", variant.a1)?;
-        variant_dict.set_item("ref_allele", variant.ref_allele)?;
-        variant_dict.set_item("alt_allele", variant.alt_allele)?;
-        variant_dict.set_item("source_a0", variant.source_a0)?;
-        variant_dict.set_item("source_a1", variant.source_a1)?;
-        variant_dict.set_item("flipped", variant.flipped)?;
-        variant_dict.set_item("qual", variant.qual)?;
-        variant_dict.set_item("af", variant.af)?;
-        variant_dict.set_item("maf", variant.maf)?;
-        variant_dict.set_item("mac", variant.mac)?;
-        variant_dict.set_item("missing_rate", variant.missing_rate)?;
-        variant_dict.set_item("n_called", variant.n_called)?;
-        py_variants.append(variant_dict)?;
+        chroms.push(variant.chrom);
+        positions.push(variant.pos);
+        ids.push(variant.id);
+        a0s.push(variant.a0);
+        a1s.push(variant.a1);
+        ref_alleles.push(variant.ref_allele);
+        alt_alleles.push(variant.alt_allele);
+        source_a0s.push(variant.source_a0);
+        source_a1s.push(variant.source_a1);
+        flipped.push(variant.flipped);
+        quals.push(variant.qual);
+        afs.push(variant.af);
+        mafs.push(variant.maf);
+        macs.push(variant.mac);
+        missing_rates.push(variant.missing_rate);
+        n_called.push(variant.n_called);
     }
-    Ok(py_variants)
+
+    let columns = PyDict::new(py);
+    columns.set_item("chrom", chroms)?;
+    columns.set_item("pos", positions)?;
+    columns.set_item("id", ids)?;
+    columns.set_item("a0", a0s)?;
+    columns.set_item("a1", a1s)?;
+    columns.set_item("ref_allele", ref_alleles)?;
+    columns.set_item("alt_allele", alt_alleles)?;
+    columns.set_item("source_a0", source_a0s)?;
+    columns.set_item("source_a1", source_a1s)?;
+    columns.set_item("flipped", flipped)?;
+    columns.set_item("qual", quals)?;
+    columns.set_item("af", afs)?;
+    columns.set_item("maf", mafs)?;
+    columns.set_item("mac", macs)?;
+    columns.set_item("missing_rate", missing_rates)?;
+    columns.set_item("n_called", n_called)?;
+    Ok(columns)
 }
 
 fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {

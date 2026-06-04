@@ -78,6 +78,8 @@ class Dataset:
 
     source: ResolvedSource
     _metadata_cache: dict[str, Any] | None = field(default=None, init=False, compare=False, repr=False)
+    _samples_frame_cache: Any | None = field(default=None, init=False, compare=False, repr=False)
+    _variants_frame_cache: Any | None = field(default=None, init=False, compare=False, repr=False)
 
     def read(
         self,
@@ -160,7 +162,9 @@ class Dataset:
         Polars DataFrame with source sample metadata in source order.
         """
         _reject_options(options)
-        return samples_frame(self._metadata()["samples"])
+        if self._samples_frame_cache is None:
+            object.__setattr__(self, "_samples_frame_cache", samples_frame(self._metadata()["samples"]))
+        return self._samples_frame_cache
 
     def variants(self, *, stats: Any = None, **options: Any) -> Any:
         r"""Return variant metadata as a Polars DataFrame.
@@ -183,7 +187,9 @@ class Dataset:
         """
         _validate_variant_stats(stats)
         _reject_options(options)
-        return variants_frame(self._metadata()["variants"])
+        if self._variants_frame_cache is None:
+            object.__setattr__(self, "_variants_frame_cache", variants_frame(self._metadata()["variants"]))
+        return self._variants_frame_cache
 
     def blocks(self, size: int, **read_options: Any) -> Any:
         r"""Yield consecutive variant blocks from this dataset.

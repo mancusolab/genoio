@@ -28,6 +28,17 @@ def test_vcf_samples_and_variants_return_source_ordered_polars_frames():
     ]
 
 
+def test_rust_metadata_payload_is_column_oriented():
+    import genoio._api as api
+
+    metadata = api._rust.read_metadata("vcf", {"vcf": str(FIXTURE_ROOT / "vcf" / "tiny.vcf")})
+
+    assert isinstance(metadata["samples"], dict)
+    assert isinstance(metadata["variants"], dict)
+    assert metadata["samples"]["iid"] == ["S1", "S2", "S3"]
+    assert metadata["variants"]["id"] == ["rs1", "rs2", "indel1"]
+
+
 def test_plink1_samples_and_variants_normalize_metadata_without_decoding_bed():
     import genoio
 
@@ -68,6 +79,38 @@ def test_metadata_is_cached_after_first_load(monkeypatch):
     dataset.samples()
 
     assert calls == 1
+
+
+def test_metadata_frames_are_cached_after_first_assembly(monkeypatch):
+    import genoio
+    import genoio._api as api
+
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "tiny.vcf")
+    sample_calls = 0
+    variant_calls = 0
+    original_samples_frame = api.samples_frame
+    original_variants_frame = api.variants_frame
+
+    def counted_samples_frame(columns):
+        nonlocal sample_calls
+        sample_calls += 1
+        return original_samples_frame(columns)
+
+    def counted_variants_frame(columns):
+        nonlocal variant_calls
+        variant_calls += 1
+        return original_variants_frame(columns)
+
+    monkeypatch.setattr(api, "samples_frame", counted_samples_frame)
+    monkeypatch.setattr(api, "variants_frame", counted_variants_frame)
+
+    samples = dataset.samples()
+    variants = dataset.variants()
+
+    assert dataset.samples() is samples
+    assert dataset.variants() is variants
+    assert sample_calls == 1
+    assert variant_calls == 1
 
 
 def test_variant_stats_are_rejected_until_genotype_statistics_exist():

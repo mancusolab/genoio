@@ -154,7 +154,10 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
 def test_sparse_default_missing_signature_is_readable():
     import genoio
 
-    assert "missing: 'Any' = DEFAULT_MISSING" in str(signature(genoio.Dataset.read))
+    missing = signature(genoio.Dataset.read).parameters["missing"]
+
+    assert missing.annotation == "Any"
+    assert repr(missing.default) == "DEFAULT_MISSING"
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):

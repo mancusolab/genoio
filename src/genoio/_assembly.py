@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -24,35 +25,39 @@ _VARIANT_COLUMNS = [
 ]
 
 
-def samples_frame(records: list[dict[str, Any]]) -> pl.DataFrame:
-    r"""Build the public sample metadata frame from Rust sample records.
+MetadataColumns = dict[str, Sequence[Any]]
+
+
+def samples_frame(columns: MetadataColumns) -> pl.DataFrame:
+    r"""Build the public sample metadata frame from Rust sample columns.
 
     **Arguments:**
 
-    - `records`: sample dictionaries returned by the Rust extension.
+    - `columns`: column-oriented sample payload returned by the Rust extension.
 
     **Returns:**
 
     Polars DataFrame in source sample order.
     """
     frame = pl.DataFrame(
-        {column: [record.get(column) for record in records] for column in _SAMPLE_COLUMNS},
+        {column: columns[column] for column in _SAMPLE_COLUMNS},
         schema=_SAMPLE_COLUMNS,
     )
-    if records and all(record.get("haplotype_index") is not None for record in records):
+    haplotype_indices = columns["haplotype_index"]
+    if haplotype_indices and all(index is not None for index in haplotype_indices):
         return frame.with_columns(
-            pl.Series("source_sample_index", [record["source_sample_index"] for record in records]),
-            pl.Series("haplotype_index", [record["haplotype_index"] for record in records]),
+            pl.Series("source_sample_index", columns["source_sample_index"]),
+            pl.Series("haplotype_index", haplotype_indices),
         )
     return frame
 
 
-def variants_frame(records: list[dict[str, Any]]) -> pl.DataFrame:
-    r"""Build the public variant metadata frame from Rust variant records.
+def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
+    r"""Build the public variant metadata frame from Rust variant columns.
 
     **Arguments:**
 
-    - `records`: variant dictionaries returned by the Rust extension.
+    - `columns`: column-oriented variant payload returned by the Rust extension.
 
     **Returns:**
 
@@ -60,18 +65,12 @@ def variants_frame(records: list[dict[str, Any]]) -> pl.DataFrame:
     limited to the columns needed to interpret matrix columns and dosage
     orientation.
     """
-    # Rust returns in-memory metadata records across the PyO3 boundary. Eager
-    # DataFrame assembly is the adapter boundary here because there is no file
-    # scan or deferred query plan for Polars to optimize, and source order is
-    # already the downstream contract.
+    # Rust returns in-memory columns across the PyO3 boundary. Eager DataFrame
+    # assembly is the adapter boundary here because there is no file scan or
+    # deferred query plan for Polars to optimize, and source order is already
+    # the downstream contract.
     return pl.DataFrame(
-        {
-            "chrom": [record.get("chrom") for record in records],
-            "pos": [record.get("pos") for record in records],
-            "id": [record.get("id") for record in records],
-            "a0": [record.get("a0") for record in records],
-            "a1": [record.get("a1") for record in records],
-        },
+        {column: columns[column] for column in _VARIANT_COLUMNS},
         schema=_VARIANT_COLUMNS,
     )
 
@@ -169,7 +168,7 @@ def read_result_tuple(
     r"""Attach optional metadata frames to a matrix result.
 
     `samples` and `variants` are optional at this assembly boundary because
-    Rust metadata records are only converted when the corresponding return flag
+    Rust metadata columns are only converted when the corresponding return flag
     is set.
 
     **Returns:**
