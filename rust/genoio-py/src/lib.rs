@@ -303,6 +303,9 @@ fn variants_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::
     if value.is_none() {
         return Ok(None);
     }
+    // Python validates and serializes the public FilterExpr tree; Rust parses
+    // the JSON-compatible IR again so malformed direct extension calls fail at
+    // the same boundary as normal reads.
     let json = py_to_json_value(&value)?;
     genoio_core::VariantFilter::from_json_value(json)
         .map(Some)
@@ -445,8 +448,9 @@ fn sparse_to_py(
 }
 
 fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
-    // SAFETY: f32 has a stable byte representation for NumPy's float32 view,
-    // and PyByteArray copies the bytes before `values` is dropped.
+    // SAFETY: f32 has a stable byte representation for NumPy's float32 view.
+    // PyByteArray owns a copy of the bytes before `values` is dropped, so the
+    // returned array does not borrow Rust memory.
     let bytes = unsafe {
         slice::from_raw_parts(
             values.as_ptr().cast::<u8>(),
@@ -474,8 +478,8 @@ fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<
             })
         })
         .collect::<PyResult<Vec<i64>>>()?;
-    // SAFETY: values has been converted to i64 and PyByteArray copies the
-    // contiguous bytes before the local Vec is dropped.
+    // SAFETY: values has been converted to i64 and PyByteArray owns a copy of
+    // the contiguous bytes before the local Vec is dropped.
     let bytes = unsafe {
         slice::from_raw_parts(
             values.as_ptr().cast::<u8>(),

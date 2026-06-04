@@ -115,7 +115,11 @@ enum RawExpr {
 }
 
 impl VariantFilter {
-    /// Parse and validate the JSON-compatible filter IR from Python.
+    /// Parse, validate, and simplify the JSON-compatible filter IR from Python.
+    ///
+    /// Simplification is semantic-preserving: contradictory expressions become
+    /// `AlwaysFalse`, repeated thresholds are tightened, and concrete region
+    /// intersections are reduced before any reader sees the filter.
     pub fn from_json_value(value: Value) -> Result<Self, MetadataError> {
         let raw: RawExpr = serde_json::from_value(value).map_err(|error| {
             MetadataError::parse("<filter>", format!("invalid filter IR: {error}"))
@@ -165,6 +169,10 @@ impl VariantFilter {
     }
 
     /// Return true when simplification proves the filter cannot retain variants.
+    ///
+    /// Readers use this as an early-empty fast path. It is not an error state:
+    /// callers may intentionally ask for a chromosome, region, or ID set that
+    /// has no overlap with a source.
     pub fn is_always_false(&self) -> bool {
         matches!(self.expr, Expr::AlwaysFalse)
     }
@@ -300,33 +308,8 @@ fn simplify_and(left: Expr, right: Expr) -> Expr {
             Expr::AlwaysFalse => return Expr::AlwaysFalse,
             Expr::AlwaysTrue => {}
             Expr::Predicate(predicate) => {
-                let mut pending = Some(predicate);
-                let mut index = 0;
-                while let Some(current) = pending.take() {
-                    if index >= simplified.len() {
-                        pending = Some(current);
-                        break;
-                    }
-                    if let Expr::Predicate(existing) = &simplified[index] {
-                        match existing.and_combine(&current) {
-                            PredicateCombine::Unchanged => {
-                                pending = Some(current);
-                                index += 1;
-                            }
-                            PredicateCombine::Combined(combined) => {
-                                simplified.remove(index);
-                                pending = Some(combined);
-                                index = 0;
-                            }
-                            PredicateCombine::AlwaysFalse => return Expr::AlwaysFalse,
-                        }
-                    } else {
-                        pending = Some(current);
-                        index += 1;
-                    }
-                }
-                if let Some(predicate) = pending {
-                    simplified.push(Expr::Predicate(predicate));
+                if !combine_predicate_term(&mut simplified, predicate, Predicate::and_combine) {
+                    return Expr::AlwaysFalse;
                 }
             }
             other => simplified.push(other),
@@ -347,38 +330,54 @@ fn simplify_or(left: Expr, right: Expr) -> Expr {
             Expr::AlwaysTrue => return Expr::AlwaysTrue,
             Expr::AlwaysFalse => {}
             Expr::Predicate(predicate) => {
-                let mut pending = Some(predicate);
-                let mut index = 0;
-                while let Some(current) = pending.take() {
-                    if index >= simplified.len() {
-                        pending = Some(current);
-                        break;
-                    }
-                    if let Expr::Predicate(existing) = &simplified[index] {
-                        match existing.or_combine(&current) {
-                            Some(combined) => {
-                                simplified.remove(index);
-                                pending = Some(combined);
-                                index = 0;
-                            }
-                            None => {
-                                pending = Some(current);
-                                index += 1;
-                            }
-                        }
-                    } else {
-                        pending = Some(current);
-                        index += 1;
-                    }
-                }
-                if let Some(predicate) = pending {
-                    simplified.push(Expr::Predicate(predicate));
-                }
+                combine_predicate_term(&mut simplified, predicate, |existing, current| {
+                    existing
+                        .or_combine(current)
+                        .map_or(PredicateCombine::Unchanged, PredicateCombine::Combined)
+                });
             }
             other => simplified.push(other),
         }
     }
     rebuild_disjunction(simplified)
+}
+
+fn combine_predicate_term(
+    terms: &mut Vec<Expr>,
+    predicate: Predicate,
+    combine: impl Fn(&Predicate, &Predicate) -> PredicateCombine,
+) -> bool {
+    // Combining two predicates can expose a new simplification with an earlier
+    // term, so restart after each successful merge until the predicate settles.
+    let mut pending = Some(predicate);
+    let mut index = 0;
+    while let Some(current) = pending.take() {
+        if index >= terms.len() {
+            pending = Some(current);
+            break;
+        }
+        if let Expr::Predicate(existing) = &terms[index] {
+            match combine(existing, &current) {
+                PredicateCombine::Unchanged => {
+                    pending = Some(current);
+                    index += 1;
+                }
+                PredicateCombine::Combined(combined) => {
+                    terms.remove(index);
+                    pending = Some(combined);
+                    index = 0;
+                }
+                PredicateCombine::AlwaysFalse => return false,
+            }
+        } else {
+            pending = Some(current);
+            index += 1;
+        }
+    }
+    if let Some(predicate) = pending {
+        terms.push(Expr::Predicate(predicate));
+    }
+    true
 }
 
 fn flatten_and(expr: Expr, out: &mut Vec<Expr>) {
@@ -731,7 +730,10 @@ fn min_option<T: Ord + Copy>(left: Option<T>, right: Option<T>) -> Option<T> {
     }
 }
 
-/// Compute frequency and missingness statistics for one diploid variant.
+/// Compute frequency and missingness statistics for one diploid hard-call variant.
+///
+/// `values` must contain discrete diploid allele counts in `{0, 1, 2}`. Missing
+/// calls are excluded from AF/MAF/MAC and included only in `missing_rate`.
 pub fn compute_variant_stats(
     values: &[f32],
     missing_mask: &[bool],
@@ -764,6 +766,9 @@ pub fn compute_variant_stats(
 }
 
 /// Compute variant statistics from hard-call category counts.
+///
+/// Counts are kept as `u64` while accumulating and narrowed only after overflow
+/// checks, so large cohorts fail with a metadata error instead of wrapping.
 pub fn variant_stats_from_counts(
     hom_ref_count: u64,
     het_count: u64,

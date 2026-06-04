@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 import polars as pl
 from scipy import sparse as scipy_sparse
 
 from ._errors import MissingDataError
+
+MatrixResult = NDArray[Any] | scipy_sparse.spmatrix
 
 _SAMPLE_COLUMNS = ["fid", "iid", "father", "mother", "sex", "phenotype"]
 _VARIANT_COLUMNS = [
@@ -79,8 +82,11 @@ def dense_array_from_rust(
     missing_mask: list[bool],
     missing: str,
     dtype: np.dtype[Any],
-) -> np.ndarray:
+) -> NDArray[Any]:
     r"""Convert a flat Rust dense matrix payload into a NumPy array.
+
+    Rust returns Python-owned NumPy buffers through the extension boundary; this
+    function applies the public dtype and missing-data policy.
 
     **Arguments:**
 
@@ -116,8 +122,12 @@ def sparse_matrix_from_rust(
     shape: tuple[int, int],
     dtype: np.dtype[Any],
     sparse_format: str,
-) -> Any:
+) -> scipy_sparse.spmatrix:
     r"""Convert Rust CSC arrays into the requested SciPy sparse format.
+
+    Rust always emits CSC because variants are accumulated column-wise. CSR is
+    a Python-side view conversion after the validated CSC arrays cross the
+    extension boundary.
 
     **Arguments:**
 
@@ -148,13 +158,13 @@ def sparse_matrix_from_rust(
 
 
 def read_result_tuple(
-    genotype_matrix: Any,
+    genotype_matrix: MatrixResult,
     samples: pl.DataFrame | None,
     variants: pl.DataFrame | None,
     *,
     return_samples: bool,
     return_variants: bool,
-) -> Any:
+) -> MatrixResult | tuple[MatrixResult, pl.DataFrame] | tuple[MatrixResult, pl.DataFrame, pl.DataFrame]:
     r"""Attach optional metadata frames to a matrix result.
 
     `samples` and `variants` are optional at this assembly boundary because
@@ -180,7 +190,7 @@ def read_result_tuple(
     return genotype_matrix
 
 
-def _impute_missing_by_variant(array: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def _impute_missing_by_variant(array: NDArray[Any], mask: NDArray[np.bool_]) -> NDArray[Any]:
     imputed = array.copy()
     for variant_index in range(imputed.shape[1]):
         missing_rows = mask[:, variant_index]

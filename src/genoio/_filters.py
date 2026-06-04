@@ -22,7 +22,9 @@ class FilterExpr:
 
     Filter expressions can be combined with ``&`` and ``|`` and negated with
     ``~``. They are converted to a JSON-compatible intermediate representation
-    before being evaluated in Rust.
+    before being evaluated in Rust. Expressions are declarative: Python
+    callbacks are not supported, and a valid expression may retain zero
+    variants.
     """
 
     def __and__(self, other: FilterExpr) -> FilterExpr:
@@ -36,6 +38,9 @@ class FilterExpr:
 
     def to_ir(self) -> dict[str, JsonValue]:
         r"""Return the JSON-compatible filter representation consumed by Rust.
+
+        Treat this representation as an inspection aid. Rust validates and may
+        simplify the expression before readers evaluate it.
 
         **Returns:**
 
@@ -224,6 +229,9 @@ def polymorphic() -> FilterExpr:
 
 def id_in(values: Iterable[str]) -> FilterExpr:
     r"""Keep variants whose source ID is in `values`.
+
+    Sets are accepted for convenience and are sorted before serialization so
+    the generated filter IR is deterministic.
 
     **Arguments:**
 
