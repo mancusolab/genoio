@@ -139,13 +139,48 @@ fn write_empty_layout2_probability_block(
     n_samples: u32,
     allele_count: u16,
 ) -> io::Result<()> {
-    writer.write_all(&10_u32.to_le_bytes())?;
-    writer.write_all(&n_samples.to_le_bytes())?;
-    writer.write_all(&allele_count.to_le_bytes())?;
-    writer.write_all(&2_u8.to_le_bytes())?;
-    writer.write_all(&2_u8.to_le_bytes())?;
-    writer.write_all(&0_u8.to_le_bytes())?;
-    writer.write_all(&0_u8.to_le_bytes())?;
+    write_layout2_probability_block_header(
+        writer,
+        ProbabilityBlockHeader {
+            n_samples,
+            allele_count,
+            min_ploidy: 2,
+            max_ploidy: 2,
+            sample_ploidies: &[2, 2],
+            phased: 0,
+            bit_depth: 0,
+        },
+    )
+}
+
+struct ProbabilityBlockHeader<'a> {
+    n_samples: u32,
+    allele_count: u16,
+    min_ploidy: u8,
+    max_ploidy: u8,
+    sample_ploidies: &'a [u8],
+    phased: u8,
+    bit_depth: u8,
+}
+
+fn write_layout2_probability_block_header(
+    writer: &mut impl Write,
+    header: ProbabilityBlockHeader<'_>,
+) -> io::Result<()> {
+    let c = 10_u32
+        .checked_add(
+            u32::try_from(header.sample_ploidies.len())
+                .expect("sample ploidy count should fit u32"),
+        )
+        .expect("probability block length should fit u32");
+    writer.write_all(&c.to_le_bytes())?;
+    writer.write_all(&header.n_samples.to_le_bytes())?;
+    writer.write_all(&header.allele_count.to_le_bytes())?;
+    writer.write_all(&header.min_ploidy.to_le_bytes())?;
+    writer.write_all(&header.max_ploidy.to_le_bytes())?;
+    writer.write_all(header.sample_ploidies)?;
+    writer.write_all(&header.phased.to_le_bytes())?;
+    writer.write_all(&header.bit_depth.to_le_bytes())?;
     Ok(())
 }
 
@@ -434,6 +469,89 @@ fn bgen_metadata_rejects_multiallelic_variants() {
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("multiallelic BGEN should fail");
 
     assert_metadata_error_contains(error, "multiallelic");
+}
+
+#[test]
+fn bgen_metadata_rejects_phased_layout2_probability_blocks() {
+    let dir = unique_dir("bgen-phased-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_layout2_probability_block_header(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 1,
+                bit_depth: 8,
+            },
+        )
+        .expect("phased probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("phased BGEN should fail");
+
+    assert_metadata_error_contains(error, "phased");
+}
+
+#[test]
+fn bgen_metadata_rejects_variable_ploidy_layout2_probability_blocks() {
+    let dir = unique_dir("bgen-variable-ploidy-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_layout2_probability_block_header(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 1,
+                max_ploidy: 2,
+                sample_ploidies: &[1, 2],
+                phased: 0,
+                bit_depth: 8,
+            },
+        )
+        .expect("variable-ploidy probability block should write");
+    });
+
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("variable-ploidy BGEN should fail");
+
+    assert_metadata_error_contains(error, "variable-ploidy");
+}
+
+#[test]
+fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
+    let dir = unique_dir("bgen-non-diploid-sample-ploidy");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_layout2_probability_block_header(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 1],
+                phased: 0,
+                bit_depth: 8,
+            },
+        )
+        .expect("non-diploid probability block should write");
+    });
+
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("non-diploid BGEN should fail");
+
+    assert_metadata_error_contains(error, "variable-ploidy");
 }
 
 #[test]

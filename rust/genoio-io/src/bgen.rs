@@ -45,6 +45,7 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
         &mut reader,
         bgen,
         header.variant_count,
+        header.sample_count,
         header.flags.compression,
     )?;
 
@@ -289,6 +290,7 @@ fn read_layout2_variant_metadata(
     reader: &mut impl Read,
     path: &Path,
     variant_count: u32,
+    sample_count: u32,
     compression: BgenCompression,
 ) -> Result<Vec<VariantRecord>> {
     let mut variants = Vec::with_capacity(
@@ -298,7 +300,7 @@ fn read_layout2_variant_metadata(
 
     for _ in 0..variant_count {
         variants.push(read_layout2_variant_identifying_data(reader, path)?);
-        skip_layout2_probability_block(reader, path, compression)?;
+        skip_layout2_probability_block(reader, path, sample_count, compression)?;
     }
 
     if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
@@ -362,26 +364,96 @@ fn read_layout2_variant_identifying_data(
 fn skip_layout2_probability_block(
     reader: &mut impl Read,
     path: &Path,
+    expected_sample_count: u32,
     compression: BgenCompression,
 ) -> Result<()> {
-    let compressed_block_length = read_u32_le(reader, path)?;
+    let block_length = read_u32_le(reader, path)?;
     match compression {
-        BgenCompression::None => skip_exact(reader, path, u64::from(compressed_block_length)),
+        BgenCompression::None => validate_and_skip_uncompressed_layout2_probability_block(
+            reader,
+            path,
+            block_length,
+            expected_sample_count,
+        ),
         BgenCompression::Zlib | BgenCompression::Zstd => {
-            if compressed_block_length < 4 {
+            if block_length < 4 {
                 return Err(MetadataError::parse(
                     path,
                     "bgen compressed probability block length is smaller than decompressed length prefix",
                 ));
             }
             let _decompressed_block_length = read_u32_le(reader, path)?;
-            skip_exact(reader, path, u64::from(compressed_block_length - 4))
+            skip_exact(reader, path, u64::from(block_length - 4))
         }
         BgenCompression::Reserved => Err(MetadataError::parse(
             path,
             "bgen compression value is reserved",
         )),
     }
+}
+
+fn validate_and_skip_uncompressed_layout2_probability_block(
+    reader: &mut impl Read,
+    path: &Path,
+    block_length: u32,
+    expected_sample_count: u32,
+) -> Result<()> {
+    let fixed_header_length = 10_u32
+        .checked_add(expected_sample_count)
+        .ok_or_else(|| MetadataError::parse(path, "bgen sample count is out of range"))?;
+    if block_length < fixed_header_length {
+        return Err(MetadataError::parse(
+            path,
+            "bgen uncompressed probability block is shorter than the layout 2 header",
+        ));
+    }
+
+    let sample_count = read_u32_le(reader, path)?;
+    if sample_count != expected_sample_count {
+        return Err(MetadataError::parse(
+            path,
+            "bgen probability block sample count does not match header sample count",
+        ));
+    }
+
+    let allele_count = read_u16_le(reader, path)?;
+    if allele_count != 2 {
+        return Err(MetadataError::parse(
+            path,
+            "unsupported bgen multiallelic probability block; only biallelic records are supported",
+        ));
+    }
+
+    let min_ploidy = read_u8(reader, path)?;
+    let max_ploidy = read_u8(reader, path)?;
+    if min_ploidy != 2 || max_ploidy != 2 {
+        return Err(MetadataError::parse(
+            path,
+            "unsupported bgen variable-ploidy probability block; only diploid records are supported",
+        ));
+    }
+
+    for _ in 0..expected_sample_count {
+        let ploidy = read_u8(reader, path)? & 0b0011_1111;
+        if ploidy != 2 {
+            return Err(MetadataError::parse(
+                path,
+                "unsupported bgen variable-ploidy probability block; only diploid records are supported",
+            ));
+        }
+    }
+
+    let phased = read_u8(reader, path)?;
+    if phased != 0 {
+        return Err(MetadataError::parse(
+            path,
+            "unsupported bgen phased probability block; only unphased records are supported",
+        ));
+    }
+
+    let _bit_depth = read_u8(reader, path)?;
+    let remaining = block_length - fixed_header_length;
+    skip_exact(reader, path, u64::from(remaining))
 }
 
 fn skip_exact(reader: &mut impl Read, path: &Path, mut len: u64) -> Result<()> {
@@ -457,4 +529,15 @@ fn read_u32_le(reader: &mut impl Read, path: &Path) -> Result<u32> {
             source,
         })?;
     Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u8(reader: &mut impl Read, path: &Path) -> Result<u8> {
+    let mut byte = [0_u8; 1];
+    reader
+        .read_exact(&mut byte)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(byte[0])
 }
