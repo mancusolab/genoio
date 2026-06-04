@@ -16,6 +16,7 @@ const BGEN_MAGIC: &[u8; 4] = b"bgen";
 const ZERO_MAGIC: &[u8; 4] = &[0, 0, 0, 0];
 const MIN_HEADER_LENGTH: u32 = 20;
 const SAMPLE_IDENTIFIER_FLAG: u32 = 1 << 31;
+const DOSAGE_TOLERANCE: f64 = 1.0e-6;
 
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
     let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
@@ -374,6 +375,9 @@ fn skip_layout2_probability_block(
     let decoded =
         DecodedDosageVariant::decode(path, &payload, expected_sample_count, variant_allele_count)?;
     decoded.debug_assert_supported_subset();
+    let mut values = Vec::new();
+    let mut missing = Vec::new();
+    decoded.decode_source_order(path, &mut values, &mut missing)?;
     Ok(())
 }
 
@@ -598,6 +602,106 @@ impl<'a> DecodedDosageVariant<'a> {
             !self.packed_probabilities.is_empty() || self.header.non_missing_sample_count == 0
         );
     }
+
+    fn decode_source_order(
+        &self,
+        path: &Path,
+        values: &mut Vec<f32>,
+        missing: &mut Vec<bool>,
+    ) -> Result<()> {
+        let sample_count = usize::try_from(self.header.sample_count)
+            .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+        values.clear();
+        missing.clear();
+        values.reserve(sample_count);
+        missing.reserve(sample_count);
+
+        let mut bit_reader = LittleEndianBitReader::new(self.packed_probabilities);
+        for &ploidy_byte in &self.header.sample_ploidies {
+            let is_missing = ploidy_byte & 0b1000_0000 != 0;
+            if is_missing {
+                values.push(0.0);
+                missing.push(true);
+                continue;
+            }
+
+            let p_aa_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
+            let p_ab_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
+            values.push(decode_a1_dosage(
+                path,
+                self.header.bit_depth,
+                p_aa_raw,
+                p_ab_raw,
+            )?);
+            missing.push(false);
+        }
+
+        Ok(())
+    }
+}
+
+struct LittleEndianBitReader<'a> {
+    bytes: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> LittleEndianBitReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            bit_offset: 0,
+        }
+    }
+
+    fn read_u32(&mut self, path: &Path, bit_count: u8) -> Result<u32> {
+        debug_assert!((1..=32).contains(&bit_count));
+        let available_bits = self.bytes.len().checked_mul(8).ok_or_else(|| {
+            MetadataError::parse(path, "bgen packed probability bit count is out of range")
+        })?;
+        let end_bit = self
+            .bit_offset
+            .checked_add(usize::from(bit_count))
+            .ok_or_else(|| {
+                MetadataError::parse(path, "bgen packed probability bit count is out of range")
+            })?;
+        if end_bit > available_bits {
+            return Err(MetadataError::parse(
+                path,
+                "bgen packed probability bits are truncated",
+            ));
+        }
+
+        let mut value = 0_u32;
+        for output_bit in 0..bit_count {
+            let source_bit = self.bit_offset + usize::from(output_bit);
+            let byte = self.bytes[source_bit / 8];
+            let bit = (byte >> (source_bit % 8)) & 1;
+            value |= u32::from(bit) << output_bit;
+        }
+        self.bit_offset = end_bit;
+        Ok(value)
+    }
+}
+
+fn decode_a1_dosage(path: &Path, bit_depth: u8, p_aa_raw: u32, p_ab_raw: u32) -> Result<f32> {
+    let denominator = probability_denominator(bit_depth);
+    let p_aa = f64::from(p_aa_raw) / denominator;
+    let p_ab = f64::from(p_ab_raw) / denominator;
+    let p_bb = 1.0 - p_aa - p_ab;
+    let dosage = p_ab + 2.0 * p_bb;
+
+    if p_bb < -DOSAGE_TOLERANCE || !(-DOSAGE_TOLERANCE..=2.0 + DOSAGE_TOLERANCE).contains(&dosage) {
+        return Err(MetadataError::parse(
+            path,
+            "bgen malformed probability values produce invalid a1 dosage",
+        ));
+    }
+
+    Ok(dosage.clamp(0.0, 2.0) as f32)
+}
+
+fn probability_denominator(bit_depth: u8) -> f64 {
+    ((1_u64 << bit_depth) - 1) as f64
 }
 
 fn decompress_probability_block(
@@ -762,4 +866,115 @@ fn read_u8(reader: &mut impl Read, path: &Path) -> Result<u8> {
             source,
         })?;
     Ok(byte[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout2_payload(bit_depth: u8, ploidies: &[u8], calls: &[Option<(u32, u32)>]) -> Vec<u8> {
+        assert_eq!(ploidies.len(), calls.len());
+        let mut payload = Vec::new();
+        payload.extend_from_slice(
+            &u32::try_from(calls.len())
+                .expect("sample count should fit u32")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(&2_u16.to_le_bytes());
+        payload.push(2);
+        payload.push(2);
+        payload.extend_from_slice(ploidies);
+        payload.push(0);
+        payload.push(bit_depth);
+        append_packed_probabilities(&mut payload, bit_depth, calls);
+        payload
+    }
+
+    fn append_packed_probabilities(
+        output: &mut Vec<u8>,
+        bit_depth: u8,
+        calls: &[Option<(u32, u32)>],
+    ) {
+        let mut current_byte = 0_u8;
+        let mut bits_in_current_byte = 0_u8;
+        for &(p_aa, p_ab) in calls.iter().flatten() {
+            append_packed_probability_value(
+                output,
+                &mut current_byte,
+                &mut bits_in_current_byte,
+                bit_depth,
+                p_aa,
+            );
+            append_packed_probability_value(
+                output,
+                &mut current_byte,
+                &mut bits_in_current_byte,
+                bit_depth,
+                p_ab,
+            );
+        }
+        if bits_in_current_byte > 0 {
+            output.push(current_byte);
+        }
+    }
+
+    fn append_packed_probability_value(
+        output: &mut Vec<u8>,
+        current_byte: &mut u8,
+        bits_in_current_byte: &mut u8,
+        bit_depth: u8,
+        value: u32,
+    ) {
+        for bit_index in 0..bit_depth {
+            let bit = ((value >> bit_index) & 1) as u8;
+            *current_byte |= bit << *bits_in_current_byte;
+            *bits_in_current_byte += 1;
+            if *bits_in_current_byte == 8 {
+                output.push(*current_byte);
+                *current_byte = 0;
+                *bits_in_current_byte = 0;
+            }
+        }
+    }
+
+    fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
+        let denominator = ((1_u64 << bit_depth) - 1) as f32;
+        let p_aa = p_aa as f32 / denominator;
+        let p_ab = p_ab as f32 / denominator;
+        p_ab + 2.0 * (1.0 - p_aa - p_ab)
+    }
+
+    #[test]
+    fn decoded_dosage_variant_unpacks_little_endian_probabilities() {
+        let payload = layout2_payload(3, &[2, 0b1000_0010, 2], &[Some((5, 2)), None, Some((1, 4))]);
+        let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 3, 2)
+            .expect("payload should decode");
+
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        decoded
+            .decode_source_order(Path::new("test.bgen"), &mut values, &mut missing)
+            .expect("dosages should unpack");
+
+        let expected = [expected_dosage(3, 5, 2), 0.0, expected_dosage(3, 1, 4)];
+        assert_eq!(missing, vec![false, true, false]);
+        for (observed, expected) in values.iter().zip(expected) {
+            assert!((observed - expected).abs() <= f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn decoded_dosage_variant_rejects_impossible_probability_sum() {
+        let payload = layout2_payload(1, &[2], &[Some((1, 1))]);
+        let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 1, 2)
+            .expect("payload header should decode");
+
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        let error = decoded
+            .decode_source_order(Path::new("test.bgen"), &mut values, &mut missing)
+            .expect_err("impossible probabilities should fail");
+
+        assert!(error.to_string().contains("malformed probability"));
+    }
 }
