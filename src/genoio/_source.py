@@ -99,7 +99,7 @@ def resolve_bgen(path: str | Path) -> ResolvedSource:
     `.sample` member.
     """
     source_path = Path(path)
-    if source_path.suffix and source_path.suffix != _BGEN_SUFFIX:
+    if source_path.suffix and source_path.suffix != _BGEN_SUFFIX and source_path.exists():
         raise UnsupportedFormatError(f"source path {source_path} is not bgen")
     prefix = source_path.with_suffix("") if source_path.suffix == _BGEN_SUFFIX else source_path
     return _resolve_bgen_prefix(prefix)
@@ -122,19 +122,23 @@ def resolve_pfile(path: str | Path) -> ResolvedSource:
 
 
 def _resolve_bgen_prefix(prefix: Path) -> ResolvedSource:
-    bgen_path = prefix.with_suffix(_BGEN_SUFFIX)
+    bgen_path = _append_suffix(prefix, _BGEN_SUFFIX)
     if not bgen_path.exists():
         raise InvalidSourceError(f"source path does not exist: {bgen_path}")
     if not bgen_path.is_file():
         raise InvalidSourceError(f"source path is not a file: {bgen_path}")
 
     members = {"bgen": bgen_path}
-    sample_path = prefix.with_suffix(_BGEN_SAMPLE_SUFFIX)
+    sample_path = _append_suffix(prefix, _BGEN_SAMPLE_SUFFIX)
     if sample_path.exists():
         if not sample_path.is_file():
             raise InvalidSourceError(f"source member is not a file: {sample_path}")
         members["sample"] = sample_path
     return ResolvedSource(format=SourceFormat.BGEN, path=bgen_path, members=members, prefix=prefix)
+
+
+def _append_suffix(prefix: Path, suffix: str) -> Path:
+    return Path(f"{prefix}{suffix}")
 
 
 def _detect_single_file_format(path: Path) -> SourceFormat | None:

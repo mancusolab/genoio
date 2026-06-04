@@ -57,6 +57,34 @@ def test_bgen_prefix_resolves_optional_sample_companion(tmp_path):
     assert dataset.source.members == {"bgen": bgen_path, "sample": sample_path}
 
 
+def test_bgen_dotted_member_path_preserves_full_prefix(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.v1.bgen"
+    source_path.touch()
+
+    dataset = genoio.bgen(source_path)
+
+    assert dataset.source.path == source_path
+    assert dataset.source.members == {"bgen": source_path}
+    assert dataset.source.prefix == tmp_path / "cohort.v1"
+
+
+def test_bgen_dotted_prefix_resolves_optional_sample_companion(tmp_path):
+    import genoio
+
+    bgen_path = tmp_path / "cohort.v1.bgen"
+    sample_path = tmp_path / "cohort.v1.sample"
+    bgen_path.touch()
+    sample_path.touch()
+
+    dataset = genoio.bgen(tmp_path / "cohort.v1")
+
+    assert dataset.source.path == bgen_path
+    assert dataset.source.members == {"bgen": bgen_path, "sample": sample_path}
+    assert dataset.source.prefix == tmp_path / "cohort.v1"
+
+
 def test_bgen_missing_path_raises_invalid_source_error(tmp_path):
     import genoio
 
