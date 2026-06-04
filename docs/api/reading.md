@@ -19,6 +19,9 @@ policy. The `dosage` option controls this genotype value source:
 dosage-backed values. This release supports dense VCF `FORMAT/DS` and PLINK2
 unphased biallelic dosage reads. Sparse dosage, haplotype dosage, and PLINK1
 dosage are not implemented yet and raise `genoio.UnsupportedRepresentation`.
+Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
+value source, so dosage reads compute those statistics from expected allele
+dosages rather than hardcall counts.
 
 ## Metadata frames
 

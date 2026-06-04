@@ -178,7 +178,7 @@ fn stats_for_values(values: LeafValues) -> genoio_core::VariantStats {
     genoio_core::VariantStats {
         af: Some(if values.maf_min40 { 0.5 } else { 0.1 }),
         maf: Some(if values.maf_min40 { 0.5 } else { 0.1 }),
-        mac: Some(if values.maf_min40 { 4 } else { 1 }),
+        mac: Some(if values.maf_min40 { 4.0 } else { 1.0 }),
         missing_rate: 0.0,
         n_called: 4,
         polymorphic: true,
@@ -483,7 +483,7 @@ fn conjoined_threshold_predicates_are_tightened_or_rejected() {
     let stats = genoio_core::VariantStats {
         af: Some(0.03),
         maf: Some(0.03),
-        mac: Some(3),
+        mac: Some(3.0),
         missing_rate: 0.02,
         n_called: 100,
         polymorphic: true,
@@ -562,7 +562,7 @@ fn genotype_stats_preserve_integer_mac_beyond_f32_exact_range() {
         genoio_core::compute_variant_stats(&values, &missing).expect("stats should compute");
 
     assert_eq!(stats.n_called, u32::try_from(n_called).unwrap());
-    assert_eq!(stats.mac, Some(u32::try_from(n_called).unwrap()));
+    assert_eq!(stats.mac, Some(f64::from(u32::try_from(n_called).unwrap())));
     assert_eq!(stats.af, Some(0.5));
     assert_eq!(stats.maf, Some(0.5));
 }

@@ -3,11 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, compute_variant_stats, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    PartialFilterDecision, RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantWindow,
+    append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
+    compute_variant_stats, flip_values_to_minor_allele, reject_sparse_missing_values,
+    select_samples_source_order, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
+    MetadataError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 use rust_htslib::bcf::{
     record::{GenotypeAllele, Numeric},
@@ -102,12 +102,6 @@ pub fn read_vcf_dosage_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
-    if variant_filter.is_some_and(VariantFilter::requires_genotype_stats) {
-        return Err(MetadataError::parse(
-            path,
-            "dosage-backed genotype reads do not support genotype-stat filters yet",
-        ));
-    }
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         let reader = Reader::from_path(path)
             .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
@@ -474,7 +468,7 @@ fn read_vcf_dosage_dense_records<R: Read>(
         }
         let record = record_result
             .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
-        let variant = variant_record_from_record(path, &header, &record)?;
+        let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
@@ -492,16 +486,27 @@ fn read_vcf_dosage_dense_records<R: Read>(
                     continue;
                 }
             }
-            PartialFilterDecision::NeedGenotypes => {
-                return Err(MetadataError::parse(
-                    path,
-                    "dosage-backed genotype reads do not support genotype-stat filters yet",
-                ));
-            }
+            PartialFilterDecision::NeedGenotypes => {}
         }
 
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         validate_dense_biallelic_record(path, &record)?;
         let decoded = decode_ds_dosage_record(path, &record, &selection.source_indices)?;
+        if needs_genotype_decision {
+            let stats = compute_dosage_variant_stats(&decoded.values, &decoded.missing)?;
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            attach_variant_stats(&mut variant, stats);
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                continue;
+            }
+        }
         variants.push(variant);
         variant_major_values.extend(decoded.values);
         variant_major_missing.extend(decoded.missing);

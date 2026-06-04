@@ -51,7 +51,8 @@ copies of `a1`. Pass `dosage="hardcall"` explicitly when code should document
 that contract. For VCF sources with `FORMAT/DS` or PLINK2 sources with
 unphased biallelic dosage tracks, pass `dosage="dosage"` to read dense
 dosage-backed genotype values. No fallback to `GT` is attempted when VCF DS is
-missing.
+missing. Genotype-stat filters use the selected value source; for dosage reads,
+`maf`, `mac`, and `missing_rate` are computed from expected allele dosages.
 
 Ask for metadata when you need to preserve row and column labels:
 

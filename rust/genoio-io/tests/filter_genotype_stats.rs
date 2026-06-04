@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const PGEN_DOSAGE_TOLERANCE: f32 = 2.0 / 32768.0;
+
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -30,6 +32,22 @@ fn write_vcf(path: &Path) {
     .expect("vcf fixture should be written");
 }
 
+fn write_ds_vcf(path: &Path) {
+    fs::write(
+        path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Expected alternate allele dosage\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DS\t0/0:0.2\t0/1:1.4\t1/1:1.8
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT:DS\t0/0:0\t0/0:.\t0/1:0.7
+",
+    )
+    .expect("dosage vcf fixture should be written");
+}
+
 fn write_fixed_width_plink2(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let pgen = dir.join("tiny.pgen");
     let pvar = dir.join("tiny.pvar");
@@ -50,6 +68,57 @@ fn write_fixed_width_plink2(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
 1 20 rs2 C T
 1 30 rs3 G A
 1 40 rs4 T C
+",
+    )
+    .expect("pvar fixture should be written");
+    fs::write(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    )
+    .expect("psam fixture should be written");
+    (pgen, pvar, psam)
+}
+
+fn scaled_dosage(value: f32) -> [u8; 2] {
+    let raw = (value / 2.0 * 32768.0).round() as u16;
+    raw.to_le_bytes()
+}
+
+fn assert_pgen_dosage_close(observed: f32, expected: f32) {
+    assert!(
+        (observed - expected).abs() <= PGEN_DOSAGE_TOLERANCE,
+        "observed dosage {observed} differs from expected {expected}"
+    );
+}
+
+fn write_fixed_width_plink2_dosage(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let pgen = dir.join("dosage.pgen");
+    let pvar = dir.join("dosage.pvar");
+    let psam = dir.join("dosage.psam");
+    let mut pgen_bytes = vec![0x6c, 0x1b, 0x03];
+    pgen_bytes.extend(2_u32.to_le_bytes());
+    pgen_bytes.extend(3_u32.to_le_bytes());
+    pgen_bytes.push(0);
+    pgen_bytes.push(0x24);
+    pgen_bytes.extend(scaled_dosage(0.2));
+    pgen_bytes.extend(scaled_dosage(1.4));
+    pgen_bytes.extend(scaled_dosage(1.8));
+    pgen_bytes.push(0x0c);
+    pgen_bytes.extend(scaled_dosage(0.0));
+    pgen_bytes.extend(u16::MAX.to_le_bytes());
+    pgen_bytes.extend(scaled_dosage(0.7));
+    fs::write(&pgen, pgen_bytes).expect("dosage pgen fixture should be written");
+    fs::write(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 C T
 ",
     )
     .expect("pvar fixture should be written");
@@ -124,6 +193,75 @@ S4
     )
     .expect("psam fixture should be written");
     (pgen, pvar, psam)
+}
+
+#[test]
+fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
+    let dir = unique_dir("plink2-dosage-filter-genotype");
+    let (pgen, pvar, psam) = write_fixed_width_plink2_dosage(&dir);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "mac",
+        "params": {"max": 2}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_plink2_dosage_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        None,
+    )
+    .expect("plink2 dosage should filter");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.values[..2], [0.0, 0.0]);
+    assert_pgen_dosage_close(dense.values[2], 0.7);
+    assert_eq!(dense.missing_mask, vec![false, true, false]);
+    assert!(dense.variants[0]
+        .af
+        .is_some_and(|af| (af - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE));
+    assert!(dense.variants[0]
+        .maf
+        .is_some_and(|maf| (maf - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE));
+    assert_eq!(dense.variants[0].mac, None);
+    assert_eq!(dense.variants[0].missing_rate, Some(1.0 / 3.0));
+    assert_eq!(dense.variants[0].n_called, Some(2));
+    assert_eq!(dense.diagnostics.candidate_variants, 2);
+    assert_eq!(dense.diagnostics.retained_variants, 1);
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+}
+
+#[test]
+fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
+    let dir = unique_dir("vcf-dosage-filter-genotype");
+    let path = dir.join("dosage.vcf");
+    write_ds_vcf(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "mac",
+        "params": {"max": 2}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None)
+        .expect("vcf dosage should filter");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.values, vec![0.0, 0.0, 0.7]);
+    assert_eq!(dense.missing_mask, vec![false, true, false]);
+    assert_eq!(dense.variants[0].af, Some(0.175));
+    assert_eq!(dense.variants[0].maf, Some(0.175));
+    assert_eq!(dense.variants[0].mac, None);
+    assert_eq!(dense.variants[0].missing_rate, Some(1.0 / 3.0));
+    assert_eq!(dense.variants[0].n_called, Some(2));
+    assert_eq!(dense.diagnostics.candidate_variants, 2);
+    assert_eq!(dense.diagnostics.retained_variants, 1);
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
 }
 
 #[test]

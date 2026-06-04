@@ -285,13 +285,20 @@ def test_dense_vcf_dosage_blocks_match_full_dosage_read(tmp_path):
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
 
 
-def test_vcf_dosage_rejects_genotype_stat_filters_until_semantics_are_defined(tmp_path):
+def test_vcf_dosage_genotype_stat_filters_use_fractional_mac(tmp_path):
     import genoio
 
     dataset = genoio.vcf(write_ds_vcf(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="genotype-stat filters"):
-        dataset.read(dosage="dosage", variants=genoio.maf(min=0.01))
+    G, variants = dataset.read(
+        dosage="dosage",
+        missing="nan",
+        variants=genoio.mac(max=2),
+        return_variants=True,
+    )
+
+    np.testing.assert_array_equal(G, np.array([[0.0], [np.nan], [0.7]], dtype=np.float32))
+    assert variants["id"].to_list() == ["rs2"]
 
 
 def test_return_samples_and_variants_tuple_order_is_matrix_samples_variants(tmp_path):

@@ -429,7 +429,7 @@ def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:
     normalized_missing = _normalize_missing(options.missing, sparse_format=sparse_format)
     variant_filter_ir = _variant_filter_ir(options.variants)
     normalized_dtype = _normalize_dtype(options.dtype)
-    _validate_dosage_compatibility(options.dosage, sparse_format, variant_filter_ir)
+    _validate_dosage_compatibility(options.dosage, sparse_format)
     _validate_sparse_missing_compatibility(sparse_format, normalized_missing)
     _validate_missing_dtype_compatibility(normalized_missing, normalized_dtype)
     _validate_sample_filter(options.samples)
@@ -467,27 +467,11 @@ def _validate_dosage_source(dosage: str) -> None:
 def _validate_dosage_compatibility(
     dosage: str,
     sparse_format: str | None,
-    variant_filter_ir: dict[str, Any] | None,
 ) -> None:
     if dosage == "hardcall":
         return
     if sparse_format is not None:
         raise UnsupportedRepresentation("sparse dosage-backed genotype reads are not implemented")
-    if variant_filter_ir is not None and _filter_ir_has_genotype_stat_predicate(variant_filter_ir):
-        raise UnsupportedRepresentation("dosage-backed genotype reads do not support genotype-stat filters yet")
-
-
-def _filter_ir_has_genotype_stat_predicate(expr: dict[str, Any]) -> bool:
-    op = expr.get("op")
-    if op == "predicate":
-        return expr.get("name") in {"maf", "mac", "missing_rate", "polymorphic"}
-    if op in {"and", "or"}:
-        return _filter_ir_has_genotype_stat_predicate(expr["left"]) or _filter_ir_has_genotype_stat_predicate(
-            expr["right"]
-        )
-    if op == "not":
-        return _filter_ir_has_genotype_stat_predicate(expr["expr"])
-    return False
 
 
 def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:

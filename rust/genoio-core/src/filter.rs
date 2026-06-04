@@ -36,12 +36,12 @@ pub struct RegionPredicate {
     pub end: u32,
 }
 
-/// Per-variant statistics computed from called diploid genotypes.
+/// Per-variant statistics computed from called diploid genotype values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VariantStats {
     pub af: Option<f64>,
     pub maf: Option<f64>,
-    pub mac: Option<u32>,
+    pub mac: Option<f64>,
     pub missing_rate: f64,
     pub n_called: u32,
     pub polymorphic: bool,
@@ -525,8 +525,8 @@ impl Predicate {
                     && max.is_none_or(|threshold| maf <= f64::from(threshold))
             }),
             Self::Mac { min, max } => stats.and_then(|stats| stats.mac).is_some_and(|mac| {
-                min.is_none_or(|threshold| mac >= threshold)
-                    && max.is_none_or(|threshold| mac <= threshold)
+                min.is_none_or(|threshold| mac >= f64::from(threshold))
+                    && max.is_none_or(|threshold| mac <= f64::from(threshold))
             }),
             Self::MissingRate { max } => {
                 stats.is_some_and(|stats| stats.missing_rate <= f64::from(*max))
@@ -765,6 +765,42 @@ pub fn compute_variant_stats(
     variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
 }
 
+/// Compute frequency and missingness statistics for one diploid dosage variant.
+///
+/// `values` must contain expected `a1` allele dosages in `[0, 2]`. Missing
+/// calls are excluded from AF/MAF/MAC and included only in `missing_rate`.
+pub fn compute_dosage_variant_stats(
+    values: &[f32],
+    missing_mask: &[bool],
+) -> Result<VariantStats, MetadataError> {
+    if values.len() != missing_mask.len() {
+        return Err(MetadataError::parse(
+            "<filter>",
+            "variant values and missing mask lengths differ",
+        ));
+    }
+
+    let mut allele_count = 0.0_f64;
+    let mut called_count = 0_u64;
+    let mut missing_count = 0_u64;
+    for (value, missing) in values.iter().zip(missing_mask) {
+        if *missing {
+            missing_count += 1;
+            continue;
+        }
+        if !(0.0..=2.0).contains(value) {
+            return Err(MetadataError::parse(
+                "<filter>",
+                format!("dosage statistics require values in [0, 2]; observed {value}"),
+            ));
+        }
+        allele_count += f64::from(*value);
+        called_count += 1;
+    }
+
+    variant_stats_from_dosage_count(allele_count, called_count, missing_count)
+}
+
 /// Compute variant statistics from hard-call category counts.
 ///
 /// Counts are kept as `u64` while accumulating and narrowed only after overflow
@@ -833,10 +869,70 @@ pub fn variant_stats_from_counts(
     Ok(VariantStats {
         af: Some(af),
         maf: Some(maf),
-        mac: Some(mac),
+        mac: Some(f64::from(mac)),
         missing_rate,
         n_called,
         polymorphic: mac > 0,
+    })
+}
+
+fn variant_stats_from_dosage_count(
+    allele_count: f64,
+    called_count: u64,
+    missing_count: u64,
+) -> Result<VariantStats, MetadataError> {
+    if !allele_count.is_finite() || allele_count < 0.0 {
+        return Err(MetadataError::parse(
+            "<filter>",
+            "allele dosage count is outside the supported range",
+        ));
+    }
+    let total = called_count.checked_add(missing_count).ok_or_else(|| {
+        MetadataError::parse(
+            "<filter>",
+            "genotype count exceeds supported metadata range",
+        )
+    })?;
+    let n_called = u32::try_from(called_count).map_err(|_| {
+        MetadataError::parse(
+            "<filter>",
+            "called genotype count exceeds supported metadata range",
+        )
+    })?;
+
+    let missing_rate = if total == 0 {
+        0.0
+    } else {
+        missing_count as f64 / total as f64
+    };
+    if n_called == 0 {
+        return Ok(VariantStats {
+            af: None,
+            maf: None,
+            mac: None,
+            missing_rate,
+            n_called,
+            polymorphic: false,
+        });
+    }
+
+    let called_alleles = 2.0 * f64::from(n_called);
+    if allele_count > called_alleles {
+        return Err(MetadataError::parse(
+            "<filter>",
+            "allele dosage count exceeds called allele count",
+        ));
+    }
+    let af = allele_count / called_alleles;
+    let maf = af.min(1.0 - af);
+    let mac = allele_count.min(called_alleles - allele_count);
+    Ok(VariantStats {
+        af: Some(af),
+        maf: Some(maf),
+        mac: Some(mac),
+        missing_rate,
+        n_called,
+        polymorphic: mac > 0.0,
     })
 }
 
@@ -844,9 +940,19 @@ pub fn variant_stats_from_counts(
 pub fn attach_variant_stats(variant: &mut VariantRecord, stats: VariantStats) {
     variant.af = stats.af.map(|value| value as f32);
     variant.maf = stats.maf.map(|value| value as f32);
-    variant.mac = stats.mac;
+    // Public variant metadata keeps MAC integer-valued. Dosage filters still
+    // evaluate fractional MAC internally via VariantStats.
+    variant.mac = stats.mac.and_then(exact_u32_from_f64);
     variant.missing_rate = Some(stats.missing_rate as f32);
     variant.n_called = Some(stats.n_called);
+}
+
+fn exact_u32_from_f64(value: f64) -> Option<u32> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
+        Some(value as u32)
+    } else {
+        None
+    }
 }
 
 fn discrete_allele_count(value: f32) -> Result<u64, MetadataError> {
