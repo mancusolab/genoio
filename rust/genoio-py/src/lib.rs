@@ -39,6 +39,11 @@ fn read_metadata(
             let psam = member_path(members, "psam")?;
             genoio_io::read_plink2_metadata(&pgen, &pvar, &psam)
         }
+        "bgen" => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bgen metadata reads are not implemented",
+            ));
+        }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported metadata format: {other}"
@@ -120,6 +125,18 @@ fn read_dense(
                 ),
             }
         }
+        "bgen" => match read_options.dosage {
+            DosageSource::Hardcall => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "bgen hardcall genotype reads are not implemented",
+                ));
+            }
+            DosageSource::Dosage => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "bgen dosage reads are not implemented",
+                ));
+            }
+        },
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported dense format: {other}"
@@ -187,6 +204,11 @@ fn read_sparse(
                 read_options.variant_window,
             )
         }
+        "bgen" => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bgen sparse genotype reads are not implemented",
+            ));
+        }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported sparse format: {other}"
@@ -223,6 +245,11 @@ fn read_haplotypes_dense(
                 read_options.variant_window,
             )
         }
+        "bgen" => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bgen does not support haplo reads",
+            ));
+        }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported haplotype format: {other}"
@@ -258,6 +285,11 @@ fn read_haplotypes_sparse(
                 read_options.variant_filter.as_ref(),
                 read_options.variant_window,
             )
+        }
+        "bgen" => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bgen does not support haplo reads",
+            ));
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(

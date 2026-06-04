@@ -151,8 +151,11 @@ class Dataset:
             return_variants=return_variants,
         )
         validated_options = _validate_read_options(read_options)
-        self._validate_source_supports_kind(read_options.kind)
-        self._validate_source_supports_dosage(read_options.kind, read_options.dosage)
+        self._validate_source_supports_read(
+            read_options.kind,
+            read_options.dosage,
+            validated_options.sparse_format,
+        )
 
         return self._read_validated(
             read_options=read_options,
@@ -221,8 +224,11 @@ class Dataset:
         _validate_block_size(size)
         normalized_options = _read_options_with_defaults(read_options)
         validated_options = _validate_read_options(normalized_options)
-        self._validate_source_supports_kind(normalized_options.kind)
-        self._validate_source_supports_dosage(normalized_options.kind, normalized_options.dosage)
+        self._validate_source_supports_read(
+            normalized_options.kind,
+            normalized_options.dosage,
+            validated_options.sparse_format,
+        )
         return self._block_iterator(size, normalized_options, validated_options)
 
     def _block_iterator(
@@ -356,9 +362,28 @@ class Dataset:
     def _validate_source_supports_kind(self, kind: str) -> None:
         if kind == "geno":
             return
+        if self.source.format.value == "bgen":
+            raise _unsupported_haplotype_source(self.source.format.value)
         capabilities = self._metadata()["capabilities"]
         if not capabilities["supports_haplo"]:
             raise _unsupported_haplotype_source(self.source.format.value)
+
+    def _validate_source_supports_read(
+        self,
+        kind: str,
+        dosage: str,
+        sparse_format: str | None,
+    ) -> None:
+        if self.source.format.value == "bgen":
+            if kind == "haplo":
+                raise UnsupportedRepresentation("bgen does not support haplo reads")
+            if dosage == "hardcall":
+                if sparse_format is not None:
+                    raise UnsupportedRepresentation("bgen sparse genotype reads are not implemented")
+                raise UnsupportedRepresentation("bgen hardcall genotype reads are not implemented")
+            return
+        self._validate_source_supports_kind(kind)
+        self._validate_source_supports_dosage(kind, dosage)
 
     def _validate_source_supports_dosage(self, kind: str, dosage: str) -> None:
         if dosage == "hardcall":
@@ -572,6 +597,8 @@ def _public_read_error(error: ValueError) -> Exception:
         return SampleFilterError(message)
     if "sparse missing values" in message:
         return MissingDataError(message)
+    if "bgen" in message and "not implemented" in message and "dosage reads" not in message:
+        return UnsupportedRepresentation(message)
     if (
         "FORMAT/DS" in message
         or "pgen does not contain dosage values" in message
@@ -584,7 +611,11 @@ def _public_read_error(error: ValueError) -> Exception:
 
 def _public_haplotype_read_error(error: ValueError) -> Exception:
     message = str(error)
-    if "unphased" in message or "unsupported haplotype format" in message:
+    if (
+        "unphased" in message
+        or "unsupported haplotype format" in message
+        or ("bgen" in message and "not implemented" in message)
+    ):
         return UnsupportedRepresentation(message)
     if "sparse missing values" in message:
         return MissingDataError(message)
