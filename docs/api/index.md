@@ -1,6 +1,11 @@
 # API overview
 
-The public API is intentionally small.
+The public API is intentionally small. Start here if you want to understand how
+the pieces fit together before reading the generated reference pages: source
+constructors create `Dataset` objects, datasets read dense or sparse genotype
+matrices, and filters describe which variants should be retained. Matrices are
+returned with samples on rows and variants on columns, with optional Polars
+metadata frames for sample and variant alignment.
 
 - [`vcf`](reading.md#genoio.vcf), [`bfile`](reading.md#genoio.bfile), and
   [`pfile`](reading.md#genoio.pfile) return reusable [`Dataset`](reading.md#genoio.Dataset)

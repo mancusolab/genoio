@@ -10,14 +10,50 @@ import genoio
 
 ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
 
 for X, variants in ds.blocks(10_000, return_variants=True):
-    run_association_scan(X, samples=samples, variants=variants)
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 `samples` describes the rows of every block. `variants` describes the columns
 of the current block only. That avoids loading all variant metadata globally and
 matching it back to columns after the fact.
+
+---
+
+## Metadata frames
+
+Sample and variant metadata are returned as Polars DataFrames. `samples()` is
+source ordered and uses `iid` as the sample identifier for phenotype or
+covariate joins.
+
+??? info "Sample metadata schema"
+    | Column | Meaning |
+    |---|---|
+    | `fid` | Family ID when present, otherwise null. |
+    | `iid` | Sample ID. |
+    | `father` | Paternal ID when present, otherwise null. |
+    | `mother` | Maternal ID when present, otherwise null. |
+    | `sex` | Source sex code when present, otherwise null. |
+    | `phenotype` | Source phenotype field when present, otherwise null. |
+
+`variants()` is source ordered. Variant frames returned from `read` or `blocks`
+are ordered to match matrix columns after filtering.
+
+??? info "Variant metadata schema"
+    | Column | Meaning |
+    |---|---|
+    | `chrom` | Chromosome or contig label. |
+    | `pos` | 1-based variant position. |
+    | `id` | Variant ID from the source. |
+    | `a0` / `a1` | Alleles used for returned dosage orientation. |
+    | `ref` / `alt` | Reference and alternate alleles when present in the source. |
+    | `source_a0` / `source_a1` | Original source alleles before normalization. |
+    | `flipped` | Whether source allele orientation was flipped for normalized output. |
+    | `qual` | VCF `QUAL` value when available. |
+    | `af` / `maf` / `mac` | Allele-frequency statistics when computed for genotype filtering. |
+    | `missing_rate` / `n_called` | Missingness statistics when computed for genotype filtering. |
 
 ---
 
@@ -82,12 +118,15 @@ source records.
 rare = genoio.maf(max=0.05) & genoio.missing_rate(max=0.1)
 
 ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
+
 for X, variants in ds.blocks(
     5_000,
     variants=rare,
     return_variants=True,
 ):
-    run_association_scan(X, variants=variants)
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 ---

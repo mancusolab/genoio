@@ -11,12 +11,15 @@ rare_high_quality = (
 )
 
 ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
+
 for X, variants in ds.blocks(
     5_000,
     variants=rare_high_quality,
     return_variants=True,
 ):
-    run_association_scan(X, variants=variants)
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 Expressions compose with Python operators:

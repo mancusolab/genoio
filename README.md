@@ -10,11 +10,13 @@ import genoio
 
 ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
 
 for X, variants in ds.blocks(10_000, return_variants=True):
     # X has shape (samples, variants_in_this_block).
     # `variants` describes the columns of X in the same order.
-    run_association_scan(X, samples=samples, variants=variants)
+    # `y` must be aligned to the rows described by `samples`.
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 This is the main use case: samples are fixed, variants stream by block, and
@@ -72,12 +74,15 @@ rare_high_quality = (
 )
 
 ds = genoio.vcf("data/chr22_hg38.vcf.gz")
+samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
+
 for X, variants in ds.blocks(
     5_000,
     variants=rare_high_quality,
     return_variants=True,
 ):
-    run_association_scan(X, variants=variants)
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 Expressions compose with Python operators:
@@ -167,6 +172,11 @@ variants = ds.variants()
 alleles, normalized `a0`/`a1` alleles, optional `qual`, and genotype-derived
 statistics when a read computes them for filtering.
 
+Sample metadata columns are `fid`, `iid`, `father`, `mother`, `sex`, and
+`phenotype`. Variant metadata columns are `chrom`, `pos`, `id`, `a0`, `a1`,
+`ref`, `alt`, `source_a0`, `source_a1`, `flipped`, `qual`, `af`, `maf`, `mac`,
+`missing_rate`, and `n_called`.
+
 Return metadata alongside a whole-matrix read:
 
 ```python
@@ -181,9 +191,10 @@ For block reads, prefer reading samples once and returning variants per block:
 ```python
 ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
 
 for X, variants in ds.blocks(10_000, return_variants=True):
-    run_association_scan(X, samples=samples, variants=variants)
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 ## Samples and Missing Data

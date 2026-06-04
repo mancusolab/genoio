@@ -9,10 +9,12 @@ import genoio
 
 ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
 
 for X, variants in ds.blocks(10_000, return_variants=True):
     # X has shape (samples, variants_in_this_block).
-    run_association_scan(X, samples=samples, variants=variants)
+    # `y` must be aligned to the rows described by `samples`.
+    run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
 Three constructors resolve supported sources:

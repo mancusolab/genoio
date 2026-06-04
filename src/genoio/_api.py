@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from numpy.typing import DTypeLike
 
 from . import _rust
 from ._assembly import (
@@ -48,7 +49,7 @@ class _ReadOptions:
     variants: Any
     samples: list[str] | tuple[str, ...] | set[str] | None
     missing: Any
-    dtype: Any
+    dtype: DTypeLike
     return_samples: bool
     return_variants: bool
 
@@ -86,7 +87,7 @@ class Dataset:
         variants: Any = None,
         samples: list[str] | tuple[str, ...] | set[str] | None = None,
         missing: Any = _DEFAULT_MISSING,
-        dtype: Any = "float32",
+        dtype: DTypeLike = "float32",
         return_samples: bool = False,
         return_variants: bool = False,
     ) -> Any:
@@ -149,6 +150,11 @@ class Dataset:
     def samples(self, **options: Any) -> Any:
         r"""Return sample metadata as a Polars DataFrame.
 
+        Columns are `fid`, `iid`, `father`, `mother`, `sex`, and `phenotype`.
+        Rows are ordered as they appear in the source. Haplotype reads that
+        return sample metadata add `source_sample_index` and `haplotype_index`
+        columns to map haplotype rows back to source samples.
+
         **Returns:**
 
         Polars DataFrame with source sample metadata in source order.
@@ -158,6 +164,12 @@ class Dataset:
 
     def variants(self, *, stats: Any = None, **options: Any) -> Any:
         r"""Return variant metadata as a Polars DataFrame.
+
+        Columns are `chrom`, `pos`, `id`, `a0`, `a1`, `ref`, `alt`,
+        `source_a0`, `source_a1`, `flipped`, `qual`, `af`, `maf`, `mac`,
+        `missing_rate`, and `n_called`. Rows are ordered as they appear in the
+        source; variant frames returned by matrix reads are ordered to match
+        matrix columns after filtering.
 
         The `stats` argument is reserved for future metadata-stat controls.
         Passing it currently raises `genoio.InvalidOptionError`.
@@ -473,7 +485,7 @@ def _normalize_missing(missing: Any, *, sparse_format: str | None) -> str:
     return missing
 
 
-def _normalize_dtype(dtype: Any) -> np.dtype[Any]:
+def _normalize_dtype(dtype: DTypeLike) -> np.dtype[Any]:
     try:
         return np.dtype(dtype)
     except TypeError as error:

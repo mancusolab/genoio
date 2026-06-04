@@ -28,12 +28,16 @@
 
           {%- if config.show_signature_annotations and parameter.annotation is not none -%}
             {%- set ns.equal = " = " -%}
+            {%- set annotation = parameter.annotation -%}
+            {%- if annotation[0] == "'" and annotation[-1] == "'" -%}
+              {%- set annotation = annotation[1:-1] -%}
+            {%- endif -%}
             {%- if config.separate_signature and config.signature_crossrefs -%}
-              {%- with expression = parameter.annotation -%}
+              {%- with expression = annotation -%}
                 {%- set ns.annotation -%}: {% include "expression.html.jinja" with context %}{%- endset -%}
               {%- endwith -%}
             {%- else -%}
-              {%- set ns.annotation = ": " + parameter.annotation|safe -%}
+              {%- set ns.annotation = ": " + annotation|safe -%}
             {%- endif -%}
           {%- else -%}
             {%- set ns.equal = "=" -%}
@@ -58,10 +62,14 @@
     {%- if config.show_signature_annotations
         and function.annotation
         and not (config.merge_init_into_class and function.name == "__init__" )
-    %} -> {% if config.separate_signature and config.signature_crossrefs -%}
-        {%- with expression = function.annotation %}{% include "expression.html.jinja" with context %}{%- endwith -%}
+    %}{%- set annotation = function.annotation -%}
+      {%- if annotation[0] == "'" and annotation[-1] == "'" -%}
+        {%- set annotation = annotation[1:-1] -%}
+      {%- endif -%}
+      -> {% if config.separate_signature and config.signature_crossrefs -%}
+        {%- with expression = annotation %}{% include "expression.html.jinja" with context %}{%- endwith -%}
       {%- else -%}
-        {{ function.annotation|safe }}
+        {{ annotation|safe }}
       {%- endif -%}
     {%- endif -%}
 
