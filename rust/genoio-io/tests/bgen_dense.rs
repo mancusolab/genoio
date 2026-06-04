@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const FLAG_LAYOUT2: u32 = 2 << 2;
 const FLAG_SAMPLE_IDENTIFIERS: u32 = 1 << 31;
+const FLAG_ZLIB_COMPRESSION: u32 = 1;
+const FLAG_RESERVED_COMPRESSION: u32 = 3;
 
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -121,6 +123,36 @@ fn write_empty_layout2_probability_block(
     Ok(())
 }
 
+fn write_placeholder_compressed_probability_block(writer: &mut impl Write) -> io::Result<()> {
+    let compressed_payload = [0x11_u8, 0x22, 0x33];
+    let c = 4_u32
+        .checked_add(
+            u32::try_from(compressed_payload.len())
+                .expect("compressed payload length should fit u32"),
+        )
+        .expect("compressed block length should fit u32");
+    let d = 10_u32;
+    writer.write_all(&c.to_le_bytes())?;
+    writer.write_all(&d.to_le_bytes())?;
+    writer.write_all(&compressed_payload)
+}
+
+fn write_bgen_fixture(
+    path: &Path,
+    flags: u32,
+    n_variants: u32,
+    write_variants: impl FnOnce(&mut Vec<u8>),
+) {
+    let mut bgen = Vec::new();
+    write_bgen_header(&mut bgen, 2, n_variants, flags, true).expect("header should write");
+    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
+    bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+    write_variants(&mut bgen);
+    fs::write(path, bgen).expect("bgen fixture should be written");
+}
+
 fn write_two_sample_two_variant_bgen(path: &Path) {
     write_two_sample_two_variant_bgen_with_sample_ids(path, true);
 }
@@ -200,6 +232,17 @@ fn bgen_metadata_reads_embedded_sample_ids_and_variant_rows() {
             .collect::<Vec<_>>(),
         vec![("1", 10, "rs1", "A", "G"), ("2", 20, "rs2", "C", "T")]
     );
+    assert_eq!(metadata.variants[0].ref_allele.as_deref(), Some("A"));
+    assert_eq!(metadata.variants[0].alt_allele.as_deref(), Some("G"));
+    assert_eq!(metadata.variants[0].source_a0, "A");
+    assert_eq!(metadata.variants[0].source_a1, "G");
+    assert!(!metadata.variants[0].flipped);
+    assert_eq!(metadata.variants[0].qual, None);
+    assert_eq!(metadata.variants[0].af, None);
+    assert_eq!(metadata.variants[0].maf, None);
+    assert_eq!(metadata.variants[0].mac, None);
+    assert_eq!(metadata.variants[0].missing_rate, None);
+    assert_eq!(metadata.variants[0].n_called, None);
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
     assert!(!metadata.capabilities.phased);
@@ -265,4 +308,95 @@ fn bgen_metadata_rejects_missing_companion_path_when_sample_ids_not_embedded() {
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("missing sample IDs should fail");
 
     assert_metadata_error_contains(error, "companion sample path");
+}
+
+#[test]
+fn bgen_metadata_uses_variant_id_when_rsid_is_empty() {
+    let dir = unique_dir("bgen-empty-rsid");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_empty_layout2_probability_block(writer, 2, 2)
+            .expect("probability block should write");
+    });
+
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None).expect("metadata should parse");
+
+    assert_eq!(metadata.variants[0].id, "var1");
+}
+
+#[test]
+fn bgen_metadata_skips_compressed_probability_blocks_before_next_variant() {
+    let dir = unique_dir("bgen-compressed-skip");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_placeholder_compressed_probability_block(writer)
+            .expect("first compressed probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_placeholder_compressed_probability_block(writer)
+            .expect("second compressed probability block should write");
+    });
+
+    let metadata =
+        genoio_io::read_bgen_metadata(&bgen, None).expect("compressed metadata should parse");
+
+    assert_eq!(
+        metadata
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1", "rs2"]
+    );
+}
+
+#[test]
+fn bgen_metadata_rejects_multiallelic_variants() {
+    let dir = unique_dir("bgen-multiallelic");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "C", "G"])
+            .expect("variant identifying data should write");
+        write_empty_layout2_probability_block(writer, 2, 3)
+            .expect("probability block should write");
+    });
+
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("multiallelic BGEN should fail");
+
+    assert_metadata_error_contains(error, "multiallelic");
+}
+
+#[test]
+fn bgen_metadata_rejects_compressed_probability_block_shorter_than_length_prefix() {
+    let dir = unique_dir("bgen-short-compressed-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        writer
+            .write_all(&3_u32.to_le_bytes())
+            .expect("short C should write");
+    });
+
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("short compressed block should fail");
+
+    assert_metadata_error_contains(error, "probability block");
+}
+
+#[test]
+fn bgen_metadata_rejects_unsupported_compression_flag() {
+    let dir = unique_dir("bgen-reserved-compression");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_RESERVED_COMPRESSION, 0, |_| {});
+
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("reserved compression should fail");
+
+    assert_metadata_error_contains(error, "compression");
 }

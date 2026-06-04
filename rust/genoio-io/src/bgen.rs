@@ -41,7 +41,12 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
             path: bgen.to_path_buf(),
             source,
         })?;
-    let variants = read_layout2_variant_metadata(&mut reader, bgen, header.variant_count)?;
+    let variants = read_layout2_variant_metadata(
+        &mut reader,
+        bgen,
+        header.variant_count,
+        header.flags.compression,
+    )?;
 
     Ok(MetadataOutput {
         samples,
@@ -275,9 +280,10 @@ fn sample_record(iid: String) -> SampleRecord {
 }
 
 fn read_layout2_variant_metadata(
-    reader: &mut (impl Read + Seek),
+    reader: &mut impl Read,
     path: &Path,
     variant_count: u32,
+    compression: BgenCompression,
 ) -> Result<Vec<VariantRecord>> {
     let mut variants = Vec::with_capacity(
         usize::try_from(variant_count)
@@ -286,13 +292,14 @@ fn read_layout2_variant_metadata(
 
     for _ in 0..variant_count {
         variants.push(read_layout2_variant_identifying_data(reader, path)?);
-        let probability_block_length = read_u32_le(reader, path)?;
-        reader
-            .seek(SeekFrom::Current(i64::from(probability_block_length)))
-            .map_err(|source| MetadataError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        skip_layout2_probability_block(reader, path, compression)?;
+    }
+
+    if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
+        return Err(MetadataError::parse(
+            path,
+            "bgen parsed variant count does not match header variant count",
+        ));
     }
 
     Ok(variants)
@@ -307,10 +314,10 @@ fn read_layout2_variant_identifying_data(
     let chrom = read_len_prefixed_string_u16(reader, path, "variant chromosome")?;
     let pos = read_u32_le(reader, path)?;
     let allele_count = read_u16_le(reader, path)?;
-    if allele_count < 2 {
+    if allele_count != 2 {
         return Err(MetadataError::parse(
             path,
-            "bgen variant must contain at least two alleles",
+            "unsupported bgen multiallelic variant metadata; only biallelic records are supported",
         ));
     }
 
@@ -332,8 +339,8 @@ fn read_layout2_variant_identifying_data(
         id,
         a0: a0.clone(),
         a1: a1.clone(),
-        ref_allele: None,
-        alt_allele: None,
+        ref_allele: Some(a0.clone()),
+        alt_allele: Some(a1.clone()),
         source_a0: a0,
         source_a1: a1,
         flipped: false,
@@ -344,6 +351,48 @@ fn read_layout2_variant_identifying_data(
         missing_rate: None,
         n_called: None,
     })
+}
+
+fn skip_layout2_probability_block(
+    reader: &mut impl Read,
+    path: &Path,
+    compression: BgenCompression,
+) -> Result<()> {
+    let compressed_block_length = read_u32_le(reader, path)?;
+    match compression {
+        BgenCompression::None => skip_exact(reader, path, u64::from(compressed_block_length)),
+        BgenCompression::Zlib | BgenCompression::Zstd => {
+            if compressed_block_length < 4 {
+                return Err(MetadataError::parse(
+                    path,
+                    "bgen compressed probability block length is smaller than decompressed length prefix",
+                ));
+            }
+            let _decompressed_block_length = read_u32_le(reader, path)?;
+            skip_exact(reader, path, u64::from(compressed_block_length - 4))
+        }
+        BgenCompression::Reserved => Err(MetadataError::parse(
+            path,
+            "bgen compression value is reserved",
+        )),
+    }
+}
+
+fn skip_exact(reader: &mut impl Read, path: &Path, mut len: u64) -> Result<()> {
+    let mut buffer = [0_u8; 8192];
+    while len > 0 {
+        let chunk_len = buffer
+            .len()
+            .min(usize::try_from(len).unwrap_or(buffer.len()));
+        reader
+            .read_exact(&mut buffer[..chunk_len])
+            .map_err(|source| MetadataError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        len -= u64::try_from(chunk_len).expect("skip chunk length should fit u64");
+    }
+    Ok(())
 }
 
 fn read_len_prefixed_string_u16(
