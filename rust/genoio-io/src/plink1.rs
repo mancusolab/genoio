@@ -51,6 +51,10 @@ pub fn read_plink1_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        return empty_plink1_dense(bed, bim, fam, requested_samples);
+    }
+
     if let (None, Some(window)) = (variant_filter, variant_window) {
         return read_plink1_dense_source_window(bed, bim, fam, requested_samples, window);
     }
@@ -272,6 +276,10 @@ pub fn read_plink1_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        return empty_plink1_sparse(bed, bim, fam, requested_samples);
+    }
+
     let mut bed_file = open_bed_file(bed)?;
 
     let all_samples = parse_fam(fam)?;
@@ -389,6 +397,65 @@ pub fn read_plink1_sparse_windowed(
         data,
         selection.samples,
         variants,
+        diagnostics,
+    )
+}
+
+fn empty_plink1_dense(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+) -> Result<DenseGenotypeMatrix> {
+    fs::metadata(bed).map_err(|source| MetadataError::Io {
+        path: bed.to_path_buf(),
+        source,
+    })?;
+    fs::metadata(bim).map_err(|source| MetadataError::Io {
+        path: bim.to_path_buf(),
+        source,
+    })?;
+    let all_samples = parse_fam(fam)?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    DenseGenotypeMatrix::new(
+        selection.samples.len(),
+        0,
+        Vec::new(),
+        Vec::new(),
+        selection.samples,
+        Vec::new(),
+        diagnostics,
+    )
+}
+
+fn empty_plink1_sparse(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+) -> Result<SparseGenotypeMatrix> {
+    fs::metadata(bed).map_err(|source| MetadataError::Io {
+        path: bed.to_path_buf(),
+        source,
+    })?;
+    fs::metadata(bim).map_err(|source| MetadataError::Io {
+        path: bim.to_path_buf(),
+        source,
+    })?;
+    let all_samples = parse_fam(fam)?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    SparseGenotypeMatrix::new(
+        selection.samples.len(),
+        0,
+        vec![0],
+        Vec::new(),
+        Vec::new(),
+        selection.samples,
+        Vec::new(),
         diagnostics,
     )
 }

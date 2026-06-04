@@ -71,6 +71,8 @@ impl VariantWindow {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
+    AlwaysTrue,
+    AlwaysFalse,
     Predicate(Predicate),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -119,7 +121,7 @@ impl VariantFilter {
             MetadataError::parse("<filter>", format!("invalid filter IR: {error}"))
         })?;
         Ok(Self {
-            expr: Expr::from_raw(raw)?,
+            expr: Expr::from_raw(raw)?.simplify(),
         })
     }
 
@@ -161,6 +163,11 @@ impl VariantFilter {
     pub fn concrete_region_pushdown(&self) -> Option<RegionPredicate> {
         self.expr.concrete_region_pushdown()
     }
+
+    /// Return true when simplification proves the filter cannot retain variants.
+    pub fn is_always_false(&self) -> bool {
+        matches!(self.expr, Expr::AlwaysFalse)
+    }
 }
 
 impl Expr {
@@ -183,22 +190,24 @@ impl Expr {
 
     fn metadata_decision(&self, variant: &VariantRecord) -> Option<bool> {
         match self {
+            Self::AlwaysTrue => Some(true),
+            Self::AlwaysFalse => Some(false),
             Self::Predicate(predicate) => predicate.metadata_decision(variant),
-            Self::And(left, right) => match (
-                left.metadata_decision(variant),
-                right.metadata_decision(variant),
-            ) {
-                (Some(false), _) | (_, Some(false)) => Some(false),
-                (Some(true), Some(true)) => Some(true),
-                _ => None,
+            Self::And(left, right) => match left.metadata_decision(variant) {
+                Some(false) => Some(false),
+                Some(true) => right.metadata_decision(variant),
+                None => match right.metadata_decision(variant) {
+                    Some(false) => Some(false),
+                    _ => None,
+                },
             },
-            Self::Or(left, right) => match (
-                left.metadata_decision(variant),
-                right.metadata_decision(variant),
-            ) {
-                (Some(true), _) | (_, Some(true)) => Some(true),
-                (Some(false), Some(false)) => Some(false),
-                _ => None,
+            Self::Or(left, right) => match left.metadata_decision(variant) {
+                Some(true) => Some(true),
+                Some(false) => right.metadata_decision(variant),
+                None => match right.metadata_decision(variant) {
+                    Some(true) => Some(true),
+                    _ => None,
+                },
             },
             Self::Not(expr) => expr.metadata_decision(variant).map(|decision| !decision),
         }
@@ -214,6 +223,8 @@ impl Expr {
 
     fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
         match self {
+            Self::AlwaysTrue => true,
+            Self::AlwaysFalse => false,
             Self::Predicate(predicate) => predicate.evaluate(variant, stats),
             Self::And(left, right) => {
                 left.evaluate(variant, stats) && right.evaluate(variant, stats)
@@ -227,6 +238,7 @@ impl Expr {
 
     fn requires_genotype_stats(&self) -> bool {
         match self {
+            Self::AlwaysTrue | Self::AlwaysFalse => false,
             Self::Predicate(predicate) => predicate.requires_genotype_stats(),
             Self::And(left, right) | Self::Or(left, right) => {
                 left.requires_genotype_stats() || right.requires_genotype_stats()
@@ -237,6 +249,7 @@ impl Expr {
 
     fn has_region_predicate(&self) -> bool {
         match self {
+            Self::AlwaysTrue | Self::AlwaysFalse => false,
             Self::Predicate(Predicate::Region { .. }) => true,
             Self::Predicate(_) => false,
             Self::And(left, right) | Self::Or(left, right) => {
@@ -248,6 +261,7 @@ impl Expr {
 
     fn concrete_region_pushdown(&self) -> Option<RegionPredicate> {
         match self {
+            Self::AlwaysTrue | Self::AlwaysFalse => None,
             Self::Predicate(Predicate::Region { chrom, start, end }) => Some(RegionPredicate {
                 chrom: chrom.clone(),
                 start: *start,
@@ -259,6 +273,175 @@ impl Expr {
             Self::Predicate(_) | Self::Or(_, _) | Self::Not(_) => None,
         }
     }
+
+    fn simplify(self) -> Self {
+        match self {
+            Self::And(left, right) => simplify_and(*left, *right),
+            Self::Or(left, right) => simplify_or(*left, *right),
+            Self::Not(expr) => match expr.simplify() {
+                Self::AlwaysTrue => Self::AlwaysFalse,
+                Self::AlwaysFalse => Self::AlwaysTrue,
+                Self::Not(inner) => *inner,
+                simplified => Self::Not(Box::new(simplified)),
+            },
+            other => other,
+        }
+    }
+}
+
+fn simplify_and(left: Expr, right: Expr) -> Expr {
+    let mut terms = Vec::new();
+    flatten_and(left.simplify(), &mut terms);
+    flatten_and(right.simplify(), &mut terms);
+
+    let mut simplified = Vec::<Expr>::new();
+    for term in terms {
+        match term {
+            Expr::AlwaysFalse => return Expr::AlwaysFalse,
+            Expr::AlwaysTrue => {}
+            Expr::Predicate(predicate) => {
+                let mut pending = Some(predicate);
+                let mut index = 0;
+                while let Some(current) = pending.take() {
+                    if index >= simplified.len() {
+                        pending = Some(current);
+                        break;
+                    }
+                    if let Expr::Predicate(existing) = &simplified[index] {
+                        match existing.and_combine(&current) {
+                            PredicateCombine::Unchanged => {
+                                pending = Some(current);
+                                index += 1;
+                            }
+                            PredicateCombine::Combined(combined) => {
+                                simplified.remove(index);
+                                pending = Some(combined);
+                                index = 0;
+                            }
+                            PredicateCombine::AlwaysFalse => return Expr::AlwaysFalse,
+                        }
+                    } else {
+                        pending = Some(current);
+                        index += 1;
+                    }
+                }
+                if let Some(predicate) = pending {
+                    simplified.push(Expr::Predicate(predicate));
+                }
+            }
+            other => simplified.push(other),
+        }
+    }
+    simplified.sort_by_key(and_term_cost);
+    rebuild_conjunction(simplified)
+}
+
+fn simplify_or(left: Expr, right: Expr) -> Expr {
+    let mut terms = Vec::new();
+    flatten_or(left.simplify(), &mut terms);
+    flatten_or(right.simplify(), &mut terms);
+
+    let mut simplified = Vec::<Expr>::new();
+    for term in terms {
+        match term {
+            Expr::AlwaysTrue => return Expr::AlwaysTrue,
+            Expr::AlwaysFalse => {}
+            Expr::Predicate(predicate) => {
+                let mut pending = Some(predicate);
+                let mut index = 0;
+                while let Some(current) = pending.take() {
+                    if index >= simplified.len() {
+                        pending = Some(current);
+                        break;
+                    }
+                    if let Expr::Predicate(existing) = &simplified[index] {
+                        match existing.or_combine(&current) {
+                            Some(combined) => {
+                                simplified.remove(index);
+                                pending = Some(combined);
+                                index = 0;
+                            }
+                            None => {
+                                pending = Some(current);
+                                index += 1;
+                            }
+                        }
+                    } else {
+                        pending = Some(current);
+                        index += 1;
+                    }
+                }
+                if let Some(predicate) = pending {
+                    simplified.push(Expr::Predicate(predicate));
+                }
+            }
+            other => simplified.push(other),
+        }
+    }
+    rebuild_disjunction(simplified)
+}
+
+fn flatten_and(expr: Expr, out: &mut Vec<Expr>) {
+    match expr {
+        Expr::And(left, right) => {
+            flatten_and(*left, out);
+            flatten_and(*right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+fn flatten_or(expr: Expr, out: &mut Vec<Expr>) {
+    match expr {
+        Expr::Or(left, right) => {
+            flatten_or(*left, out);
+            flatten_or(*right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+fn rebuild_conjunction(mut terms: Vec<Expr>) -> Expr {
+    if terms.is_empty() {
+        return Expr::AlwaysTrue;
+    }
+    let mut expr = terms.remove(0);
+    for term in terms {
+        expr = Expr::And(Box::new(expr), Box::new(term));
+    }
+    expr
+}
+
+fn rebuild_disjunction(mut terms: Vec<Expr>) -> Expr {
+    if terms.is_empty() {
+        return Expr::AlwaysFalse;
+    }
+    let mut expr = terms.remove(0);
+    for term in terms {
+        expr = Expr::Or(Box::new(expr), Box::new(term));
+    }
+    expr
+}
+
+fn and_term_cost(expr: &Expr) -> u8 {
+    match expr {
+        Expr::AlwaysTrue | Expr::AlwaysFalse => 0,
+        Expr::Predicate(Predicate::Chrom(_)) | Expr::Predicate(Predicate::Region { .. }) => 1,
+        Expr::Predicate(Predicate::IdIn(_)) => 2,
+        Expr::Predicate(Predicate::Qual { .. })
+        | Expr::Predicate(Predicate::Snp)
+        | Expr::Predicate(Predicate::Biallelic) => 3,
+        Expr::Predicate(predicate) if predicate.requires_genotype_stats() => 10,
+        Expr::Predicate(_) => 5,
+        Expr::Not(expr) if !expr.requires_genotype_stats() => 6,
+        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => 8,
+    }
+}
+
+enum PredicateCombine {
+    Unchanged,
+    Combined(Predicate),
+    AlwaysFalse,
 }
 
 impl Predicate {
@@ -358,6 +541,193 @@ impl Predicate {
             self,
             Self::Maf { .. } | Self::Mac { .. } | Self::MissingRate { .. } | Self::Polymorphic
         )
+    }
+
+    fn and_combine(&self, other: &Self) -> PredicateCombine {
+        use PredicateCombine::{AlwaysFalse, Combined, Unchanged};
+        match (self, other) {
+            (left, right) if left == right => Combined(left.clone()),
+            (Self::Chrom(left), Self::Chrom(right)) => {
+                if left == right {
+                    Combined(self.clone())
+                } else {
+                    AlwaysFalse
+                }
+            }
+            (
+                Self::Region {
+                    chrom: left_chrom,
+                    start: left_start,
+                    end: left_end,
+                },
+                Self::Region {
+                    chrom: right_chrom,
+                    start: right_start,
+                    end: right_end,
+                },
+            ) => {
+                if left_chrom != right_chrom {
+                    return AlwaysFalse;
+                }
+                let start = (*left_start).max(*right_start);
+                let end = (*left_end).min(*right_end);
+                if start > end {
+                    AlwaysFalse
+                } else {
+                    Combined(Self::Region {
+                        chrom: left_chrom.clone(),
+                        start,
+                        end,
+                    })
+                }
+            }
+            (
+                Self::Chrom(chrom),
+                Self::Region {
+                    chrom: region_chrom,
+                    ..
+                },
+            )
+            | (
+                Self::Region {
+                    chrom: region_chrom,
+                    ..
+                },
+                Self::Chrom(chrom),
+            ) => {
+                if chrom == region_chrom {
+                    Combined(match (self, other) {
+                        (Self::Region { .. }, _) => self.clone(),
+                        (_, Self::Region { .. }) => other.clone(),
+                        _ => unreachable!("matched chrom-region pair"),
+                    })
+                } else {
+                    AlwaysFalse
+                }
+            }
+            (Self::IdIn(left), Self::IdIn(right)) => {
+                let values = left.intersection(right).cloned().collect::<BTreeSet<_>>();
+                if values.is_empty() {
+                    AlwaysFalse
+                } else {
+                    Combined(Self::IdIn(values))
+                }
+            }
+            (
+                Self::Qual {
+                    min: left_min,
+                    max: left_max,
+                },
+                Self::Qual {
+                    min: right_min,
+                    max: right_max,
+                },
+            ) => combine_f32_range(*left_min, *left_max, *right_min, *right_max)
+                .map_or(AlwaysFalse, |(min, max)| Combined(Self::Qual { min, max })),
+            (
+                Self::Maf {
+                    min: left_min,
+                    max: left_max,
+                },
+                Self::Maf {
+                    min: right_min,
+                    max: right_max,
+                },
+            ) => combine_f32_range(*left_min, *left_max, *right_min, *right_max)
+                .map_or(AlwaysFalse, |(min, max)| Combined(Self::Maf { min, max })),
+            (
+                Self::Mac {
+                    min: left_min,
+                    max: left_max,
+                },
+                Self::Mac {
+                    min: right_min,
+                    max: right_max,
+                },
+            ) => combine_u32_range(*left_min, *left_max, *right_min, *right_max)
+                .map_or(AlwaysFalse, |(min, max)| Combined(Self::Mac { min, max })),
+            (Self::MissingRate { max: left }, Self::MissingRate { max: right }) => {
+                Combined(Self::MissingRate {
+                    max: (*left).min(*right),
+                })
+            }
+            (Self::Snp, Self::Biallelic) | (Self::Biallelic, Self::Snp) => Combined(Self::Snp),
+            _ => Unchanged,
+        }
+    }
+
+    fn or_combine(&self, other: &Self) -> Option<Predicate> {
+        match (self, other) {
+            (left, right) if left == right => Some(left.clone()),
+            (Self::IdIn(left), Self::IdIn(right)) => {
+                let mut values = left.clone();
+                values.extend(right.iter().cloned());
+                Some(Self::IdIn(values))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn combine_f32_range(
+    left_min: Option<f32>,
+    left_max: Option<f32>,
+    right_min: Option<f32>,
+    right_max: Option<f32>,
+) -> Option<(Option<f32>, Option<f32>)> {
+    let min = max_f32_option(left_min, right_min);
+    let max = min_f32_option(left_max, right_max);
+    if min.zip(max).is_some_and(|(min, max)| min > max) {
+        None
+    } else {
+        Some((min, max))
+    }
+}
+
+fn max_f32_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn min_f32_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn combine_u32_range(
+    left_min: Option<u32>,
+    left_max: Option<u32>,
+    right_min: Option<u32>,
+    right_max: Option<u32>,
+) -> Option<(Option<u32>, Option<u32>)> {
+    let min = max_option(left_min, right_min);
+    let max = min_option(left_max, right_max);
+    if min.zip(max).is_some_and(|(min, max)| min > max) {
+        None
+    } else {
+        Some((min, max))
+    }
+}
+
+fn max_option<T: Ord + Copy>(left: Option<T>, right: Option<T>) -> Option<T> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn min_option<T: Ord + Copy>(left: Option<T>, right: Option<T>) -> Option<T> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 

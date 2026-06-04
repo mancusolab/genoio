@@ -60,6 +60,12 @@ pub fn read_vcf_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        let reader = Reader::from_path(path)
+            .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        return empty_vcf_dense(path, reader.header(), requested_samples);
+    }
+
     // Region filters can be pushed into htslib only when the expression shape
     // is a concrete safe region and the compressed source has an index.
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
@@ -102,6 +108,12 @@ pub fn read_vcf_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        let reader = Reader::from_path(path)
+            .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        return empty_vcf_sparse(path, reader.header(), requested_samples);
+    }
+
     // Keep sparse and dense region behavior identical so both paths retain the
     // same variants and fail the same way for unindexed compressed inputs.
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {

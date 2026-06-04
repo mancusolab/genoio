@@ -420,6 +420,139 @@ fn concrete_region_pushdown_is_extracted_only_from_safe_expression_shapes() {
 }
 
 #[test]
+fn concrete_region_pushdown_intersects_conjoined_regions() {
+    let overlapping = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "region", "params": {"value": "1:10-30"}},
+        "right": {"op": "predicate", "name": "region", "params": {"value": "1:20-40"}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert_eq!(
+        overlapping.concrete_region_pushdown(),
+        Some(genoio_core::RegionPredicate {
+            chrom: "1".to_string(),
+            start: 20,
+            end: 30,
+        })
+    );
+
+    let disjoint = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}},
+        "right": {"op": "predicate", "name": "region", "params": {"value": "1:30-40"}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert_eq!(disjoint.concrete_region_pushdown(), None);
+    assert!(disjoint.is_always_false());
+}
+
+#[test]
+fn concrete_region_pushdown_combines_chrom_with_region() {
+    let matching_chrom = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "chrom", "params": {"value": "1"}},
+        "right": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert_eq!(
+        matching_chrom.concrete_region_pushdown(),
+        Some(genoio_core::RegionPredicate {
+            chrom: "1".to_string(),
+            start: 10,
+            end: 20,
+        })
+    );
+    assert!(!matching_chrom.is_always_false());
+
+    let conflicting_chrom = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "chrom", "params": {"value": "2"}},
+        "right": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert_eq!(conflicting_chrom.concrete_region_pushdown(), None);
+    assert!(conflicting_chrom.is_always_false());
+}
+
+#[test]
+fn conjoined_threshold_predicates_are_tightened_or_rejected() {
+    let stats = genoio_core::VariantStats {
+        af: Some(0.03),
+        maf: Some(0.03),
+        mac: Some(3),
+        missing_rate: 0.02,
+        n_called: 100,
+        polymorphic: true,
+    };
+    let variant = variant("rs1", "1", 10, "A", "G");
+
+    let tightened = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "maf", "params": {"min": 0.01}},
+        "right": {"op": "predicate", "name": "maf", "params": {"max": 0.05}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert!(!tightened.is_always_false());
+    assert!(tightened.evaluate(&variant, Some(&stats)));
+
+    let impossible = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "maf", "params": {"min": 0.10}},
+        "right": {"op": "predicate", "name": "maf", "params": {"max": 0.05}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert!(impossible.is_always_false());
+    assert_eq!(
+        impossible.partial_decision(&variant),
+        genoio_core::PartialFilterDecision::Reject
+    );
+    assert!(!impossible.evaluate(&variant, Some(&stats)));
+}
+
+#[test]
+fn id_in_predicates_intersect_and_union() {
+    let rs1 = variant("rs1", "1", 10, "A", "G");
+    let rs2 = variant("rs2", "1", 20, "A", "G");
+    let rs3 = variant("rs3", "1", 30, "A", "G");
+
+    let intersection = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "id_in", "params": {"values": ["rs1", "rs2"]}},
+        "right": {"op": "predicate", "name": "id_in", "params": {"values": ["rs2", "rs3"]}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert!(!intersection.evaluate(&rs1, None));
+    assert!(intersection.evaluate(&rs2, None));
+    assert!(!intersection.evaluate(&rs3, None));
+
+    let union = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "or",
+        "left": {"op": "predicate", "name": "id_in", "params": {"values": ["rs1", "rs2"]}},
+        "right": {"op": "predicate", "name": "id_in", "params": {"values": ["rs2", "rs3"]}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert!(union.evaluate(&rs1, None));
+    assert!(union.evaluate(&rs2, None));
+    assert!(union.evaluate(&rs3, None));
+
+    let empty_intersection = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "id_in", "params": {"values": ["rs1"]}},
+        "right": {"op": "predicate", "name": "id_in", "params": {"values": ["rs2"]}}
+    }))
+    .expect("filter IR should deserialize");
+    assert!(empty_intersection.is_always_false());
+}
+
+#[test]
 fn genotype_stats_preserve_integer_mac_beyond_f32_exact_range() {
     let n_called = 16_777_217_usize;
     let values = vec![1.0_f32; n_called];

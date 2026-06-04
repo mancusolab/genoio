@@ -166,6 +166,22 @@ pub fn read_plink2_dense_windowed(
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+            path: pvar.to_path_buf(),
+            source,
+        })?;
+        diagnostics.retained_variants = 0;
+        return DenseGenotypeMatrix::new(
+            selection.samples.len(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            selection.samples,
+            Vec::new(),
+            diagnostics,
+        );
+    }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
@@ -326,6 +342,23 @@ pub fn read_plink2_sparse_windowed(
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+            path: pvar.to_path_buf(),
+            source,
+        })?;
+        diagnostics.retained_variants = 0;
+        return SparseGenotypeMatrix::new(
+            selection.samples.len(),
+            0,
+            vec![0],
+            Vec::new(),
+            Vec::new(),
+            selection.samples,
+            Vec::new(),
+            diagnostics,
+        );
+    }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());

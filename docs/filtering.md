@@ -112,9 +112,13 @@ reads, block reads, and Rust reader implementations.
 Rust uses the IR to separate cheap metadata decisions from data-dependent
 genotype decisions. Metadata predicates can be evaluated before matrix
 construction, and concrete VCF/BCF region predicates can use an index when one
-is available. Genotype predicates are delayed until the candidate variant's
-genotypes are decoded, then the same retained-variant decision controls both
-matrix columns and returned variant metadata.
+is available. Before reading, Rust also normalizes simple boolean expressions:
+overlapping conjoined regions are reduced to their intersection, repeated
+threshold predicates are tightened, conjoined `id_in` predicates are
+intersected, and contradictory predicates become an empty result without
+scanning variant records. Genotype predicates are delayed until the candidate
+variant's genotypes are decoded, then the same retained-variant decision
+controls both matrix columns and returned variant metadata.
 
 Treat `to_ir()` as an inspection aid rather than a stable wire format. Build
 filters with the Python constructors so validation stays consistent.

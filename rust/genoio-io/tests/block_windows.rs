@@ -323,6 +323,31 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
 }
 
 #[test]
+fn plink1_dense_impossible_filter_returns_empty_without_parsing_bim_variants() {
+    let dir = unique_dir("plink1-impossible-filter");
+    let (bed, bim, fam) = write_plink_source_window_stop_fixture(&dir);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "chrom", "params": {"value": "2"}},
+        "right": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink1_dense_windowed(
+        &bed,
+        &bim,
+        &fam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("impossible plink1 filter should not parse malformed bim rows");
+
+    assert_eq!(block.n_variants, 0);
+    assert_eq!(block.diagnostics.candidate_variants, 0);
+}
+
+#[test]
 fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
     let dir = unique_dir("plink2-filtered-window-stop");
     let (pgen, pvar, psam) = write_plink2_filter_window_stop_fixture(&dir);
@@ -386,4 +411,30 @@ fn plink2_sparse_filtered_window_stops_after_requested_retained_variants() {
         vec!["rs1"]
     );
     assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn plink2_dense_impossible_filter_returns_empty_without_parsing_pvar_variants() {
+    let dir = unique_dir("plink2-impossible-filter");
+    let (pgen, pvar, psam) = write_plink2_filter_window_stop_fixture(&dir);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "chrom", "params": {"value": "2"}},
+        "right": {"op": "predicate", "name": "region", "params": {"value": "1:10-20"}}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        false,
+    )
+    .expect("impossible plink2 filter should not parse malformed pvar rows");
+
+    assert_eq!(block.n_variants, 0);
+    assert_eq!(block.diagnostics.candidate_variants, 0);
 }
