@@ -97,6 +97,12 @@ fn write_sample_identifier_block(writer: &mut impl Write, sample_ids: &[&str]) -
     Ok(())
 }
 
+fn sample_identifier_block_bytes(sample_ids: &[&str]) -> Vec<u8> {
+    let mut block = Vec::new();
+    write_sample_identifier_block(&mut block, sample_ids).expect("sample block should write");
+    block
+}
+
 fn write_layout2_variant_identifying_data(
     writer: &mut impl Write,
     id: &str,
@@ -1288,6 +1294,50 @@ fn bgen_metadata_rejects_truncated_sample_identifier_block() {
         .expect_err("truncated sample identifier block should fail");
 
     assert_metadata_error_contains(error, "failed to fill whole buffer");
+}
+
+#[test]
+fn bgen_metadata_rejects_sample_identifier_block_declared_shorter_than_content() {
+    let dir = unique_dir("bgen-short-sample-identifier-block-length");
+    let bgen = dir.join("tiny.bgen");
+    let mut contents = Vec::new();
+    write_bgen_header(&mut contents, 2, 0, FLAG_LAYOUT2, true).expect("header should write");
+    let mut sample_block = sample_identifier_block_bytes(&["sample_1", "sample_2"]);
+    let declared_len =
+        u32::try_from(sample_block.len() - 1).expect("short sample block length should fit u32");
+    sample_block[0..4].copy_from_slice(&declared_len.to_le_bytes());
+    contents.extend_from_slice(&sample_block);
+    fs::write(&bgen, contents).expect("bgen fixture should be written");
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("short declared sample block length should fail");
+
+    assert_metadata_error_contains(error, "failed to fill whole buffer");
+}
+
+#[test]
+fn bgen_metadata_rejects_sample_identifier_block_declared_longer_than_content() {
+    let dir = unique_dir("bgen-long-sample-identifier-block-length");
+    let bgen = dir.join("tiny.bgen");
+    let mut contents = Vec::new();
+    write_bgen_header(&mut contents, 2, 1, FLAG_LAYOUT2, true).expect("header should write");
+    let mut sample_block = sample_identifier_block_bytes(&["sample_1", "sample_2"]);
+    let declared_len =
+        u32::try_from(sample_block.len() + 1).expect("long sample block length should fit u32");
+    sample_block[0..4].copy_from_slice(&declared_len.to_le_bytes());
+    contents.extend_from_slice(&sample_block);
+    let variant_offset = u32::try_from(contents.len() - 4).expect("variant offset should fit u32");
+    contents[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+    write_layout2_variant_identifying_data(&mut contents, "var1", "rs1", "1", 10, &["A", "G"])
+        .expect("variant identifying data should write");
+    write_empty_layout2_probability_block(&mut contents, 2, 2)
+        .expect("probability block should write");
+    fs::write(&bgen, contents).expect("bgen fixture should be written");
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("long declared sample block length should fail");
+
+    assert_metadata_error_contains(error, "sample identifiers block length");
 }
 
 #[test]

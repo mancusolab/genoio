@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
@@ -423,13 +423,18 @@ fn read_sample_identifier_block(
             "bgen sample identifiers count does not match header sample count",
         ));
     }
+    let body_len = usize::try_from(block_length - 8).map_err(|_| {
+        MetadataError::parse(path, "bgen sample identifiers block length is out of range")
+    })?;
+    let body = read_exact_vec(reader, path, body_len)?;
+    let mut body_reader = Cursor::new(body.as_slice());
 
     let mut records = Vec::with_capacity(usize::try_from(sample_count).map_err(|_| {
         MetadataError::parse(path, "bgen sample identifiers count is out of range")
     })?);
     let mut seen = HashSet::with_capacity(records.capacity());
     for _ in 0..sample_count {
-        let sample_id = read_len_prefixed_string_u16(reader, path, "sample identifier")?;
+        let sample_id = read_len_prefixed_string_u16(&mut body_reader, path, "sample identifier")?;
         if sample_id.is_empty() {
             return Err(MetadataError::parse(
                 path,
@@ -443,6 +448,16 @@ fn read_sample_identifier_block(
             ));
         }
         records.push(sample_record(sample_id));
+    }
+
+    if usize::try_from(body_reader.position())
+        .expect("sample block cursor position should fit usize")
+        != body.len()
+    {
+        return Err(MetadataError::parse(
+            path,
+            "bgen sample identifiers block length does not match decoded sample identifiers",
+        ));
     }
 
     Ok(records)

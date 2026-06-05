@@ -68,7 +68,7 @@ class _ValidatedReadOptions:
 class Dataset:
     r"""Resolved genotype dataset with metadata, whole-read, and block-read methods.
 
-    Constructed by [`genoio.vcf`][], [`genoio.bfile`][], or
+    Constructed by [`genoio.vcf`][], [`genoio.bfile`][], [`genoio.bgen`][], or
     [`genoio.pfile`][]. The object caches source metadata after the first
     metadata-dependent operation, but matrix reads are executed on each call.
 
@@ -111,8 +111,10 @@ class Dataset:
         - `dosage`: `"hardcall"` reads allele counts from hard calls.
           `"dosage"` reads dosage-backed genotype values when the source
           supports them. This release supports dense VCF `FORMAT/DS` and
-          PLINK2 unphased biallelic dosage reads. Haplotype and sparse reads
-          only support `"hardcall"`.
+          PLINK2 unphased biallelic dosage reads, and dense BGEN Layout 2
+          biallelic unphased diploid dosage reads. BGEN sample IDs must be
+          embedded in the `.bgen` file or supplied by a companion `.sample`
+          file. Haplotype and sparse reads only support `"hardcall"`.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant
