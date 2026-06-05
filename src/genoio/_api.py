@@ -378,7 +378,9 @@ class Dataset:
     ) -> None:
         if self.source.format.value == "bgen":
             if kind == "haplo":
-                raise UnsupportedRepresentation('bgen supports only kind="geno" reads with dosage="dosage"')
+                raise UnsupportedRepresentation(
+                    'bgen haplo reads are not implemented; use kind="geno" with dosage="dosage"'
+                )
             if dosage == "hardcall":
                 if sparse_format is not None:
                     raise UnsupportedRepresentation(
