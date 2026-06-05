@@ -11,17 +11,24 @@ strict = true
 extra_css = ["_static/custom_css.css"]
 
 nav = [
-    { "Home" = "index.md" },
-    { "Getting started" = "guide.md" },
+    { "Getting started" = "index.md" },
     { "Filtering" = "filtering.md" },
     { "Performance" = "performance.md" },
     { "Format support" = "formats.md" },
-    { "Release" = "release.md" },
+    { "Examples" = [
+        { "GWAS" = "examples/gwas.md" },
+        { "cis-eQTL" = "examples/cis-eqtl.md" },
+    ] },
     { "API" = [
         { "Overview" = "api/index.md" },
         { "Reading" = "api/reading.md" },
         { "Filters" = "api/filters.md" },
         { "Errors" = "api/errors.md" },
+    ] },
+    { "Misc" = [
+        { "FAQ" = "faq.md" },
+        { "Release" = "release.md" },
+        { "License" = "license.md" },
     ] },
 ]
 

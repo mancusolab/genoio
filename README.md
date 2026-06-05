@@ -43,8 +43,7 @@ Available at [https://mancusolab.github.io/genoio](https://mancusolab.github.io/
 
 ## Quick Examples
 
-Read sample metadata, align phenotypes and covariates by `iid`, then stream
-genotype blocks into an association or QTL scanner:
+### GWAS
 
 ```python
 import polars as pl
@@ -58,17 +57,48 @@ covariates = pl.read_csv("covariates.tsv", separator="\t")
 
 design = (
     samples.select("iid")
-    .join(phenotypes.select("iid", "expression"), on="iid", how="left")
+    .join(phenotypes.select("iid", "trait"), on="iid", how="left")
     .join(covariates.select("iid", "age", "sex", "PC1", "PC2"), on="iid", how="left")
 )
 
-y = design["expression"].to_numpy()
+y = design["trait"].to_numpy()
 C = design.select("age", "sex", "PC1", "PC2").to_numpy()
 
-variant_filter = genoio.region("22:20000000-21000000") & genoio.missing_rate(max=0.1)
+variant_filter = genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic()
 
-for X, variants in ds.blocks(5_000, variants=variant_filter, return_variants=True):
-    run_association_scan(X, y, covariates=C, samples=samples, variants=variants)
+for X, variants in ds.iter_blocks(10_000, variants=variant_filter, return_variants=True):
+    association_scan(X, y, C, variants=variants)
+```
+
+### cis-eQTL
+
+```python
+import polars as pl
+import genoio
+
+ds = genoio.bgen("data/chr22_hg38.bgen")
+samples = ds.samples()
+
+expression = pl.read_csv("expression.tsv", separator="\t")
+covariates = pl.read_csv("covariates.tsv", separator="\t")
+genes = pl.read_csv("cis_windows.tsv", separator="\t")
+
+design = (
+    samples.select("iid")
+    .join(expression, on="iid", how="left")
+    .join(covariates.select("iid", "age", "sex", "PC1", "PC2"), on="iid", how="left")
+)
+C = design.select("age", "sex", "PC1", "PC2").to_numpy()
+
+variant_filter = genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic()
+regions = [genoio.region(region) & variant_filter for region in genes["cis_region"]]
+
+for region_index, (region, (X_region, variants)) in enumerate(
+    ds.iter_regions(regions, dosage="dosage", return_variants=True)
+):
+    gene = genes.row(region_index, named=True)
+    y_region = design[gene["gene_id"]].to_numpy()
+    cis_scan(X_region, y_region, C, gene=gene["gene_id"], region=region, variants=variants)
 ```
 
 Open supported genotype sources with the matching constructor:

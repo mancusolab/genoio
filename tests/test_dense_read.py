@@ -578,7 +578,7 @@ def test_dense_vcf_dosage_blocks_match_full_dosage_read(tmp_path):
     dataset = genoio.vcf(write_ds_vcf(tmp_path))
 
     full = dataset.read(dosage="dosage", missing="nan")
-    blocks = list(dataset.blocks(1, dosage="dosage", missing="nan"))
+    blocks = list(dataset.iter_blocks(1, dosage="dosage", missing="nan"))
 
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
 
@@ -748,7 +748,7 @@ def test_dense_plink2_dosage_blocks_match_full_dosage_read(tmp_path):
     dataset = genoio.pfile(write_fixed_width_plink2_dosage(tmp_path))
 
     full = dataset.read(dosage="dosage", missing="nan")
-    blocks = list(dataset.blocks(1, dosage="dosage", missing="nan"))
+    blocks = list(dataset.iter_blocks(1, dosage="dosage", missing="nan"))
 
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
 

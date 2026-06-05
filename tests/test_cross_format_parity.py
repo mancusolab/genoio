@@ -211,7 +211,7 @@ def test_canonical_sources_blocks_concatenate_to_filtered_full_reads(canonical_d
 
     for dataset in canonical_datasets.values():
         full, full_variants = dataset.read(**read_options, return_variants=True)
-        blocks = list(dataset.blocks(size=2, **read_options, return_variants=True))
+        blocks = list(dataset.iter_blocks(size=2, **read_options, return_variants=True))
 
         assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "indel1"], ["rs4"]]
         np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
@@ -227,7 +227,7 @@ def test_canonical_sources_allow_filters_that_retain_zero_variants(canonical_dat
         dense, samples, variants = dataset.read(variants=expr, return_samples=True, return_variants=True)
         sparse = dataset.read(variants=expr, sparse=True)
         imputed = dataset.read(variants=expr, missing="impute")
-        blocks = list(dataset.blocks(size=2, variants=expr, return_variants=True))
+        blocks = list(dataset.iter_blocks(size=2, variants=expr, return_variants=True))
 
         assert dense.shape == (len(EXPECTED_SAMPLES), 0)
         assert samples["iid"].to_list() == EXPECTED_SAMPLES

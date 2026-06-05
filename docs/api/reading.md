@@ -26,10 +26,34 @@ Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele
 dosages rather than hardcall counts.
 
+## Reading one matrix
+
+Use [`Dataset.read(...)`](#genoio.Dataset.read) when the requested matrix fits
+in memory.
+
+```python
+X = genoio.pfile("cohort").read()
+```
+
+Ask for metadata when downstream code needs row and column labels:
+
+```python
+X, samples, variants = genoio.pfile("cohort").read(
+    return_samples=True,
+    return_variants=True,
+)
+```
+
+The returned matrix always has samples on rows and variants on columns:
+
+```python
+n_samples, n_variants = X.shape
+```
+
 ## Metadata frames
 
-`Dataset.samples()` returns a Polars DataFrame in source sample order. Genotype
-reads and blocks return the same sample columns when
+[`Dataset.samples()`](#genoio.Dataset.samples) returns a Polars DataFrame in
+source sample order. Genotype reads and blocks return the same sample columns when
 `return_samples=True`. BGEN reads require real sample IDs, either embedded in
 the `.bgen` file or provided by the same-prefix `.sample` file.
 
@@ -49,8 +73,10 @@ back to its original diploid sample.
     | `source_sample_index` | Haplotype-read-only source sample row index. |
     | `haplotype_index` | Haplotype-read-only haplotype number within the source sample. |
 
-`Dataset.variants()` returns a Polars DataFrame in source variant order.
-`read(..., return_variants=True)` and `blocks(..., return_variants=True)` return
+[`Dataset.variants()`](#genoio.Dataset.variants) returns a Polars DataFrame in
+source variant order. [`read(..., return_variants=True)`](#genoio.Dataset.read),
+[`iter_blocks(..., return_variants=True)`](#genoio.Dataset.iter_blocks), and
+[`iter_regions(..., return_variants=True)`](#genoio.Dataset.iter_regions) return
 the same five columns for the retained variants, in matrix-column order. The
 schema is format-neutral: `a1` is the allele counted by returned genotype
 values, not necessarily the VCF ALT allele.
@@ -63,6 +89,26 @@ values, not necessarily the VCF ALT allele.
     | `id` | Variant ID from the source. |
     | `a0` | Allele counted as `0` in returned genotype matrices. |
     | `a1` | Allele counted as `1` or `2` in returned genotype matrices. |
+
+## Block iteration
+
+Use [`Dataset.iter_blocks(...)`](#genoio.Dataset.iter_blocks) for scans that
+apply the same operation across many variant columns. A block size of `5_000`
+means up to 5,000 retained variants, not 5,000 raw source records.
+
+```python
+rare = genoio.maf(max=0.05) & genoio.missing_rate(max=0.1)
+
+for X, variants in ds.iter_blocks(
+    5_000,
+    variants=rare,
+    return_variants=True,
+):
+    association_scan(X, y, variants=variants)
+```
+
+Each block keeps the dataset sample order. Variant metadata returned with a
+block describes that block's columns only.
 
 ## BGEN region reads
 
@@ -82,6 +128,63 @@ X, variants = ds.read(
 
 If a read only needs the matrix, leave `return_samples=False` and
 `return_variants=False`. BGEN matrix-only reads avoid returning metadata frames.
+
+## Region iteration
+
+Use [`Dataset.iter_regions(...)`](#genoio.Dataset.iter_regions) when each
+genomic interval is an analysis unit, as in cis-eQTL scans. Each yielded item is
+`(region, result)`, where `region` is the original filter object and `result`
+follows the normal [`read(...)`](#genoio.Dataset.read) return contract.
+
+```python
+regions = [
+    genoio.region("22:20000000-21000000"),
+    genoio.region("22:22000000-23000000"),
+]
+
+for region, (X, variants) in ds.iter_regions(regions, return_variants=True):
+    scan_region(region, X, variants)
+```
+
+[`iter_regions(...)`](#genoio.Dataset.iter_regions) supplies `variants` from the
+`regions` argument, so it rejects a separate `variants=` read option.
+
+## Missing data
+
+Dense reads support three missing-data policies:
+
+```python
+ds.read(missing="nan")     # default for dense reads
+ds.read(missing="raise")   # fail if retained calls are missing
+ds.read(missing="impute")  # per-variant mean imputation
+```
+
+Sparse reads currently require `missing="raise"` because this release does not
+store sparse missing-value masks.
+
+## Sparse matrices
+
+Use `sparse=True` for SciPy CSC output, or `sparse="csr"` for CSR output.
+
+```python
+X_csc = genoio.bfile("cohort").read(sparse=True)
+X_csr = genoio.bfile("cohort").read(sparse="csr")
+```
+
+Sparse genotype columns are oriented to the minor allele by default to reduce
+stored nonzeros.
+
+## Haplotype rows
+
+Phased VCF genotypes can be read as haplotype rows:
+
+```python
+H = genoio.vcf("phased.vcf.gz").read(kind="haplo")
+```
+
+Each retained sample contributes two output rows. Haplotype reads require
+phased diploid genotypes in retained variants. PLINK1 and PLINK2 haplotype
+reads are not implemented in this release.
 
 ::: genoio.Dataset
 

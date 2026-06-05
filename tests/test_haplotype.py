@@ -223,7 +223,7 @@ def test_haplotype_blocks_stream_dense_haplotype_columns(tmp_path):
     dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     full, full_samples, full_variants = dataset.read(kind="haplo", return_samples=True, return_variants=True)
-    blocks = list(dataset.blocks(size=1, kind="haplo", return_samples=True, return_variants=True))
+    blocks = list(dataset.iter_blocks(size=1, kind="haplo", return_samples=True, return_variants=True))
 
     assert len(blocks) == 2
     np.testing.assert_array_equal(np.concatenate([block[0] for block in blocks], axis=1), full)
@@ -237,7 +237,7 @@ def test_filtered_haplotype_blocks_preserve_source_sample_index(tmp_path):
 
     dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
-    blocks = list(dataset.blocks(size=1, kind="haplo", samples=["S2"], return_samples=True))
+    blocks = list(dataset.iter_blocks(size=1, kind="haplo", samples=["S2"], return_samples=True))
 
     assert len(blocks) == 2
     first_block_samples = blocks[0][1]
@@ -256,7 +256,7 @@ def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
     dataset = genoio.vcf(write_phased_vcf(tmp_path))
 
     full = dataset.read(kind="haplo", sparse=True)
-    blocks = list(dataset.blocks(size=1, kind="haplo", sparse=True))
+    blocks = list(dataset.iter_blocks(size=1, kind="haplo", sparse=True))
 
     assert len(blocks) == 2
     assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)

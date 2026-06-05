@@ -97,16 +97,46 @@ def empty_dense_rust_result() -> dict:
     }
 
 
-def test_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
+def test_iter_blocks_replaces_blocks_in_public_api(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    assert hasattr(dataset, "iter_blocks")
+    assert not hasattr(dataset, "blocks")
+
+
+def test_iter_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
     import genoio
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     full = dataset.read()
-    blocks = list(dataset.blocks(size=2))
+    blocks = list(dataset.iter_blocks(size=2))
 
     assert [block.shape for block in blocks] == [(3, 2), (3, 2), (3, 1)]
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+
+
+def test_iter_regions_yields_region_and_read_result_for_each_region(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+    regions = [genoio.region("1:1-25"), genoio.region("2:1-35")]
+
+    region_reads = list(dataset.iter_regions(regions, return_variants=True))
+
+    assert [region for region, _ in region_reads] == regions
+    assert [variants["id"].to_list() for _, (_, variants) in region_reads] == [["rs1", "rs2"], ["rs3"]]
+
+
+def test_iter_regions_rejects_variants_read_option(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    with pytest.raises(genoio.InvalidOptionError, match="variants"):
+        list(dataset.iter_regions([genoio.region("1:1-25")], variants=genoio.chrom("1")))
 
 
 def test_blocks_variant_metadata_aligns_with_each_block(tmp_path):
@@ -114,7 +144,7 @@ def test_blocks_variant_metadata_aligns_with_each_block(tmp_path):
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
-    blocks = list(dataset.blocks(size=2, return_variants=True))
+    blocks = list(dataset.iter_blocks(size=2, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs3", "rs4"], ["rs5"]]
     for G_block, variants in blocks:
@@ -126,7 +156,7 @@ def test_blocks_return_samples_keeps_sample_order_constant(tmp_path):
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
-    blocks = list(dataset.blocks(size=3, samples=["S3", "S1"], return_samples=True, return_variants=True))
+    blocks = list(dataset.iter_blocks(size=3, samples=["S3", "S1"], return_samples=True, return_variants=True))
 
     assert len(blocks) == 2
     for G_block, samples, variants in blocks:
@@ -142,7 +172,7 @@ def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
     read_options = {"variants": genoio.chrom("1"), "samples": ["S3", "S1"]}
 
     full, full_variants = dataset.read(**read_options, return_variants=True)  # ty: ignore[invalid-argument-type]
-    blocks = list(dataset.blocks(size=2, **read_options, return_variants=True))
+    blocks = list(dataset.iter_blocks(size=2, **read_options, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs5"]]
     np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
@@ -154,7 +184,7 @@ def test_bgen_dosage_blocks_yield_no_blocks_for_empty_variant_filter(tmp_path):
 
     dataset = genoio.bgen(write_bgen_dosage(tmp_path))
 
-    blocks = list(dataset.blocks(size=1, dosage="dosage", variants=[], return_variants=True))
+    blocks = list(dataset.iter_blocks(size=1, dosage="dosage", variants=[], return_variants=True))
 
     assert blocks == []
 
@@ -165,7 +195,7 @@ def test_bgen_dosage_blocks_honor_size_and_concatenate_to_full_read(tmp_path):
     dataset = genoio.bgen(write_bgen_dosage(tmp_path))
 
     full = dataset.read(dosage="dosage")
-    blocks = list(dataset.blocks(1, dosage="dosage"))
+    blocks = list(dataset.iter_blocks(1, dosage="dosage"))
 
     assert [block.shape for block in blocks] == [(2, 1), (2, 1)]
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
@@ -176,7 +206,7 @@ def test_bgen_dosage_blocks_variant_metadata_aligns_with_each_block(tmp_path):
 
     dataset = genoio.bgen(write_bgen_dosage(tmp_path))
 
-    blocks = list(dataset.blocks(1, dosage="dosage", return_variants=True))
+    blocks = list(dataset.iter_blocks(1, dosage="dosage", return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1"], ["rs2"]]
     for G_block, variants in blocks:
@@ -190,7 +220,7 @@ def test_bgen_dosage_filtered_blocks_match_filtered_full_read(tmp_path):
     read_options = {"dosage": "dosage", "variants": genoio.chrom("2")}
 
     full, full_variants = dataset.read(**read_options, return_variants=True)  # ty: ignore[invalid-argument-type]
-    blocks = list(dataset.blocks(1, **read_options, return_variants=True))
+    blocks = list(dataset.iter_blocks(1, **read_options, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs2"]]
     np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
@@ -202,7 +232,7 @@ def test_bgen_dosage_blocks_yield_no_blocks_for_nonmatching_metadata_filter(tmp_
 
     dataset = genoio.bgen(write_bgen_dosage(tmp_path))
 
-    blocks = list(dataset.blocks(size=1, dosage="dosage", variants=genoio.chrom("9")))
+    blocks = list(dataset.iter_blocks(size=1, dosage="dosage", variants=genoio.chrom("9")))
 
     assert blocks == []
 
@@ -213,7 +243,7 @@ def test_plink2_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
 
     full = dataset.read()
-    blocks = list(dataset.blocks(size=2))
+    blocks = list(dataset.iter_blocks(size=2))
 
     assert [block.shape for block in blocks] == [(3, 2), (3, 1)]
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
@@ -224,7 +254,7 @@ def test_plink2_blocks_variant_metadata_aligns_with_each_block(tmp_path):
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
 
-    blocks = list(dataset.blocks(size=2, return_variants=True))
+    blocks = list(dataset.iter_blocks(size=2, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs3"]]
     for G_block, variants in blocks:
@@ -236,7 +266,7 @@ def test_plink2_blocks_return_samples_keeps_source_order_for_each_block(tmp_path
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
 
-    blocks = list(dataset.blocks(size=1, samples=["S3", "S1"], return_samples=True, return_variants=True))
+    blocks = list(dataset.iter_blocks(size=1, samples=["S3", "S1"], return_samples=True, return_variants=True))
 
     assert len(blocks) == 3
     for G_block, samples, variants in blocks:
@@ -257,7 +287,7 @@ def test_plink2_matrix_only_blocks_pass_private_matrix_only_option(tmp_path, mon
 
     monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
 
-    list(dataset.blocks(size=2))
+    list(dataset.iter_blocks(size=2))
 
     assert calls
     assert calls[0]["matrix_only"] is True
@@ -284,7 +314,7 @@ def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(t
 
     monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
 
-    list(dataset.blocks(size=2, **read_options))
+    list(dataset.iter_blocks(size=2, **read_options))
 
     assert calls
     assert calls[0]["matrix_only"] is False
@@ -315,7 +345,7 @@ def test_plink2_blocks_metadata_required_paths_reject_malformed_companion_files(
     dataset = genoio.pfile(prefix)
 
     with pytest.raises(genoio.InvalidSourceError, match=match):
-        list(dataset.blocks(size=1, **read_options))
+        list(dataset.iter_blocks(size=1, **read_options))
 
 
 @pytest.mark.parametrize(
@@ -347,7 +377,7 @@ def test_plink2_metadata_blocks_validate_full_pvar_before_first_block_return(tmp
     dataset = genoio.pfile(prefix)
 
     with pytest.raises(genoio.InvalidSourceError, match=match):
-        next(dataset.blocks(size=1, return_variants=True))
+        next(dataset.iter_blocks(size=1, return_variants=True))
 
 
 def test_plink2_matrix_only_blocks_reject_bad_variable_width_block_offset(tmp_path):
@@ -356,7 +386,7 @@ def test_plink2_matrix_only_blocks_reject_bad_variable_width_block_offset(tmp_pa
     dataset = genoio.pfile(write_bad_variable_width_block_offset_plink2(tmp_path))
 
     with pytest.raises(genoio.InvalidSourceError, match="block offset|header length"):
-        next(dataset.blocks(size=1))
+        next(dataset.iter_blocks(size=1))
 
 
 def test_plink2_metadata_blocks_reject_bad_variable_width_block_offset(tmp_path):
@@ -365,7 +395,7 @@ def test_plink2_metadata_blocks_reject_bad_variable_width_block_offset(tmp_path)
     dataset = genoio.pfile(write_bad_variable_width_block_offset_plink2(tmp_path))
 
     with pytest.raises(genoio.InvalidSourceError, match="block offset|header length"):
-        next(dataset.blocks(size=1, return_variants=True))
+        next(dataset.iter_blocks(size=1, return_variants=True))
 
 
 def test_blocks_validate_size(tmp_path):
@@ -374,10 +404,10 @@ def test_blocks_validate_size(tmp_path):
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="positive integer"):
-        list(dataset.blocks(size=0))
+        list(dataset.iter_blocks(size=0))
 
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
-        list(dataset.blocks(size=2, sparse=[]))
+        list(dataset.iter_blocks(size=2, sparse=[]))
 
 
 def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monkeypatch):
@@ -393,7 +423,7 @@ def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monke
 
     monkeypatch.setattr(genoio.Dataset, "_read_validated", recording_read_validated)
 
-    list(dataset.blocks(size=2))
+    list(dataset.iter_blocks(size=2))
 
     assert calls
     assert all(call["len"] <= 2 for call in calls)
@@ -406,11 +436,11 @@ def test_blocks_do_not_call_public_read_internally(tmp_path, monkeypatch):
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
     def fail_read(*args, **kwargs):
-        raise AssertionError("blocks must use the bounded Rust call boundary, not public read()")
+        raise AssertionError("iter_blocks must use the bounded Rust call boundary, not public read()")
 
     monkeypatch.setattr(genoio.Dataset, "read", fail_read)
 
-    blocks = list(dataset.blocks(size=2))
+    blocks = list(dataset.iter_blocks(size=2))
 
     assert [block.shape for block in blocks] == [(3, 2), (3, 2), (3, 1)]
 
@@ -420,7 +450,7 @@ def test_sparse_blocks_work_with_default_missing_policy(tmp_path):
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
-    blocks = list(dataset.blocks(size=2, sparse=True))
+    blocks = list(dataset.iter_blocks(size=2, sparse=True))
 
     assert [block.shape for block in blocks] == [(3, 2), (3, 2), (3, 1)]
     assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)

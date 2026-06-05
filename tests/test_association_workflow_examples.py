@@ -48,7 +48,7 @@ def test_documented_association_workflow_aligns_phenotypes_to_genotype_sample_or
     C = design.select("age", "sex", "PC1", "PC2").to_numpy()
     scanned = []
 
-    for X, variants in dataset.blocks(2, variants=genoio.chrom("1"), return_variants=True):
+    for X, variants in dataset.iter_blocks(2, variants=genoio.chrom("1"), return_variants=True):
         scanned.append((X.shape, variants["id"].to_list(), y.copy(), C.copy()))
 
     assert design["iid"].to_list() == EXPECTED_SAMPLES
@@ -91,7 +91,7 @@ def test_documented_sample_filtered_association_workflow_uses_returned_sample_fr
     )
 
     blocks = list(
-        dataset.blocks(
+        dataset.iter_blocks(
             2,
             samples=["S3", "S1"],
             variants=genoio.chrom("1"),

@@ -35,7 +35,7 @@ def read_genoio(args: argparse.Namespace) -> np.ndarray:
     import genoio
 
     return next(
-        genoio.vcf(args.vcf).blocks(
+        genoio.vcf(args.vcf).iter_blocks(
             args.max_variants,
             variants=genoio_filter(args),
             missing="nan",

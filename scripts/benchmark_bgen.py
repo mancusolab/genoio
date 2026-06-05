@@ -31,7 +31,7 @@ def read_genoio_matrix_only(prefix: Path, max_variants: int) -> np.ndarray:
     import genoio
 
     return next(
-        genoio.bgen(prefix).blocks(
+        genoio.bgen(prefix).iter_blocks(
             max_variants,
             dosage="dosage",
             missing="nan",
@@ -45,7 +45,7 @@ def read_genoio_with_variants(prefix: Path, max_variants: int) -> np.ndarray:
 
     global _last_variant_metadata_length
     matrix, variants = next(
-        genoio.bgen(prefix).blocks(
+        genoio.bgen(prefix).iter_blocks(
             max_variants,
             dosage="dosage",
             missing="nan",
@@ -63,7 +63,7 @@ def read_genoio_sample_filtered(prefix: Path, max_variants: int) -> np.ndarray:
     sample_ids = _read_bgen_sample_ids(prefix.with_suffix(".sample"))
     keep_count = max(1, len(sample_ids) // 2)
     return next(
-        genoio.bgen(prefix).blocks(
+        genoio.bgen(prefix).iter_blocks(
             max_variants,
             dosage="dosage",
             missing="nan",
@@ -77,7 +77,7 @@ def read_genoio_genotype_filtered(prefix: Path, max_variants: int) -> np.ndarray
     import genoio
 
     return next(
-        genoio.bgen(prefix).blocks(
+        genoio.bgen(prefix).iter_blocks(
             max_variants,
             dosage="dosage",
             missing="nan",
@@ -91,7 +91,7 @@ def read_genoio_indexed_region(prefix: Path, max_variants: int, region: str) -> 
     import genoio
 
     matrix, variants = next(
-        genoio.bgen(prefix).blocks(
+        genoio.bgen(prefix).iter_blocks(
             max_variants,
             dosage="dosage",
             missing="nan",

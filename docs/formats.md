@@ -48,8 +48,9 @@ from haplotype probabilities to diploid dosage. Matrix-only BGEN reads avoid
 returning sample and variant metadata unless `return_samples=True` or
 `return_variants=True` is requested.
 
-For concrete region filters such as `genoio.region("22:20000000-21000000")`,
-BGEN dosage reads use a same-path bgenix SQLite index when present. For
+For concrete region filters such as
+[`genoio.region("22:20000000-21000000")`](api/filters.md#genoio.region), BGEN
+dosage reads use a same-path bgenix SQLite index when present. For
 `cohort.bgen`, the expected index path is `cohort.bgen.bgi`. If the index is
 absent, reads fall back to the normal sequential scan. The index is used only
 for concrete region pushdown; other predicates still run through the normal

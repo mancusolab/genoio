@@ -11,7 +11,9 @@ metadata frames for sample and variant alignment.
   [`pfile`](reading.md#genoio.pfile) return reusable [`Dataset`](reading.md#genoio.Dataset)
   objects.
 - [`Dataset.read`](reading.md#genoio.Dataset.read) reads one matrix.
-- [`Dataset.blocks`](reading.md#genoio.Dataset.blocks) streams matrix blocks.
+- [`Dataset.iter_blocks`](reading.md#genoio.Dataset.iter_blocks) streams matrix blocks.
+- [`Dataset.iter_regions`](reading.md#genoio.Dataset.iter_regions) streams one
+  read result per requested region filter.
 - [`Dataset.samples`](reading.md#genoio.Dataset.samples) and
   [`Dataset.variants`](reading.md#genoio.Dataset.variants) return metadata
   frames.

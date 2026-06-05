@@ -209,14 +209,14 @@ class Dataset:
             object.__setattr__(self, "_variants_frame_cache", variants_frame(self._metadata()["variants"]))
         return self._variants_frame_cache
 
-    def blocks(self, size: int, **read_options: Any) -> Any:
+    def iter_blocks(self, size: int, **read_options: Any) -> Any:
         r"""Yield consecutive variant blocks from this dataset.
 
         Each yielded block has at most `size` variants and follows the same
-        return contract as [`genoio.Dataset.read`][]. Blocks are ordered by
-        source variant order after any retained-variant filtering. BGEN dosage
-        blocks with a concrete region filter use a same-path `.bgen.bgi` index
-        when present.
+        return contract as [`genoio.Dataset.read`][]. Blocks are fixed-width
+        retained-variant chunks ordered by source variant order after any
+        filtering. BGEN dosage blocks with a concrete region filter use a
+        same-path `.bgen.bgi` index when present.
 
         **Arguments:**
 
@@ -236,6 +236,33 @@ class Dataset:
             validated_options.sparse_format,
         )
         return self._block_iterator(size, normalized_options, validated_options)
+
+    def iter_regions(self, regions: Iterable[Any], **read_options: Any) -> Any:
+        r"""Yield one read result per requested region filter.
+
+        Each yielded item is `(region, result)`, where `region` is the original
+        object from `regions` and `result` follows the same return contract as
+        [`genoio.Dataset.read`][]. Concrete VCF/BCF and BGEN region filters use
+        the same indexed pushdown paths as normal reads when an index is
+        present.
+
+        **Arguments:**
+
+        - `regions`: iterable of region filter expressions.
+        - `read_options`: forwarded to [`genoio.Dataset.read`][], except
+          `variants`, which is supplied by each region.
+
+        **Returns:**
+
+        Iterator yielding `(region, matrix_or_tuple)` pairs.
+        """
+        if "variants" in read_options:
+            raise InvalidOptionError("iter_regions supplies variants from the regions argument")
+        return self._region_iterator(regions, read_options)
+
+    def _region_iterator(self, regions: Iterable[Any], read_options: dict[str, Any]) -> Any:
+        for region in regions:
+            yield region, self.read(variants=region, **read_options)
 
     def _block_iterator(
         self,

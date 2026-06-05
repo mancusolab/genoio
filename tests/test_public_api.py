@@ -284,7 +284,7 @@ def test_dataset_blocks_accepts_explicit_hardcall_dosage_source(tmp_path):
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
-    blocks = list(dataset.blocks(1, dosage="hardcall"))
+    blocks = list(dataset.iter_blocks(1, dosage="hardcall"))
 
     assert len(blocks) == 2
     np.testing.assert_array_equal(blocks[0], np.array([[0.0], [1.0]], dtype=np.float32))
@@ -375,12 +375,12 @@ def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
         "return_variants": True,
     }
 
-    block_iterator = dataset.blocks(8192, **read_options)
+    block_iterator = dataset.iter_blocks(8192, **read_options)
 
     assert iter(block_iterator) is block_iterator
 
     with pytest.raises(genoio.InvalidOptionError, match="block size"):
-        dataset.blocks(0, **read_options)
+        dataset.iter_blocks(0, **read_options)
 
 
 def test_dataset_variants_accepts_documented_default_stats_keyword():

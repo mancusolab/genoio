@@ -14,12 +14,12 @@ ds = genoio.vcf("data/chr22_hg38.vcf.gz")
 samples = ds.samples()
 y = load_phenotype_vector(samples["iid"])
 
-for X, variants in ds.blocks(
+for X, variants in ds.iter_blocks(
     5_000,
     variants=rare_high_quality,
     return_variants=True,
 ):
-    run_association_scan(X, y, samples=samples, variants=variants)
+    association_scan(X, y, variants=variants)
 ```
 
 Expressions compose with Python operators:
@@ -38,12 +38,20 @@ There are two kinds of predicates.
 
 Metadata predicates use fields already present in the source record:
 chromosome, position, ID, REF/ALT structure, and `QUAL`. These predicates can
-drop records before genotype decoding. Examples include `chrom(...)`,
-`region(...)`, `id_in(...)`, `snp()`, `biallelic()`, and `qual(...)`.
+drop records before genotype decoding. Examples include
+[`chrom(...)`](api/filters.md#genoio.chrom),
+[`region(...)`](api/filters.md#genoio.region),
+[`id_in(...)`](api/filters.md#genoio.id_in),
+[`snp()`](api/filters.md#genoio.snp),
+[`biallelic()`](api/filters.md#genoio.biallelic), and
+[`qual(...)`](api/filters.md#genoio.qual).
 
 Genotype predicates require retained genotypes to be decoded first. MAF, MAC,
 missing rate, and polymorphism are genotype predicates. Examples include
-`maf(...)`, `mac(...)`, `missing_rate(...)`, and `polymorphic()`.
+[`maf(...)`](api/filters.md#genoio.maf),
+[`mac(...)`](api/filters.md#genoio.mac),
+[`missing_rate(...)`](api/filters.md#genoio.missing_rate), and
+[`polymorphic()`](api/filters.md#genoio.polymorphic).
 
 This distinction matters for speed. A filter like `qual(min=20) & snp()` can
 discard records before matrix construction. A filter like `maf(max=0.05)` must
@@ -79,7 +87,7 @@ metadata or genotype predicates are still evaluated by the normal filter logic.
 bgen_ds = genoio.bgen("cohort.bgen")
 region = genoio.region("22:20000000-21000000")
 
-for X, variants in bgen_ds.blocks(
+for X, variants in bgen_ds.iter_blocks(
     1_000,
     dosage="dosage",
     variants=region,
