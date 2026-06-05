@@ -44,6 +44,20 @@ def test_bgen_member_path_resolves_bgen_source(tmp_path):
     assert dataset.source.prefix == tmp_path / "cohort"
 
 
+def test_bgen_prefix_path_resolves_bgen_member(tmp_path):
+    import genoio
+
+    bgen_path = tmp_path / "cohort.bgen"
+    bgen_path.touch()
+
+    dataset = genoio.bgen(tmp_path / "cohort")
+
+    assert dataset.source.format.value == "bgen"
+    assert dataset.source.path == bgen_path
+    assert dataset.source.members == {"bgen": bgen_path}
+    assert dataset.source.prefix == tmp_path / "cohort"
+
+
 def test_bgen_prefix_resolves_optional_sample_companion(tmp_path):
     import genoio
 
@@ -83,6 +97,22 @@ def test_bgen_dotted_prefix_resolves_optional_sample_companion(tmp_path):
     assert dataset.source.path == bgen_path
     assert dataset.source.members == {"bgen": bgen_path, "sample": sample_path}
     assert dataset.source.prefix == tmp_path / "cohort.v1"
+
+
+def test_bgen_resolution_ignores_unrelated_same_stem_format_files(tmp_path):
+    import genoio
+
+    bgen_path = tmp_path / "cohort.bgen"
+    bgen_path.touch()
+    for suffix in (".vcf", ".bed", ".bim", ".fam", ".pgen", ".pvar", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    dataset = genoio.bgen(tmp_path / "cohort")
+
+    assert dataset.source.format.value == "bgen"
+    assert dataset.source.path == bgen_path
+    assert dataset.source.members == {"bgen": bgen_path}
+    assert dataset.source.prefix == tmp_path / "cohort"
 
 
 def test_bgen_missing_path_raises_invalid_source_error(tmp_path):
