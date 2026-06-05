@@ -8,6 +8,7 @@ license.workspace = true
 flate2 = "1"
 genoio-core = { path = "../genoio-core" }
 rust-htslib = { version = "1.0.0", default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
 zstd = "0.13"
 
 [dev-dependencies]

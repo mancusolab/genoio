@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use genoio_core::{VariantFilter, VariantWindow};
+use rusqlite::{params, Connection};
 use serde_json::json;
 
 const FLAG_LAYOUT2: u32 = 2 << 2;
@@ -404,6 +405,146 @@ fn write_bgen_fixture(
     bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
     write_variants(&mut bgen);
     fs::write(path, bgen).expect("bgen fixture should be written");
+}
+
+fn bgen_index_path(path: &Path) -> PathBuf {
+    let mut index_path = path.as_os_str().to_os_string();
+    index_path.push(".bgi");
+    PathBuf::from(index_path)
+}
+
+fn write_bgen_index(path: &Path, rows: &[(&str, u32, &str, &str, &str, u64, u64)]) {
+    let connection = Connection::open(bgen_index_path(path)).expect("bgen index should open");
+    connection
+        .execute_batch(
+            "CREATE TABLE Variant (
+                chromosome TEXT NOT NULL,
+                position INT NOT NULL,
+                rsid TEXT NOT NULL,
+                number_of_alleles INT NOT NULL,
+                allele1 TEXT NOT NULL,
+                allele2 TEXT NULL,
+                file_start_position INT NOT NULL,
+                size_in_bytes INT NOT NULL,
+                PRIMARY KEY (chromosome, position, rsid, allele1, allele2, file_start_position)
+            ) WITHOUT ROWID;",
+        )
+        .expect("bgen index schema should be created");
+    for &(chrom, pos, rsid, allele1, allele2, file_start_position, size_in_bytes) in rows {
+        connection
+            .execute(
+                "INSERT INTO Variant (
+                    chromosome, position, rsid, number_of_alleles, allele1, allele2,
+                    file_start_position, size_in_bytes
+                ) VALUES (?1, ?2, ?3, 2, ?4, ?5, ?6, ?7)",
+                params![
+                    chrom,
+                    pos,
+                    rsid,
+                    allele1,
+                    allele2,
+                    file_start_position,
+                    size_in_bytes
+                ],
+            )
+            .expect("bgen index row should insert");
+    }
+}
+
+fn write_indexed_bgen_with_invalid_out_of_region_variant(path: &Path) {
+    let mut bgen = Vec::new();
+    write_bgen_header(&mut bgen, 2, 2, FLAG_LAYOUT2, true).expect("header should write");
+    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
+    bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+
+    let first_start = u64::try_from(bgen.len()).expect("first offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var1", "rs1", "1", 10, &["A", "G", "T"])
+        .expect("first variant identifying data should write");
+    write_layout2_dosage_probability_block(&mut bgen, 8, &[Some((255, 0)), Some((255, 0))])
+        .expect("out-of-region probability block should write");
+    let first_end = u64::try_from(bgen.len()).expect("first end should fit u64");
+
+    let second_start = u64::try_from(bgen.len()).expect("second offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var2", "rs2", "2", 20, &["C", "T"])
+        .expect("second variant identifying data should write");
+    write_layout2_dosage_probability_block(&mut bgen, 8, &[Some((0, 255)), Some((102, 102))])
+        .expect("second dosage probability block should write");
+    let second_end = u64::try_from(bgen.len()).expect("second end should fit u64");
+
+    fs::write(path, bgen).expect("bgen fixture should be written");
+    write_bgen_index(
+        path,
+        &[
+            (
+                "1",
+                10,
+                "rs1",
+                "A",
+                "G",
+                first_start,
+                first_end - first_start,
+            ),
+            (
+                "2",
+                20,
+                "rs2",
+                "C",
+                "T",
+                second_start,
+                second_end - second_start,
+            ),
+        ],
+    );
+}
+
+fn write_indexed_bgen_with_unsorted_region_positions(path: &Path) {
+    let mut bgen = Vec::new();
+    write_bgen_header(&mut bgen, 2, 2, FLAG_LAYOUT2, true).expect("header should write");
+    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
+    bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+
+    let first_start = u64::try_from(bgen.len()).expect("first offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var1", "rs_late", "22", 30, &["A", "G"])
+        .expect("first variant identifying data should write");
+    write_layout2_dosage_probability_block(&mut bgen, 8, &[Some((255, 0)), Some((128, 64))])
+        .expect("first dosage probability block should write");
+    let first_end = u64::try_from(bgen.len()).expect("first end should fit u64");
+
+    let second_start = u64::try_from(bgen.len()).expect("second offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var2", "rs_early", "22", 10, &["C", "T"])
+        .expect("second variant identifying data should write");
+    write_layout2_dosage_probability_block(&mut bgen, 8, &[Some((0, 255)), Some((102, 102))])
+        .expect("second dosage probability block should write");
+    let second_end = u64::try_from(bgen.len()).expect("second end should fit u64");
+
+    fs::write(path, bgen).expect("bgen fixture should be written");
+    write_bgen_index(
+        path,
+        &[
+            (
+                "22",
+                30,
+                "rs_late",
+                "A",
+                "G",
+                first_start,
+                first_end - first_start,
+            ),
+            (
+                "22",
+                10,
+                "rs_early",
+                "C",
+                "T",
+                second_start,
+                second_end - second_start,
+            ),
+        ],
+    );
 }
 
 fn write_two_sample_two_variant_bgen(path: &Path) {
@@ -1057,6 +1198,66 @@ fn bgen_dosage_dense_window_is_over_filtered_retained_variants() {
     );
     assert_eq!(dense.diagnostics.candidate_variants, 3);
     assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);
+}
+
+#[test]
+fn bgen_dosage_dense_region_filter_uses_bgi_index_to_skip_out_of_region_payloads() {
+    let dir = unique_dir("bgen-dosage-bgi-region");
+    let bgen = dir.join("tiny.bgen");
+    write_indexed_bgen_with_invalid_out_of_region_variant(&bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "2:1-30"}
+    }))
+    .expect("region filter should parse");
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+        .expect("indexed bgen region filter should not decode out-of-region payloads");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(
+        dense.values,
+        vec![expected_dosage(8, 0, 255), expected_dosage(8, 102, 102)]
+    );
+    assert_eq!(dense.diagnostics.candidate_variants, 1);
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 0);
+}
+
+#[test]
+fn bgen_dosage_dense_indexed_region_preserves_source_variant_order() {
+    let dir = unique_dir("bgen-dosage-bgi-source-order");
+    let bgen = dir.join("tiny.bgen");
+    write_indexed_bgen_with_unsorted_region_positions(&bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "22:1-40"}
+    }))
+    .expect("region filter should parse");
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+        .expect("indexed bgen region filter should decode");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs_late", "rs_early"]
+    );
+    assert_eq!(
+        dense.values,
+        vec![
+            expected_dosage(8, 255, 0),
+            expected_dosage(8, 0, 255),
+            expected_dosage(8, 128, 64),
+            expected_dosage(8, 102, 102),
+        ]
+    );
 }
 
 #[test]

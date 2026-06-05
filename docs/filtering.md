@@ -69,6 +69,10 @@ unindexed compressed region reads instead of silently scanning the full file.
 When a `.tbi` or `.csi` index is present, the reader uses it to seek to the
 requested region.
 
+For BGEN dosage reads, concrete region filters use a same-path bgenix SQLite
+index when present. For `cohort.bgen`, `genoio` looks for `cohort.bgen.bgi`.
+When that index is absent, BGEN reads fall back to the normal sequential scan.
+
 ---
 
 ## Available predicates
@@ -111,8 +115,8 @@ reads, block reads, and Rust reader implementations.
 
 Rust uses the IR to separate cheap metadata decisions from data-dependent
 genotype decisions. Metadata predicates can be evaluated before matrix
-construction, and concrete VCF/BCF region predicates can use an index when one
-is available. Before reading, Rust also normalizes simple boolean expressions:
+construction, and concrete VCF/BCF or BGEN region predicates can use an index
+when one is available. Before reading, Rust also normalizes simple boolean expressions:
 overlapping conjoined regions are reduced to their intersection, repeated
 threshold predicates are tightened, conjoined `id_in` predicates are
 intersected, and contradictory predicates become an empty result without

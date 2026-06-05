@@ -112,8 +112,9 @@ Optional comparison packages are used when installed:
 ## What affects speed
 
 Metadata filters are cheaper than genotype filters because they can run before
-matrix decoding. Region filters on indexed compressed VCF/BCF sources can also
-avoid scanning unrelated records.
+matrix decoding. Region filters on indexed compressed VCF/BCF sources and BGEN
+sources with a same-path `.bgen.bgi` index can also avoid scanning unrelated
+records.
 
 PLINK2 performance depends on how much metadata the caller requests. Block
 reads that only need matrix data can avoid parsing full variant metadata.

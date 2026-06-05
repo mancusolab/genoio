@@ -5,15 +5,16 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flate2::read::ZlibDecoder;
 use genoio_core::{
     attach_variant_stats, compute_dosage_variant_stats, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    PartialFilterDecision, SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
-    VariantWindow,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, DenseSampleSelection,
+    MetadataError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
+    SourceCapabilities, VariantFilter, VariantRecord, VariantWindow,
 };
+use rusqlite::{params, Connection};
 
 use crate::Result;
 
@@ -80,7 +81,7 @@ pub fn read_bgen_dosage_dense_windowed(
     header.validate(bgen)?;
     let all_samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
-    let mut diagnostics = selection.diagnostics;
+    let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         diagnostics.retained_variants = 0;
         return DenseGenotypeMatrix::new(
@@ -92,6 +93,18 @@ pub fn read_bgen_dosage_dense_windowed(
             Vec::new(),
             diagnostics,
         );
+    }
+    if let Some(index_records) = indexed_region_records(bgen, variant_filter)? {
+        let context = BgenIndexedReadContext {
+            reader: &mut reader,
+            bgen,
+            header: &header,
+            selection,
+            diagnostics,
+            variant_filter,
+            variant_window,
+        };
+        return read_bgen_dosage_dense_indexed(context, &index_records);
     }
 
     reader
@@ -211,6 +224,249 @@ pub fn read_bgen_dosage_dense_windowed(
         variants,
         diagnostics,
     )
+}
+
+struct BgenIndexedReadContext<'a> {
+    reader: &'a mut File,
+    bgen: &'a Path,
+    header: &'a BgenHeader,
+    selection: DenseSampleSelection,
+    diagnostics: genoio_core::DenseDiagnostics,
+    variant_filter: Option<&'a VariantFilter>,
+    variant_window: Option<VariantWindow>,
+}
+
+fn read_bgen_dosage_dense_indexed(
+    context: BgenIndexedReadContext<'_>,
+    index_records: &[BgenIndexRecord],
+) -> Result<DenseGenotypeMatrix> {
+    let BgenIndexedReadContext {
+        reader,
+        bgen,
+        header,
+        selection,
+        mut diagnostics,
+        variant_filter,
+        variant_window,
+    } = context;
+    let output_variant_capacity = variant_window.map_or(index_records.len(), |window| {
+        window.len.min(index_records.len())
+    });
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut decode_buffers = DosageDecodeBuffers::default();
+    let mut retained_index = 0_usize;
+
+    for index_record in index_records {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
+        reader
+            .seek(SeekFrom::Start(index_record.file_start_position))
+            .map_err(|source| MetadataError::Io {
+                path: bgen.to_path_buf(),
+                source,
+            })?;
+        let mut variant = read_layout2_variant_identifying_data(reader, bgen)?;
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        let mut payload = None;
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                validate_index_record_consumed(reader, bgen, index_record)?;
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                    validate_index_record_consumed(reader, bgen, index_record)?;
+                    continue;
+                }
+                payload = Some(read_layout2_probability_payload(
+                    reader,
+                    bgen,
+                    header.flags.compression,
+                )?);
+            }
+            PartialFilterDecision::NeedGenotypes => {
+                let genotype_payload =
+                    read_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                decode_selected_dosage_values(
+                    bgen,
+                    &genotype_payload,
+                    header.sample_count,
+                    &selection.source_indices,
+                    &mut decode_buffers,
+                )?;
+                let stats = compute_dosage_variant_stats(
+                    &decode_buffers.selected_values,
+                    &decode_buffers.selected_missing,
+                )?;
+                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                    validate_index_record_consumed(reader, bgen, index_record)?;
+                    diagnostics.dropped_genotype_variants += 1;
+                    continue;
+                }
+                attach_variant_stats(&mut variant, stats);
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    validate_index_record_consumed(reader, bgen, index_record)?;
+                    continue;
+                }
+            }
+        }
+
+        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            decode_selected_dosage_values(
+                bgen,
+                payload.as_deref().expect(
+                    "metadata-accepted indexed variants included in the window have payloads",
+                ),
+                header.sample_count,
+                &selection.source_indices,
+                &mut decode_buffers,
+            )?;
+        }
+        validate_index_record_consumed(reader, bgen, index_record)?;
+        variants.push(variant);
+        variant_major_values.extend_from_slice(&decode_buffers.selected_values);
+        variant_major_missing.extend_from_slice(&decode_buffers.selected_missing);
+    }
+
+    let n_samples = selection.samples.len();
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BgenIndexRecord {
+    file_start_position: u64,
+    size_in_bytes: u64,
+}
+
+fn indexed_region_records(
+    bgen: &Path,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<Option<Vec<BgenIndexRecord>>> {
+    let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) else {
+        return Ok(None);
+    };
+    let index_path = bgen_index_path(bgen);
+    if !index_path.exists() {
+        return Ok(None);
+    }
+    if !index_path.is_file() {
+        return Err(MetadataError::parse(
+            &index_path,
+            "bgen index path is not a file",
+        ));
+    }
+    query_bgen_index(&index_path, &region).map(Some)
+}
+
+fn bgen_index_path(bgen: &Path) -> PathBuf {
+    let mut path = bgen.as_os_str().to_os_string();
+    path.push(".bgi");
+    PathBuf::from(path)
+}
+
+fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<BgenIndexRecord>> {
+    let connection = Connection::open(index_path).map_err(|error| {
+        MetadataError::parse(index_path, format!("bgen index open error: {error}"))
+    })?;
+    let mut statement = connection
+        .prepare(
+            // Preserve the BGEN source order contract even when records in the
+            // indexed interval are not sorted by position.
+            "SELECT file_start_position, size_in_bytes
+             FROM Variant
+             WHERE chromosome = ?1 AND position BETWEEN ?2 AND ?3
+             ORDER BY file_start_position",
+        )
+        .map_err(|error| {
+            MetadataError::parse(
+                index_path,
+                format!("bgen index query prepare error: {error}"),
+            )
+        })?;
+    let rows = statement
+        .query_map(
+            params![region.chrom, i64::from(region.start), i64::from(region.end)],
+            |row| {
+                let file_start_position = row.get::<_, i64>(0)?;
+                let size_in_bytes = row.get::<_, i64>(1)?;
+                Ok((file_start_position, size_in_bytes))
+            },
+        )
+        .map_err(|error| {
+            MetadataError::parse(index_path, format!("bgen index query error: {error}"))
+        })?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        let (file_start_position, size_in_bytes) = row.map_err(|error| {
+            MetadataError::parse(index_path, format!("bgen index row error: {error}"))
+        })?;
+        records.push(BgenIndexRecord {
+            file_start_position: u64::try_from(file_start_position).map_err(|_| {
+                MetadataError::parse(index_path, "bgen index file_start_position is negative")
+            })?,
+            size_in_bytes: u64::try_from(size_in_bytes).map_err(|_| {
+                MetadataError::parse(index_path, "bgen index size_in_bytes is negative")
+            })?,
+        });
+    }
+    Ok(records)
+}
+
+fn validate_index_record_consumed(
+    reader: &mut File,
+    bgen: &Path,
+    index_record: &BgenIndexRecord,
+) -> Result<()> {
+    let consumed_end = reader
+        .stream_position()
+        .map_err(|source| MetadataError::Io {
+            path: bgen.to_path_buf(),
+            source,
+        })?;
+    let expected_end = index_record
+        .file_start_position
+        .checked_add(index_record.size_in_bytes)
+        .ok_or_else(|| MetadataError::parse(bgen, "bgen index byte range is out of range"))?;
+    if consumed_end != expected_end {
+        return Err(MetadataError::parse(
+            bgen,
+            "bgen index byte range does not match decoded variant record",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Default)]

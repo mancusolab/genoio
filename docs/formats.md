@@ -9,7 +9,7 @@ BGEN reads can instead use stored dosage values with `dosage="dosage"`.
 | VCF/BCF | `.vcf`, `.vcf.gz`, `.bcf` | yes; dense `FORMAT/DS` dosage supported | phased VCF only | Indexed region filters use `.tbi` or `.csi` when available. |
 | PLINK1 | `.bed` + `.bim` + `.fam` | yes | no | Variant-major BED files are supported. |
 | PLINK2 | `.pgen` + `.pvar` or `.pvar.zst` + `.psam` | yes; dense unphased biallelic dosage supported | no | Biallelic hard-call PGEN records are supported. |
-| BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | no | Layout 2 biallelic diploid dosages are returned as expected A1 counts; phased records are collapsed to diploid dosage. |
+| BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | no | Layout 2 biallelic diploid dosages are returned as expected A1 counts; phased records are collapsed to diploid dosage. Concrete region filters use a same-path `.bgen.bgi` index when present. |
 
 ---
 
@@ -46,6 +46,11 @@ provided by the same-prefix `.sample` file. Layout 2 biallelic diploid dosage
 records are returned as expected copies of `a1`; phased records are collapsed
 from haplotype probabilities to diploid dosage.
 
+For concrete region filters such as `genoio.region("22:20000000-21000000")`,
+BGEN dosage reads use a same-path bgenix SQLite index when present. For
+`cohort.bgen`, the expected index path is `cohort.bgen.bgi`. If the index is
+absent, reads fall back to the normal sequential scan.
+
 ---
 
 ## Current limitations
@@ -58,9 +63,9 @@ from haplotype probabilities to diploid dosage.
 - PLINK2 support is limited to biallelic hard-call and unphased dosage records.
 - BGEN support is limited to dense `kind="geno", dosage="dosage"` reads.
   Hardcall conversion, sparse reads, haplotype reads, multiallelic BGEN,
-  variable ploidy, unsupported compression and layout values, and `.bgi` or
-  region pushdown are not supported.
+  variable ploidy, and unsupported compression and layout values are not
+  supported. `.bgi` pushdown is limited to concrete region filters.
 - Sparse reads do not preserve missing-value masks.
 - Haplotype reads are currently VCF-only.
-- Region pushdown is implemented for concrete indexed VCF/BCF region filters,
-  not for arbitrary filter expressions.
+- Region pushdown is implemented for concrete indexed VCF/BCF and BGEN region
+  filters, not for arbitrary filter expressions.
