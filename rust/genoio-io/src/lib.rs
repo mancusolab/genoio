@@ -13,7 +13,7 @@ mod plink1;
 mod plink2;
 mod vcf;
 
-pub use bgen::read_bgen_metadata;
+pub use bgen::{read_bgen_dosage_dense, read_bgen_dosage_dense_windowed, read_bgen_metadata};
 pub use error::Result;
 pub use plink1::{
     read_plink1_dense, read_plink1_dense_windowed, read_plink1_metadata, read_plink1_sparse,

@@ -8,7 +8,12 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
-use genoio_core::{MetadataError, MetadataOutput, SampleRecord, SourceCapabilities, VariantRecord};
+use genoio_core::{
+    attach_variant_stats, compute_dosage_variant_stats, select_samples_source_order,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
+    PartialFilterDecision, SampleRecord, SourceCapabilities, VariantFilter, VariantRecord,
+    VariantWindow,
+};
 
 use crate::Result;
 
@@ -16,7 +21,7 @@ const BGEN_MAGIC: &[u8; 4] = b"bgen";
 const ZERO_MAGIC: &[u8; 4] = &[0, 0, 0, 0];
 const MIN_HEADER_LENGTH: u32 = 20;
 const SAMPLE_IDENTIFIER_FLAG: u32 = 1 << 31;
-const DOSAGE_TOLERANCE: f64 = 1.0e-6;
+const DOSAGE_TOLERANCE: f32 = 1.0e-6;
 
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
     let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
@@ -26,16 +31,7 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
     let header = BgenHeader::read_from(&mut reader, bgen)?;
     header.validate(bgen)?;
 
-    let samples = if header.flags.has_sample_identifiers {
-        read_sample_identifier_block(&mut reader, bgen, header.sample_count)?
-    } else if let Some(sample) = sample {
-        read_companion_sample_file(sample, header.sample_count)?
-    } else {
-        return Err(MetadataError::parse(
-            bgen,
-            "bgen sample identifiers require embedded identifiers or a companion sample path",
-        ));
-    };
+    let samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
 
     reader
         .seek(SeekFrom::Start(u64::from(header.offset) + 4))
@@ -56,6 +52,164 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })
+}
+
+/// Read all retained BGEN unphased biallelic dosages as a dense matrix.
+pub fn read_bgen_dosage_dense(
+    bgen: &Path,
+    sample: Option<&Path>,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<DenseGenotypeMatrix> {
+    read_bgen_dosage_dense_windowed(bgen, sample, requested_samples, variant_filter, None)
+}
+
+/// Read retained BGEN unphased biallelic dosages as a dense matrix.
+pub fn read_bgen_dosage_dense_windowed(
+    bgen: &Path,
+    sample: Option<&Path>,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<DenseGenotypeMatrix> {
+    let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
+        path: bgen.to_path_buf(),
+        source,
+    })?;
+    let header = BgenHeader::read_from(&mut reader, bgen)?;
+    header.validate(bgen)?;
+    let all_samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
+    let mut diagnostics = selection.diagnostics;
+
+    reader
+        .seek(SeekFrom::Start(u64::from(header.offset) + 4))
+        .map_err(|source| MetadataError::Io {
+            path: bgen.to_path_buf(),
+            source,
+        })?;
+
+    let header_variant_count = usize::try_from(header.variant_count)
+        .map_err(|_| MetadataError::parse(bgen, "bgen variant count is out of range"))?;
+    let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
+        window.len.min(header_variant_count)
+    });
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut source_values = Vec::new();
+    let mut source_missing = Vec::new();
+    let mut selected_values = Vec::new();
+    let mut selected_missing = Vec::new();
+    let mut retained_index = 0_usize;
+
+    for _ in 0..header.variant_count {
+        let mut variant = read_layout2_variant_identifying_data(&mut reader, bgen)?;
+        diagnostics.candidate_variants += 1;
+        let payload =
+            read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
+        let decoded = DecodedDosageVariant::decode(bgen, &payload, header.sample_count, 2)?;
+        decoded.debug_assert_supported_subset();
+        decoded.decode_source_order(bgen, &mut source_values, &mut source_missing)?;
+        select_decoded_source_order(
+            &source_values,
+            &source_missing,
+            &selection.source_indices,
+            &mut selected_values,
+            &mut selected_missing,
+        );
+
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {
+                let stats = compute_dosage_variant_stats(&selected_values, &selected_missing)?;
+                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                    diagnostics.dropped_genotype_variants += 1;
+                    continue;
+                }
+                attach_variant_stats(&mut variant, stats);
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    continue;
+                }
+            }
+        }
+
+        variants.push(variant);
+        variant_major_values.extend_from_slice(&selected_values);
+        variant_major_missing.extend_from_slice(&selected_missing);
+    }
+
+    let n_samples = selection.samples.len();
+    let n_variants = variants.len();
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    DenseGenotypeMatrix::new(
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        selection.samples,
+        variants,
+        diagnostics,
+    )
+}
+
+fn read_bgen_samples(
+    reader: &mut impl Read,
+    bgen: &Path,
+    sample: Option<&Path>,
+    header: &BgenHeader,
+) -> Result<Vec<SampleRecord>> {
+    if header.flags.has_sample_identifiers {
+        read_sample_identifier_block(reader, bgen, header.sample_count)
+    } else if let Some(sample) = sample {
+        read_companion_sample_file(sample, header.sample_count)
+    } else {
+        Err(MetadataError::parse(
+            bgen,
+            "bgen sample identifiers require embedded identifiers or a companion sample path",
+        ))
+    }
+}
+
+fn select_decoded_source_order(
+    source_values: &[f32],
+    source_missing: &[bool],
+    source_indices: &[usize],
+    selected_values: &mut Vec<f32>,
+    selected_missing: &mut Vec<bool>,
+) {
+    selected_values.clear();
+    selected_missing.clear();
+    selected_values.reserve(source_indices.len());
+    selected_missing.reserve(source_indices.len());
+    for &source_index in source_indices {
+        selected_values.push(source_values[source_index]);
+        selected_missing.push(source_missing[source_index]);
+    }
 }
 
 struct BgenHeader {
@@ -685,8 +839,8 @@ impl<'a> LittleEndianBitReader<'a> {
 
 fn decode_a1_dosage(path: &Path, bit_depth: u8, p_aa_raw: u32, p_ab_raw: u32) -> Result<f32> {
     let denominator = probability_denominator(bit_depth);
-    let p_aa = f64::from(p_aa_raw) / denominator;
-    let p_ab = f64::from(p_ab_raw) / denominator;
+    let p_aa = p_aa_raw as f32 / denominator;
+    let p_ab = p_ab_raw as f32 / denominator;
     let p_bb = 1.0 - p_aa - p_ab;
     let dosage = p_ab + 2.0 * p_bb;
 
@@ -697,11 +851,11 @@ fn decode_a1_dosage(path: &Path, bit_depth: u8, p_aa_raw: u32, p_ab_raw: u32) ->
         ));
     }
 
-    Ok(dosage.clamp(0.0, 2.0) as f32)
+    Ok(dosage.clamp(0.0, 2.0))
 }
 
-fn probability_denominator(bit_depth: u8) -> f64 {
-    ((1_u64 << bit_depth) - 1) as f64
+fn probability_denominator(bit_depth: u8) -> f32 {
+    ((1_u64 << bit_depth) - 1) as f32
 }
 
 fn decompress_probability_block(

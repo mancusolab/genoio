@@ -125,18 +125,24 @@ fn read_dense(
                 ),
             }
         }
-        "bgen" => match read_options.dosage {
-            DosageSource::Hardcall => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "bgen hardcall genotype reads are not implemented",
-                ));
+        "bgen" => {
+            let bgen = member_path(members, "bgen")?;
+            let sample = optional_member_path(members, "sample")?;
+            match read_options.dosage {
+                DosageSource::Hardcall => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "bgen hardcall genotype reads are not implemented",
+                    ));
+                }
+                DosageSource::Dosage => genoio_io::read_bgen_dosage_dense_windowed(
+                    &bgen,
+                    sample.as_deref(),
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                ),
             }
-            DosageSource::Dosage => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "bgen dosage reads are not implemented",
-                ));
-            }
-        },
+        }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported dense format: {other}"

@@ -165,12 +165,12 @@ def test_bgen_dataset_read_rejects_haplotypes(tmp_path):
         dataset.read(kind="haplo")
 
 
-def test_bgen_dataset_read_dosage_reaches_backend_until_parser_exists(tmp_path):
+def test_bgen_dataset_read_dosage_rejects_invalid_placeholder_source(tmp_path):
     import genoio
 
     dataset = placeholder_bgen_dataset(tmp_path)
 
-    with pytest.raises(genoio.InvalidSourceError):
+    with pytest.raises(genoio.InvalidSourceError, match="bgen"):
         dataset.read(dosage="dosage")
 
 

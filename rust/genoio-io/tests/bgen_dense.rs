@@ -421,7 +421,7 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
     ];
     write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
         .expect("bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 2);
@@ -449,7 +449,7 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
     ];
     write_two_sample_two_variant_dosage_bgen(&bgen, 16, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
         .expect("bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 2);
@@ -473,7 +473,7 @@ fn bgen_dosage_dense_preserves_missing_sample_calls() {
     let calls = [[Some((204, 26)), None], [Some((0, 255)), Some((102, 102))]];
     write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
         .expect("bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 2);
