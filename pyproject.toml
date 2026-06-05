@@ -7,7 +7,7 @@ name = "genoio"
 version = "0.1.0"
 description = "Genotype IO tools for Python"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [
     { name = "Mancuso Lab" },
@@ -18,9 +18,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
@@ -56,7 +57,7 @@ manifest-path = "rust/genoio-py/Cargo.toml"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -74,7 +75,7 @@ addopts = [
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
-python-version = "3.10"
+python-version = "3.11"
 
 [tool.ty.analysis]
 allowed-unresolved-imports = [
