@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-from test_dense_read import write_fixed_width_plink2
+from test_dense_read import write_bgen_dosage, write_fixed_width_plink2
 
 
 def write_filter_vcf(tmp_path: Path) -> Path:
@@ -274,6 +274,56 @@ def test_plink2_genotype_filters_return_core_variant_metadata(tmp_path):
         G,
         np.array([[0.0, 1.0, 2.0], [np.nan, 0.0, 1.0], [2.0, 1.0, 0.0]], dtype=np.float32),
     )
+
+
+@pytest.mark.parametrize(
+    ("expr_factory", "expected_ids", "expected_matrix"),
+    [
+        (
+            lambda genoio: genoio.maf(min=0.2),
+            ["rs2"],
+            [[1.0], [np.nan]],
+        ),
+        (
+            lambda genoio: genoio.mac(min=1, max=1),
+            ["rs2"],
+            [[1.0], [np.nan]],
+        ),
+        (
+            lambda genoio: genoio.missing_rate(0.0),
+            ["rs1"],
+            [[0.0], [0.0]],
+        ),
+        (
+            lambda genoio: genoio.polymorphic(),
+            ["rs2"],
+            [[1.0], [np.nan]],
+        ),
+    ],
+)
+def test_bgen_dosage_genotype_filters_match_dosage_reference_results(
+    tmp_path, expr_factory, expected_ids, expected_matrix
+):
+    import genoio
+
+    path = write_bgen_dosage(
+        tmp_path,
+        variant_calls=[
+            [(255, 0), (255, 0)],
+            [(0, 255), None],
+        ],
+    )
+    dataset = genoio.bgen(path)
+
+    G, variants = dataset.read(
+        dosage="dosage",
+        variants=expr_factory(genoio),
+        return_variants=True,
+    )
+
+    assert variants["id"].to_list() == expected_ids
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
+    np.testing.assert_array_equal(G, np.array(expected_matrix, dtype=np.float32))
 
 
 @pytest.mark.skipif(

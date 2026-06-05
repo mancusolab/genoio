@@ -459,6 +459,15 @@ fn chrom_filter(chrom: &str) -> VariantFilter {
     .expect("chrom filter should parse")
 }
 
+fn genotype_stat_filter(name: &str, params: serde_json::Value) -> VariantFilter {
+    VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": name,
+        "params": params,
+    }))
+    .expect("genotype-stat filter should parse")
+}
+
 #[test]
 fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
     let dir = unique_dir("bgen-dosage-bit-depth-8");
@@ -512,6 +521,86 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
         assert!((observed - expected).abs() <= 2.0 / 65_535.0);
     }
     assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
+    let dir = unique_dir("bgen-dosage-genotype-stat-filters");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [[Some((255, 0)), Some((255, 0))], [Some((0, 255)), None]];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let cases = [
+        (
+            genotype_stat_filter("maf", json!({"min": 0.2})),
+            "rs2",
+            vec![1.0, 0.0],
+            vec![false, true],
+            Some(0.5),
+            Some(1),
+            Some(0.5),
+            Some(1),
+        ),
+        (
+            genotype_stat_filter("mac", json!({"min": 1, "max": 1})),
+            "rs2",
+            vec![1.0, 0.0],
+            vec![false, true],
+            Some(0.5),
+            Some(1),
+            Some(0.5),
+            Some(1),
+        ),
+        (
+            genotype_stat_filter("missing_rate", json!({"max": 0.0})),
+            "rs1",
+            vec![0.0, 0.0],
+            vec![false, false],
+            Some(0.0),
+            Some(0),
+            Some(0.0),
+            Some(2),
+        ),
+        (
+            genotype_stat_filter("polymorphic", json!({})),
+            "rs2",
+            vec![1.0, 0.0],
+            vec![false, true],
+            Some(0.5),
+            Some(1),
+            Some(0.5),
+            Some(1),
+        ),
+    ];
+
+    for (
+        filter,
+        expected_id,
+        expected_values,
+        expected_missing,
+        expected_maf,
+        expected_mac,
+        expected_missing_rate,
+        expected_n_called,
+    ) in cases
+    {
+        let dense =
+            genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+                .expect("bgen dosage genotype-stat filter should decode");
+
+        assert_eq!(dense.n_samples, 2);
+        assert_eq!(dense.n_variants, 1);
+        assert_eq!(dense.variants[0].id, expected_id);
+        assert_eq!(dense.values, expected_values);
+        assert_eq!(dense.missing_mask, expected_missing);
+        assert_eq!(dense.variants[0].maf, expected_maf);
+        assert_eq!(dense.variants[0].mac, expected_mac);
+        assert_eq!(dense.variants[0].missing_rate, expected_missing_rate);
+        assert_eq!(dense.variants[0].n_called, expected_n_called);
+        assert_eq!(dense.diagnostics.candidate_variants, 2);
+        assert_eq!(dense.diagnostics.retained_variants, 1);
+        assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+    }
 }
 
 #[test]
