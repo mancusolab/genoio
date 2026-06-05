@@ -159,6 +159,44 @@ def test_bgen_dosage_blocks_yield_no_blocks_for_empty_variant_filter(tmp_path):
     assert blocks == []
 
 
+def test_bgen_dosage_blocks_honor_size_and_concatenate_to_full_read(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    full = dataset.read(dosage="dosage")
+    blocks = list(dataset.blocks(1, dosage="dosage"))
+
+    assert [block.shape for block in blocks] == [(2, 1), (2, 1)]
+    np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+
+
+def test_bgen_dosage_blocks_variant_metadata_aligns_with_each_block(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    blocks = list(dataset.blocks(1, dosage="dosage", return_variants=True))
+
+    assert [variants["id"].to_list() for _, variants in blocks] == [["rs1"], ["rs2"]]
+    for G_block, variants in blocks:
+        assert G_block.shape == (2, len(variants))
+
+
+def test_bgen_dosage_filtered_blocks_match_filtered_full_read(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+    read_options = {"dosage": "dosage", "variants": genoio.chrom("2")}
+
+    full, full_variants = dataset.read(**read_options, return_variants=True)
+    blocks = list(dataset.blocks(1, **read_options, return_variants=True))
+
+    assert [variants["id"].to_list() for _, variants in blocks] == [["rs2"]]
+    np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
+    assert full_variants["id"].to_list() == ["rs2"]
+
+
 def test_bgen_dosage_blocks_yield_no_blocks_for_nonmatching_metadata_filter(tmp_path):
     import genoio
 

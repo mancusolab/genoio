@@ -120,10 +120,10 @@ pub fn read_bgen_dosage_dense_windowed(
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        let payload =
-            read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
+        let mut payload = None;
         match partial_decision {
             PartialFilterDecision::Reject => {
+                read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
                 diagnostics.dropped_metadata_variants += 1;
                 continue;
             }
@@ -132,13 +132,24 @@ pub fn read_bgen_dosage_dense_windowed(
                     variant_window.is_none_or(|window| window.contains(retained_index));
                 retained_index += 1;
                 if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        break;
+                    }
+                    read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
                     continue;
                 }
+                payload = Some(read_layout2_probability_payload(
+                    &mut reader,
+                    bgen,
+                    header.flags.compression,
+                )?);
             }
             PartialFilterDecision::NeedGenotypes => {
+                let genotype_payload =
+                    read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
                 decode_selected_dosage_values(
                     bgen,
-                    &payload,
+                    &genotype_payload,
                     header.sample_count,
                     &selection.source_indices,
                     &mut decode_buffers,
@@ -156,6 +167,9 @@ pub fn read_bgen_dosage_dense_windowed(
                     variant_window.is_none_or(|window| window.contains(retained_index));
                 retained_index += 1;
                 if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        break;
+                    }
                     continue;
                 }
             }
@@ -164,7 +178,9 @@ pub fn read_bgen_dosage_dense_windowed(
         if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
             decode_selected_dosage_values(
                 bgen,
-                &payload,
+                payload
+                    .as_deref()
+                    .expect("metadata-accepted variants included in the window have payloads"),
                 header.sample_count,
                 &selection.source_indices,
                 &mut decode_buffers,
@@ -173,6 +189,9 @@ pub fn read_bgen_dosage_dense_windowed(
         variants.push(variant);
         variant_major_values.extend_from_slice(&decode_buffers.selected_values);
         variant_major_missing.extend_from_slice(&decode_buffers.selected_missing);
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
     }
 
     let n_samples = selection.samples.len();

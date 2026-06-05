@@ -426,6 +426,27 @@ fn write_three_sample_two_variant_dosage_bgen(
     fs::write(path, bgen).expect("bgen fixture should be written");
 }
 
+fn write_two_sample_three_variant_dosage_bgen(
+    path: &Path,
+    bit_depth: u8,
+    variant_calls: &[[Option<(u32, u32)>; 2]; 3],
+) {
+    write_bgen_fixture(path, FLAG_LAYOUT2, 3, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "9", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[0])
+            .expect("first dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "1", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[1])
+            .expect("second dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var3", "rs3", "1", 30, &["G", "A"])
+            .expect("third variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[2])
+            .expect("third dosage probability block should write");
+    });
+}
+
 fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
     let denominator = ((1_u64 << bit_depth) - 1) as f32;
     let p_aa = p_aa as f32 / denominator;
@@ -743,6 +764,92 @@ fn bgen_dosage_dense_sample_filter_uses_source_order() {
         ]
     );
     assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_window_reads_unfiltered_retained_variants() {
+    let dir = unique_dir("bgen-dosage-unfiltered-window");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 1 }),
+    )
+    .expect("bgen dosage retained window should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(
+        dense.values,
+        vec![expected_dosage(8, 0, 255), expected_dosage(8, 102, 102)]
+    );
+    assert_eq!(dense.missing_mask, vec![false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_window_is_over_filtered_retained_variants() {
+    let dir = unique_dir("bgen-dosage-filtered-window");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+        [Some((255, 0)), Some((0, 0))],
+    ];
+    write_two_sample_three_variant_dosage_bgen(&bgen, 8, &calls);
+    let filter = chrom_filter("1");
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 1, len: 1 }),
+    )
+    .expect("filtered bgen dosage retained window should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs3");
+    assert_eq!(
+        dense.values,
+        vec![expected_dosage(8, 255, 0), expected_dosage(8, 0, 0)]
+    );
+    assert_eq!(dense.diagnostics.candidate_variants, 3);
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);
+}
+
+#[test]
+fn bgen_dosage_dense_stops_after_satisfied_metadata_window() {
+    let dir = unique_dir("bgen-dosage-stop-after-window");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, 8, &[Some((204, 26)), Some((51, 128))])
+            .expect("first dosage probability block should write");
+    });
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+    )
+    .expect("bgen dosage reader should stop after a satisfied retained window");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(dense.diagnostics.candidate_variants, 1);
 }
 
 #[test]
