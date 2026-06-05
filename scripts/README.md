@@ -24,10 +24,30 @@ Backend-specific runs are useful when an optional comparison package is unavaila
 python scripts/benchmark_vcf.py --backend cyvcf2 --max-variants 1000
 python scripts/benchmark_plink1.py --backend pandas_plink --max-variants 1000
 python scripts/benchmark_plink2.py --backend pgenlib --max-variants 1000
+python scripts/benchmark_bgen.py --backend bgen_reader --max-variants 1000
 ```
+
+Comparison backends are optional. Install `cyvcf2`, `pandas-plink`, `pgenlib`,
+or `bgen-reader` only when you need those specific comparisons.
 
 The PLINK2 `genoio` benchmark accepts either `.pvar` or `.pvar.zst`; compressed
 PVAR metadata is decompressed by the Rust reader.
+
+The BGEN benchmark reads dosage values from `<prefix>.bgen` and uses
+`<prefix>.sample` for the sample-filtered scenario when the BGEN file does not
+embed sample identifiers. Phased BGEN records are collapsed to expected diploid
+A1 dosage.
+
+```bash
+python scripts/benchmark_bgen.py --scenario all --max-variants 1000 --repeats 5
+python scripts/benchmark_bgen.py --scenario matrix-only --backend both --max-variants 1000 --repeats 5
+```
+
+The BGEN `--backend both` comparison computes expected dosage through
+`bgen_reader`/`cbgen` and checks matrix parity with `genoio`. The comparison
+path reads probabilities variant-by-variant because the high-level
+`bgen_reader.read(slice(...))` path can fail on mixed-width BGEN probability
+records.
 
 `pgenlib` must be importable for the PLINK2 comparison backend. If it is built in the symlinked PLINK repository but not installed, pass:
 

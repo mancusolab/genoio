@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
@@ -54,7 +54,7 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
     })
 }
 
-/// Read all retained BGEN unphased biallelic dosages as a dense matrix.
+/// Read all retained BGEN biallelic diploid dosages as a dense matrix.
 pub fn read_bgen_dosage_dense(
     bgen: &Path,
     sample: Option<&Path>,
@@ -64,7 +64,7 @@ pub fn read_bgen_dosage_dense(
     read_bgen_dosage_dense_windowed(bgen, sample, requested_samples, variant_filter, None)
 }
 
-/// Read retained BGEN unphased biallelic dosages as a dense matrix.
+/// Read retained BGEN biallelic diploid dosages as a dense matrix.
 pub fn read_bgen_dosage_dense_windowed(
     bgen: &Path,
     sample: Option<&Path>,
@@ -403,6 +403,25 @@ impl BgenLayout {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BgenPhase {
+    Unphased,
+    Phased,
+}
+
+impl BgenPhase {
+    fn from_raw(path: &Path, raw: u8) -> Result<Self> {
+        match raw {
+            0 => Ok(Self::Unphased),
+            1 => Ok(Self::Phased),
+            _ => Err(MetadataError::parse(
+                path,
+                "unsupported bgen phased probability value; expected 0 or 1",
+            )),
+        }
+    }
+}
+
 fn read_sample_identifier_block(
     reader: &mut impl Read,
     path: &Path,
@@ -427,7 +446,7 @@ fn read_sample_identifier_block(
         MetadataError::parse(path, "bgen sample identifiers block length is out of range")
     })?;
     let body = read_exact_vec(reader, path, body_len)?;
-    let mut body_reader = Cursor::new(body.as_slice());
+    let mut body_reader = body.as_slice();
 
     let mut records = Vec::with_capacity(usize::try_from(sample_count).map_err(|_| {
         MetadataError::parse(path, "bgen sample identifiers count is out of range")
@@ -450,10 +469,7 @@ fn read_sample_identifier_block(
         records.push(sample_record(sample_id));
     }
 
-    if usize::try_from(body_reader.position())
-        .expect("sample block cursor position should fit usize")
-        != body.len()
-    {
+    if !body_reader.is_empty() {
         return Err(MetadataError::parse(
             path,
             "bgen sample identifiers block length does not match decoded sample identifiers",
@@ -682,7 +698,7 @@ struct Layout2ProbabilityHeader {
     max_ploidy: u8,
     sample_ploidies: Vec<u8>,
     non_missing_sample_count: u32,
-    phased: u8,
+    phase: BgenPhase,
     bit_depth: u8,
     byte_len: usize,
 }
@@ -757,13 +773,7 @@ impl Layout2ProbabilityHeader {
             sample_ploidies.push(ploidy_byte);
         }
 
-        let phased = read_u8(reader, path)?;
-        if phased != 0 {
-            return Err(MetadataError::parse(
-                path,
-                "unsupported bgen phased probability block; only unphased records are supported",
-            ));
-        }
+        let phase = BgenPhase::from_raw(path, read_u8(reader, path)?)?;
 
         let bit_depth = read_u8(reader, path)?;
         if !(1..=32).contains(&bit_depth) {
@@ -780,7 +790,7 @@ impl Layout2ProbabilityHeader {
             max_ploidy,
             sample_ploidies,
             non_missing_sample_count,
-            phased,
+            phase,
             bit_depth,
             byte_len: fixed_header_length,
         })
@@ -795,8 +805,16 @@ impl Layout2ProbabilityHeader {
     }
 
     fn required_packed_probability_bytes(&self, path: &Path) -> Result<usize> {
+        let stored_probability_count = match self.phase {
+            // For the supported biallelic diploid subset, unphased records
+            // store P(A0/A0) and P(A0/A1); P(A1/A1) is inferred.
+            BgenPhase::Unphased => 2,
+            // Phased records store one non-last allele probability per
+            // haplotype, so diploid biallelic records also store two values.
+            BgenPhase::Phased => 2,
+        };
         let bits = u64::from(self.non_missing_sample_count)
-            .checked_mul(2)
+            .checked_mul(stored_probability_count)
             .and_then(|value| value.checked_mul(u64::from(self.bit_depth)))
             .ok_or_else(|| {
                 MetadataError::parse(path, "bgen packed probability bit count is out of range")
@@ -856,7 +874,6 @@ impl<'a> DecodedDosageVariant<'a> {
         debug_assert_eq!(self.header.allele_count, 2);
         debug_assert_eq!(self.header.min_ploidy, 2);
         debug_assert_eq!(self.header.max_ploidy, 2);
-        debug_assert_eq!(self.header.phased, 0);
         debug_assert!((1..=32).contains(&self.header.bit_depth));
         debug_assert!(
             !self.packed_probabilities.is_empty() || self.header.non_missing_sample_count == 0
@@ -885,14 +902,17 @@ impl<'a> DecodedDosageVariant<'a> {
                 continue;
             }
 
-            let p_aa_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
-            let p_ab_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
-            values.push(decode_a1_dosage(
-                path,
-                self.header.bit_depth,
-                p_aa_raw,
-                p_ab_raw,
-            )?);
+            let first_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
+            let second_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
+            let value = match self.header.phase {
+                BgenPhase::Unphased => {
+                    decode_unphased_a1_dosage(path, self.header.bit_depth, first_raw, second_raw)?
+                }
+                BgenPhase::Phased => {
+                    decode_phased_a1_dosage(self.header.bit_depth, first_raw, second_raw)
+                }
+            };
+            values.push(value);
             missing.push(false);
         }
 
@@ -943,7 +963,12 @@ impl<'a> LittleEndianBitReader<'a> {
     }
 }
 
-fn decode_a1_dosage(path: &Path, bit_depth: u8, p_aa_raw: u32, p_ab_raw: u32) -> Result<f32> {
+fn decode_unphased_a1_dosage(
+    path: &Path,
+    bit_depth: u8,
+    p_aa_raw: u32,
+    p_ab_raw: u32,
+) -> Result<f32> {
     let denominator = probability_denominator(bit_depth);
     let p_aa = p_aa_raw as f32 / denominator;
     let p_ab = p_ab_raw as f32 / denominator;
@@ -958,6 +983,13 @@ fn decode_a1_dosage(path: &Path, bit_depth: u8, p_aa_raw: u32, p_ab_raw: u32) ->
     }
 
     Ok(dosage.clamp(0.0, 2.0))
+}
+
+fn decode_phased_a1_dosage(bit_depth: u8, p_hap0_a0_raw: u32, p_hap1_a0_raw: u32) -> f32 {
+    let denominator = probability_denominator(bit_depth);
+    let p_hap0_a0 = p_hap0_a0_raw as f32 / denominator;
+    let p_hap1_a0 = p_hap1_a0_raw as f32 / denominator;
+    (2.0 - p_hap0_a0 - p_hap1_a0).clamp(0.0, 2.0)
 }
 
 fn probability_denominator(bit_depth: u8) -> f32 {
@@ -1132,7 +1164,12 @@ fn read_u8(reader: &mut impl Read, path: &Path) -> Result<u8> {
 mod tests {
     use super::*;
 
-    fn layout2_payload(bit_depth: u8, ploidies: &[u8], calls: &[Option<(u32, u32)>]) -> Vec<u8> {
+    fn layout2_payload(
+        bit_depth: u8,
+        ploidies: &[u8],
+        calls: &[Option<(u32, u32)>],
+        phased: u8,
+    ) -> Vec<u8> {
         assert_eq!(ploidies.len(), calls.len());
         let mut payload = Vec::new();
         payload.extend_from_slice(
@@ -1144,7 +1181,7 @@ mod tests {
         payload.push(2);
         payload.push(2);
         payload.extend_from_slice(ploidies);
-        payload.push(0);
+        payload.push(phased);
         payload.push(bit_depth);
         append_packed_probabilities(&mut payload, bit_depth, calls);
         payload
@@ -1206,7 +1243,12 @@ mod tests {
 
     #[test]
     fn decoded_dosage_variant_unpacks_little_endian_probabilities() {
-        let payload = layout2_payload(3, &[2, 0b1000_0010, 2], &[Some((5, 2)), None, Some((1, 4))]);
+        let payload = layout2_payload(
+            3,
+            &[2, 0b1000_0010, 2],
+            &[Some((5, 2)), None, Some((1, 4))],
+            0,
+        );
         let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 3, 2)
             .expect("payload should decode");
 
@@ -1224,8 +1266,33 @@ mod tests {
     }
 
     #[test]
+    fn decoded_dosage_variant_collapses_phased_haplotype_probabilities() {
+        let payload = layout2_payload(
+            3,
+            &[2, 0b1000_0010, 2],
+            &[Some((7, 0)), None, Some((4, 2))],
+            1,
+        );
+        let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 3, 2)
+            .expect("payload should decode");
+
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        decoded
+            .decode_source_order(Path::new("test.bgen"), &mut values, &mut missing)
+            .expect("phased dosages should unpack");
+
+        let denominator = 7.0_f32;
+        let expected = [1.0, 0.0, 2.0 - 4.0 / denominator - 2.0 / denominator];
+        assert_eq!(missing, vec![false, true, false]);
+        for (observed, expected) in values.iter().zip(expected) {
+            assert!((observed - expected).abs() <= f32::EPSILON);
+        }
+    }
+
+    #[test]
     fn decoded_dosage_variant_rejects_impossible_probability_sum() {
-        let payload = layout2_payload(1, &[2], &[Some((1, 1))]);
+        let payload = layout2_payload(1, &[2], &[Some((1, 1))], 0);
         let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 1, 2)
             .expect("payload header should decode");
 
@@ -1240,7 +1307,7 @@ mod tests {
 
     #[test]
     fn decoded_dosage_variant_rejects_trailing_packed_probability_bytes() {
-        let mut payload = layout2_payload(8, &[2], &[Some((0, 0))]);
+        let mut payload = layout2_payload(8, &[2], &[Some((0, 0))], 0);
         payload.push(0);
 
         let error = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 1, 2)

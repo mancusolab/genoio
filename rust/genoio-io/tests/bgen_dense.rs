@@ -177,6 +177,23 @@ fn write_layout2_dosage_probability_block(
     bit_depth: u8,
     calls: &[Option<(u32, u32)>],
 ) -> io::Result<()> {
+    write_layout2_dosage_probability_block_with_phase(writer, bit_depth, calls, 0)
+}
+
+fn write_layout2_phased_dosage_probability_block(
+    writer: &mut impl Write,
+    bit_depth: u8,
+    calls: &[Option<(u32, u32)>],
+) -> io::Result<()> {
+    write_layout2_dosage_probability_block_with_phase(writer, bit_depth, calls, 1)
+}
+
+fn write_layout2_dosage_probability_block_with_phase(
+    writer: &mut impl Write,
+    bit_depth: u8,
+    calls: &[Option<(u32, u32)>],
+    phased: u8,
+) -> io::Result<()> {
     let sample_ploidies = calls
         .iter()
         .map(|call| if call.is_some() { 2 } else { 0b1000_0010 })
@@ -187,7 +204,7 @@ fn write_layout2_dosage_probability_block(
         min_ploidy: 2,
         max_ploidy: 2,
         sample_ploidies: &sample_ploidies,
-        phased: 0,
+        phased,
         bit_depth,
     });
     append_packed_probabilities(&mut block, bit_depth, calls);
@@ -460,6 +477,30 @@ fn write_three_sample_two_variant_dosage_bgen(
     fs::write(path, bgen).expect("bgen fixture should be written");
 }
 
+fn write_three_sample_two_variant_phased_dosage_bgen(
+    path: &Path,
+    bit_depth: u8,
+    variant_calls: &[[Option<(u32, u32)>; 3]; 2],
+) {
+    let mut bgen = Vec::new();
+    write_bgen_header(&mut bgen, 3, 2, FLAG_LAYOUT2, true).expect("header should write");
+    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2", "sample_3"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
+    bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+
+    write_layout2_variant_identifying_data(&mut bgen, "var1", "rs1", "1", 10, &["A", "G"])
+        .expect("first variant identifying data should write");
+    write_layout2_phased_dosage_probability_block(&mut bgen, bit_depth, &variant_calls[0])
+        .expect("first phased dosage probability block should write");
+    write_layout2_variant_identifying_data(&mut bgen, "var2", "rs2", "2", 20, &["C", "T"])
+        .expect("second variant identifying data should write");
+    write_layout2_phased_dosage_probability_block(&mut bgen, bit_depth, &variant_calls[1])
+        .expect("second phased dosage probability block should write");
+
+    fs::write(path, bgen).expect("bgen fixture should be written");
+}
+
 fn write_two_sample_three_variant_dosage_bgen(
     path: &Path,
     bit_depth: u8,
@@ -507,6 +548,11 @@ fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
     let p_aa = p_aa as f32 / denominator;
     let p_ab = p_ab as f32 / denominator;
     p_ab + 2.0 * (1.0 - p_aa - p_ab)
+}
+
+fn expected_phased_a1_dosage(bit_depth: u8, p_hap0_a0: u32, p_hap1_a0: u32) -> f32 {
+    let denominator = ((1_u64 << bit_depth) - 1) as f32;
+    2.0 - (p_hap0_a0 as f32 / denominator) - (p_hap1_a0 as f32 / denominator)
 }
 
 fn write_sample_file(path: &Path, rows: &[&str]) {
@@ -671,6 +717,38 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
         assert!((observed - expected).abs() <= 2.0 / 65_535.0);
     }
     assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_decodes_phased_as_collapsed_a1_dosage() {
+    let dir = unique_dir("bgen-phased-dosage");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), Some((128, 64)), Some((0, 0))],
+        [Some((0, 255)), None, Some((255, 255))],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 8, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
+        .expect("phased bgen dosage should decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 2);
+    let expected = vec![
+        expected_phased_a1_dosage(8, 255, 0),
+        expected_phased_a1_dosage(8, 0, 255),
+        expected_phased_a1_dosage(8, 128, 64),
+        0.0,
+        expected_phased_a1_dosage(8, 0, 0),
+        expected_phased_a1_dosage(8, 255, 255),
+    ];
+    for (observed, expected) in dense.values.iter().zip(expected) {
+        assert!((observed - expected).abs() <= 2.0 / 255.0);
+    }
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, true, false, false]
+    );
 }
 
 #[test]
@@ -875,6 +953,48 @@ fn bgen_dosage_dense_sample_filter_uses_source_order() {
             expected_dosage(8, 255, 0),
         ]
     );
+    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_phased_sample_filter_uses_source_order() {
+    let dir = unique_dir("bgen-phased-dosage-sample-filter");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), Some((128, 64)), Some((0, 0))],
+        [Some((0, 255)), None, Some((255, 255))],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 8, &calls);
+    let requested_samples = vec!["sample_3".to_string(), "sample_1".to_string()];
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        Some(&requested_samples),
+        None,
+        None,
+    )
+    .expect("phased bgen dosage sample filter should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample_1", "sample_3"]
+    );
+    let expected = vec![
+        expected_phased_a1_dosage(8, 255, 0),
+        expected_phased_a1_dosage(8, 0, 255),
+        expected_phased_a1_dosage(8, 0, 0),
+        expected_phased_a1_dosage(8, 255, 255),
+    ];
+    for (observed, expected) in dense.values.iter().zip(expected) {
+        assert!((observed - expected).abs() <= 2.0 / 255.0);
+    }
     assert_eq!(dense.missing_mask, vec![false, false, false, false]);
 }
 
@@ -1421,8 +1541,8 @@ fn bgen_metadata_rejects_multiallelic_variants() {
 }
 
 #[test]
-fn bgen_metadata_rejects_phased_layout2_probability_blocks() {
-    let dir = unique_dir("bgen-phased-probability-block");
+fn bgen_metadata_rejects_invalid_phase_value_probability_blocks() {
+    let dir = unique_dir("bgen-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
         write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
@@ -1435,16 +1555,17 @@ fn bgen_metadata_rejects_phased_layout2_probability_blocks() {
                 min_ploidy: 2,
                 max_ploidy: 2,
                 sample_ploidies: &[2, 2],
-                phased: 1,
+                phased: 2,
                 bit_depth: 8,
             },
         )
-        .expect("phased probability block should write");
+        .expect("invalid-phase probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("phased BGEN should fail");
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("invalid-phase BGEN should fail");
 
-    assert_metadata_error_contains(error, "phased");
+    assert_metadata_error_contains(error, "phased probability value");
 }
 
 #[test]
@@ -1649,8 +1770,8 @@ fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_phased_probability_blocks() {
-    let dir = unique_dir("bgen-zlib-phased-probability-block");
+fn bgen_metadata_rejects_zlib_compressed_invalid_phase_value_probability_blocks() {
+    let dir = unique_dir("bgen-zlib-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
         write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
@@ -1664,18 +1785,18 @@ fn bgen_metadata_rejects_zlib_compressed_phased_probability_blocks() {
                 min_ploidy: 2,
                 max_ploidy: 2,
                 sample_ploidies: &[2, 2],
-                phased: 1,
+                phased: 2,
                 bit_depth: 8,
             },
             &[],
         )
-        .expect("compressed phased probability block should write");
+        .expect("compressed invalid-phase probability block should write");
     });
 
     let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zlib-compressed phased BGEN should fail");
+        .expect_err("zlib-compressed invalid-phase BGEN should fail");
 
-    assert_metadata_error_contains(error, "phased");
+    assert_metadata_error_contains(error, "phased probability value");
 }
 
 #[test]
@@ -1739,8 +1860,8 @@ fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
 }
 
 #[test]
-fn bgen_metadata_rejects_zstd_compressed_phased_probability_blocks() {
-    let dir = unique_dir("bgen-zstd-phased-probability-block");
+fn bgen_metadata_rejects_zstd_compressed_invalid_phase_value_probability_blocks() {
+    let dir = unique_dir("bgen-zstd-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
         write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
@@ -1754,18 +1875,18 @@ fn bgen_metadata_rejects_zstd_compressed_phased_probability_blocks() {
                 min_ploidy: 2,
                 max_ploidy: 2,
                 sample_ploidies: &[2, 2],
-                phased: 1,
+                phased: 2,
                 bit_depth: 8,
             },
             &[],
         )
-        .expect("compressed phased probability block should write");
+        .expect("compressed invalid-phase probability block should write");
     });
 
     let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zstd-compressed phased BGEN should fail");
+        .expect_err("zstd-compressed invalid-phase BGEN should fail");
 
-    assert_metadata_error_contains(error, "phased");
+    assert_metadata_error_contains(error, "phased probability value");
 }
 
 #[test]

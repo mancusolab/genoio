@@ -48,11 +48,13 @@ n_samples, n_variants = X.shape
 
 By default, genotype matrices contain hardcall allele counts: `0`, `1`, or `2`
 copies of `a1`. Pass `dosage="hardcall"` explicitly when code should document
-that contract. For VCF sources with `FORMAT/DS` or PLINK2 sources with
-unphased biallelic dosage tracks, pass `dosage="dosage"` to read dense
-dosage-backed genotype values. No fallback to `GT` is attempted when VCF DS is
-missing. Genotype-stat filters use the selected value source; for dosage reads,
-`maf`, `mac`, and `missing_rate` are computed from expected allele dosages.
+that contract. For VCF sources with `FORMAT/DS`, PLINK2 sources with unphased
+biallelic dosage tracks, or BGEN Layout 2 biallelic diploid dosage records,
+pass `dosage="dosage"` to read dense dosage-backed genotype values. Phased BGEN
+records are collapsed to expected diploid A1 dosage. No fallback to `GT` is
+attempted when VCF DS is missing. Genotype-stat filters use the selected value
+source; for dosage reads, `maf`, `mac`, and `missing_rate` are computed from
+expected allele dosages.
 
 Ask for metadata when you need to preserve row and column labels:
 
@@ -78,6 +80,7 @@ Use the constructor that matches the source format:
 vcf_ds = genoio.vcf("data/chr22_hg38.vcf.gz")
 bfile_ds = genoio.bfile("data/chr22_hg38")
 pfile_ds = genoio.pfile("data/chr22_hg38.pgen")
+bgen_ds = genoio.bgen("data/chr22_hg38.bgen")
 
 samples = pfile_ds.samples()
 variants = pfile_ds.variants()
@@ -88,6 +91,14 @@ PLINK sources can be passed as a shared prefix or as one member file. For
 example, `data/chr22_hg38`, `data/chr22_hg38.pgen`, and
 `data/chr22_hg38.psam` all resolve to the same PLINK2 dataset when passed to
 `pfile(...)` and the companion files are present.
+
+BGEN sources can be passed as a `.bgen` member or shared prefix. When a
+same-prefix `.sample` file is present, `genoio` uses it for real sample IDs.
+Read BGEN matrices with `dosage="dosage"`:
+
+```python
+X = bgen_ds.read(dosage="dosage")
+```
 
 ---
 

@@ -112,9 +112,10 @@ class Dataset:
           `"dosage"` reads dosage-backed genotype values when the source
           supports them. This release supports dense VCF `FORMAT/DS` and
           PLINK2 unphased biallelic dosage reads, and dense BGEN Layout 2
-          biallelic unphased diploid dosage reads. BGEN sample IDs must be
-          embedded in the `.bgen` file or supplied by a companion `.sample`
-          file. Haplotype and sparse reads only support `"hardcall"`.
+          biallelic diploid dosage reads. Phased BGEN records are collapsed to
+          expected diploid A1 dosage. BGEN sample IDs must be embedded in the
+          `.bgen` file or supplied by a companion `.sample` file. Haplotype and
+          sparse reads only support `"hardcall"`.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant

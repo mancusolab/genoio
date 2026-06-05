@@ -17,9 +17,10 @@ By default, `kind="geno"` returns diploid hardcall allele counts: `0`, `1`, or
 policy. The `dosage` option controls this genotype value source:
 `dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
 dosage-backed values. This release supports dense VCF `FORMAT/DS`, PLINK2
-unphased biallelic dosage reads, and BGEN Layout 2 biallelic unphased diploid
-dosage reads. BGEN dosage values are expected copies of `a1`. Sparse dosage,
-haplotype dosage, and PLINK1 dosage are not implemented yet and raise
+unphased biallelic dosage reads, and BGEN Layout 2 biallelic diploid dosage
+reads. Phased BGEN records are collapsed to expected diploid A1 dosage. BGEN
+dosage values are expected copies of `a1`. Sparse dosage, haplotype dosage, and
+PLINK1 dosage are not implemented yet and raise
 `genoio.UnsupportedRepresentation`.
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele

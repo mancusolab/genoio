@@ -1,7 +1,7 @@
 # genoio
 
 `genoio` is a genotype matrix IO layer for statistical genetics software. It
-provides one Python API for VCF/BCF, PLINK1, and PLINK2 inputs, with Rust
+provides one Python API for VCF/BCF, BGEN, PLINK1, and PLINK2 inputs, with Rust
 readers for parsing, filtering, and matrix construction.
 
 `genoio` is designed for tool developers and researchers who need stable
@@ -77,6 +77,15 @@ Open supported genotype sources with the matching constructor:
 vcf_ds = genoio.vcf("cohort.vcf.gz")
 bed_ds = genoio.bfile("cohort")       # .bed/.bim/.fam
 pgen_ds = genoio.pfile("cohort.pgen") # .pgen/.pvar[.zst]/.psam
+bgen_ds = genoio.bgen("cohort.bgen")  # .bgen plus optional .sample
+```
+
+Use `dosage="dosage"` for stored dosage values. BGEN Layout 2 biallelic diploid
+dosage records, including phased records, are returned as expected A1 allele
+counts:
+
+```python
+X = bgen_ds.read(dosage="dosage")
 ```
 
 Use serializable filters when reading whole matrices or blocks:

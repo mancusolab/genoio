@@ -86,6 +86,7 @@ def write_bgen_dosage(
     tmp_path: Path,
     *,
     missing: bool = False,
+    phased: bool = False,
     sample_ids: list[str] | None = None,
     variant_calls: list[list[tuple[int, int] | None]] | None = None,
     variants: list[tuple[str, str, str, int, list[str]]] | None = None,
@@ -122,7 +123,7 @@ def write_bgen_dosage(
 
     for variant, calls in zip(variants, variant_calls, strict=True):
         contents.extend(_bgen_variant_identifying_data(*variant))
-        contents.extend(_bgen_dosage_probability_block(8, calls))
+        contents.extend(_bgen_dosage_probability_block(8, calls, phased=phased))
 
     path.write_bytes(contents)
     return path
@@ -188,14 +189,19 @@ def _bgen_variant_identifying_data(
     return bytes(contents)
 
 
-def _bgen_dosage_probability_block(bit_depth: int, calls: list[tuple[int, int] | None]) -> bytes:
+def _bgen_dosage_probability_block(
+    bit_depth: int,
+    calls: list[tuple[int, int] | None],
+    *,
+    phased: bool = False,
+) -> bytes:
     payload = bytearray()
     payload.extend(len(calls).to_bytes(4, "little"))
     payload.extend((2).to_bytes(2, "little"))
     payload.extend((2).to_bytes(1, "little"))
     payload.extend((2).to_bytes(1, "little"))
     payload.extend((2 if call is not None else 0b1000_0010) for call in calls)
-    payload.extend((0).to_bytes(1, "little"))
+    payload.extend((1 if phased else 0).to_bytes(1, "little"))
     payload.extend(bit_depth.to_bytes(1, "little"))
     _append_bgen_packed_probabilities(payload, bit_depth, calls)
 
@@ -389,6 +395,37 @@ def test_dense_bgen_dosage_read_returns_sample_by_variant_matrix(tmp_path):
             [
                 [0.29803923, 1.0],
                 [1.0980392, 0.8],
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=2.0 / 255.0,
+    )
+
+
+def test_dense_bgen_phased_dosage_read_returns_collapsed_expected_a1_count(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(
+        write_bgen_dosage(
+            tmp_path,
+            phased=True,
+            variant_calls=[
+                [(255, 0), (128, 64)],
+                [(0, 255), None],
+            ],
+        )
+    )
+
+    G = dataset.read(dosage="dosage")
+
+    assert G.shape == (2, 2)
+    np.testing.assert_allclose(
+        G,
+        np.array(
+            [
+                [1.0, 1.0],
+                [1.2470589, np.nan],
             ],
             dtype=np.float32,
         ),

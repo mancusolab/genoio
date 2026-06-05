@@ -32,8 +32,8 @@ def placeholder_bgen_dataset(tmp_path: Path):
     return genoio.bgen(path)
 
 
-def write_phased_probability_bgen(tmp_path: Path) -> Path:
-    path = tmp_path / "phased.bgen"
+def write_invalid_phase_probability_bgen(tmp_path: Path) -> Path:
+    path = tmp_path / "invalid_phase.bgen"
     contents = bytearray()
     flags = (2 << 2) | (1 << 31)
     contents.extend((20).to_bytes(4, "little"))
@@ -52,7 +52,7 @@ def write_phased_probability_bgen(tmp_path: Path) -> Path:
     probability_payload.extend((2).to_bytes(1, "little"))
     probability_payload.extend((2).to_bytes(1, "little"))
     probability_payload.extend([2, 2])
-    probability_payload.extend((1).to_bytes(1, "little"))
+    probability_payload.extend((2).to_bytes(1, "little"))
     probability_payload.extend((8).to_bytes(1, "little"))
     contents.extend(len(probability_payload).to_bytes(4, "little"))
     contents.extend(probability_payload)
@@ -255,18 +255,18 @@ def test_bgen_dataset_read_dosage_rejects_invalid_placeholder_source(tmp_path):
 def test_bgen_dataset_read_dosage_maps_unsupported_probability_representation(tmp_path):
     import genoio
 
-    dataset = genoio.bgen(write_phased_probability_bgen(tmp_path))
+    dataset = genoio.bgen(write_invalid_phase_probability_bgen(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="phased"):
+    with pytest.raises(genoio.UnsupportedRepresentation, match="phased probability value"):
         dataset.read(dosage="dosage")
 
 
 def test_bgen_dataset_metadata_maps_unsupported_probability_representation(tmp_path):
     import genoio
 
-    dataset = genoio.bgen(write_phased_probability_bgen(tmp_path))
+    dataset = genoio.bgen(write_invalid_phase_probability_bgen(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="phased"):
+    with pytest.raises(genoio.UnsupportedRepresentation, match="phased probability value"):
         dataset.variants()
 
 

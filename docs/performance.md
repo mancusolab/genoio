@@ -50,6 +50,30 @@ The genotype-filtered scenario returned shape `(3202, 1000)`, genotype sum
 variants, but bounded block reads stop once the requested number of retained
 variants has been returned.
 
+The local BGEN fixture stores phased Layout 2 biallelic diploid dosage records.
+`genoio` collapses those haplotype probabilities to expected diploid A1 dosage.
+On the same machine and release build, BGEN scenario medians were:
+
+| Scenario | What it measures | Median |
+|---|---|---:|
+| matrix-only | Read only the dosage matrix. | 0.1160 s |
+| with variants | Return the matrix plus variant metadata. | 0.1217 s |
+| sample-filtered | Read half the samples, preserving source sample order. | 0.1150 s |
+| genotype-filtered | Apply genotype-stat filters before returning retained variants. | 0.7854 s |
+
+At 10,000 variants, BGEN matrix-only median time was 1.1968 s.
+
+For a direct BGEN matrix-only comparison, `scripts/benchmark_bgen.py` can also
+compute expected dosages through `bgen_reader`/`cbgen`. The high-level
+`bgen_reader.read(slice(...))` path is not used for this mixed-width local
+fixture because it raises worker-thread broadcast errors; the benchmark instead
+uses `open_bgen` metadata with `cbgen.read_probability()` per variant.
+
+| Variants | genoio median | bgen_reader/cbgen median | Value check |
+|---:|---:|---:|---|
+| 1,000 | 0.1175 s | 0.1603 s | exact `allclose`, max diff 0 |
+| 10,000 | 1.1968 s | 1.1133 s | exact `allclose`, max diff 0 |
+
 ---
 
 ## Run local benchmarks
@@ -69,11 +93,19 @@ python scripts/benchmark_plink2.py --scenario all --max-variants 1000 --repeats 
 python scripts/benchmark_plink2.py --scenario matrix-only --max-variants 10000 --repeats 5 --no-compare
 ```
 
+For BGEN, use a Layout 2 biallelic diploid dosage fixture:
+
+```bash
+python scripts/benchmark_bgen.py --scenario all --max-variants 1000 --repeats 5
+python scripts/benchmark_bgen.py --scenario matrix-only --backend both --max-variants 1000 --repeats 5
+```
+
 Optional comparison packages are used when installed:
 
 - `cyvcf2` for VCF
 - `pandas_plink` for PLINK1
 - `pgenlib` for PLINK2
+- `bgen_reader` for BGEN
 
 ---
 
