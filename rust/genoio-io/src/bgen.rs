@@ -123,7 +123,7 @@ pub fn read_bgen_dosage_dense_windowed(
         let mut payload = None;
         match partial_decision {
             PartialFilterDecision::Reject => {
-                read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
+                skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
                 diagnostics.dropped_metadata_variants += 1;
                 continue;
             }
@@ -135,7 +135,7 @@ pub fn read_bgen_dosage_dense_windowed(
                     if variant_window.is_some_and(|window| window.is_past(retained_index)) {
                         break;
                     }
-                    read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
+                    skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
                     continue;
                 }
                 payload = Some(read_layout2_probability_payload(
@@ -634,6 +634,23 @@ fn read_layout2_probability_payload(
                 &compressed_payload,
                 decompressed_block_length,
             )
+        }
+        BgenCompression::Reserved => Err(MetadataError::parse(
+            path,
+            "bgen compression value is reserved",
+        )),
+    }
+}
+
+fn skip_layout2_probability_payload(
+    reader: &mut impl Read,
+    path: &Path,
+    compression: BgenCompression,
+) -> Result<()> {
+    let block_length = read_u32_le(reader, path)?;
+    match compression {
+        BgenCompression::None | BgenCompression::Zlib | BgenCompression::Zstd => {
+            skip_exact(reader, path, u64::from(block_length))
         }
         BgenCompression::Reserved => Err(MetadataError::parse(
             path,

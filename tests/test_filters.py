@@ -326,6 +326,62 @@ def test_bgen_dosage_genotype_filters_match_dosage_reference_results(
     np.testing.assert_array_equal(G, np.array(expected_matrix, dtype=np.float32))
 
 
+@pytest.mark.parametrize(
+    ("expr_factory", "expected_ids", "expected_matrix"),
+    [
+        (
+            lambda genoio: genoio.id_in(["rs2", "indel1"]),
+            ["rs2", "indel1"],
+            [[1.0, 0.74509805], [np.nan, 1.2470589]],
+        ),
+        (
+            lambda genoio: genoio.chrom("1"),
+            ["rs1", "indel1"],
+            [[0.0, 0.74509805], [0.0, 1.2470589]],
+        ),
+        (
+            lambda genoio: genoio.snp(),
+            ["rs1", "rs2"],
+            [[0.0, 1.0], [0.0, np.nan]],
+        ),
+    ],
+)
+def test_bgen_dosage_metadata_filters_match_fixture_reference_results(
+    tmp_path, expr_factory, expected_ids, expected_matrix
+):
+    import genoio
+
+    path = write_bgen_dosage(
+        tmp_path,
+        variants=[
+            ("var1", "rs1", "1", 10, ["A", "G"]),
+            ("var2", "rs2", "2", 20, ["C", "T"]),
+            ("var3", "indel1", "1", 30, ["AT", "A"]),
+        ],
+        variant_calls=[
+            [(255, 0), (255, 0)],
+            [(0, 255), None],
+            [(128, 64), (64, 64)],
+        ],
+    )
+    dataset = genoio.bgen(path)
+
+    G, variants = dataset.read(
+        dosage="dosage",
+        variants=expr_factory(genoio),
+        return_variants=True,
+    )
+
+    assert variants["id"].to_list() == expected_ids
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
+    np.testing.assert_allclose(
+        G,
+        np.array(expected_matrix, dtype=np.float32),
+        rtol=0,
+        atol=1e-6,
+    )
+
+
 def test_bgen_dosage_empty_variant_filter_returns_empty_matrix_and_variant_schema(tmp_path):
     import genoio
 

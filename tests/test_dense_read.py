@@ -88,20 +88,31 @@ def write_bgen_dosage(
     missing: bool = False,
     sample_ids: list[str] | None = None,
     variant_calls: list[list[tuple[int, int] | None]] | None = None,
+    variants: list[tuple[str, str, str, int, list[str]]] | None = None,
 ) -> Path:
     path = tmp_path / "dosage.bgen"
     contents = bytearray()
     flags = (2 << 2) | (1 << 31)
     sample_ids = ["sample_1", "sample_2"] if sample_ids is None else sample_ids
+    variants = (
+        [
+            ("var1", "rs1", "1", 10, ["A", "G"]),
+            ("var2", "rs2", "2", 20, ["C", "T"]),
+        ]
+        if variants is None
+        else variants
+    )
     if variant_calls is None:
         variant_calls = [
             [(204, 26), None if missing else (51, 128)],
             [(0, 255), (102, 102)],
         ]
+    if len(variant_calls) != len(variants):
+        raise ValueError("variant_calls and variants must have matching lengths")
 
     contents.extend((20).to_bytes(4, "little"))
     contents.extend((20).to_bytes(4, "little"))
-    contents.extend((2).to_bytes(4, "little"))
+    contents.extend(len(variants).to_bytes(4, "little"))
     contents.extend(len(sample_ids).to_bytes(4, "little"))
     contents.extend(b"bgen")
     contents.extend(flags.to_bytes(4, "little"))
@@ -109,10 +120,9 @@ def write_bgen_dosage(
     variant_offset = len(contents) - 4
     contents[0:4] = variant_offset.to_bytes(4, "little")
 
-    contents.extend(_bgen_variant_identifying_data("var1", "rs1", "1", 10, ["A", "G"]))
-    contents.extend(_bgen_dosage_probability_block(8, variant_calls[0]))
-    contents.extend(_bgen_variant_identifying_data("var2", "rs2", "2", 20, ["C", "T"]))
-    contents.extend(_bgen_dosage_probability_block(8, variant_calls[1]))
+    for variant, calls in zip(variants, variant_calls, strict=True):
+        contents.extend(_bgen_variant_identifying_data(*variant))
+        contents.extend(_bgen_dosage_probability_block(8, calls))
 
     path.write_bytes(contents)
     return path

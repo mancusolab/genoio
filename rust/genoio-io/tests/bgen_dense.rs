@@ -339,6 +339,34 @@ fn write_valid_compressed_probability_block(
     )
 }
 
+fn write_zlib_probability_block_with_invalid_decompressed_len(
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut decompressed_payload = layout2_probability_block_header_bytes(ProbabilityBlockHeader {
+        n_samples: 2,
+        allele_count: 2,
+        min_ploidy: 2,
+        max_ploidy: 2,
+        sample_ploidies: &[2, 2],
+        phased: 0,
+        bit_depth: 8,
+    });
+    decompressed_payload.extend_from_slice(&[0, 0, 0, 0]);
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&decompressed_payload)?;
+    let compressed_payload = encoder.finish()?;
+    let c = 4_u32
+        .checked_add(
+            u32::try_from(compressed_payload.len())
+                .expect("compressed payload length should fit u32"),
+        )
+        .expect("compressed block length should fit u32");
+    writer.write_all(&c.to_le_bytes())?;
+    writer.write_all(&(u32::MAX).to_le_bytes())?;
+    writer.write_all(&compressed_payload)?;
+    Ok(())
+}
+
 fn write_bgen_fixture(
     path: &Path,
     flags: u32,
@@ -447,6 +475,27 @@ fn write_two_sample_three_variant_dosage_bgen(
     });
 }
 
+fn write_two_sample_three_variant_mixed_allele_dosage_bgen(
+    path: &Path,
+    bit_depth: u8,
+    variant_calls: &[[Option<(u32, u32)>; 2]; 3],
+) {
+    write_bgen_fixture(path, FLAG_LAYOUT2, 3, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[0])
+            .expect("first dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[1])
+            .expect("second dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var3", "indel1", "1", 30, &["AT", "A"])
+            .expect("third variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, bit_depth, &variant_calls[2])
+            .expect("third dosage probability block should write");
+    });
+}
+
 fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
     let denominator = ((1_u64 << bit_depth) - 1) as f32;
     let p_aa = p_aa as f32 / denominator;
@@ -480,6 +529,24 @@ fn chrom_filter(chrom: &str) -> VariantFilter {
     .expect("chrom filter should parse")
 }
 
+fn id_in_filter(ids: &[&str]) -> VariantFilter {
+    VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "id_in",
+        "params": {"values": ids},
+    }))
+    .expect("id_in filter should parse")
+}
+
+fn snp_filter() -> VariantFilter {
+    VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "snp",
+        "params": {},
+    }))
+    .expect("snp filter should parse")
+}
+
 fn genotype_stat_filter(name: &str, params: serde_json::Value) -> VariantFilter {
     VariantFilter::from_json_value(json!({
         "op": "predicate",
@@ -504,6 +571,45 @@ fn contradictory_chrom_filter() -> VariantFilter {
         },
     }))
     .expect("contradictory chrom filter should parse")
+}
+
+#[test]
+fn bgen_dosage_dense_metadata_filters_match_variant_metadata() {
+    let dir = unique_dir("bgen-dosage-metadata-filters");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), Some((255, 0))],
+        [Some((0, 255)), None],
+        [Some((128, 64)), Some((64, 64))],
+    ];
+    write_two_sample_three_variant_mixed_allele_dosage_bgen(&bgen, 8, &calls);
+
+    let cases = [
+        (id_in_filter(&["rs2", "indel1"]), vec!["rs2", "indel1"]),
+        (chrom_filter("1"), vec!["rs1", "indel1"]),
+        (snp_filter(), vec!["rs1", "rs2"]),
+    ];
+
+    for (filter, expected_ids) in cases {
+        let dense =
+            genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+                .expect("bgen dosage metadata filter should decode");
+
+        assert_eq!(dense.n_variants, expected_ids.len());
+        assert_eq!(
+            dense
+                .variants
+                .iter()
+                .map(|variant| variant.id.as_str())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert_eq!(dense.diagnostics.candidate_variants, 3);
+        assert_eq!(
+            dense.diagnostics.dropped_metadata_variants,
+            3 - expected_ids.len()
+        );
+    }
 }
 
 #[test]
@@ -889,6 +995,30 @@ fn bgen_dosage_dense_skips_metadata_rejected_unsupported_probability_block() {
 }
 
 #[test]
+fn bgen_dosage_dense_skips_metadata_rejected_compressed_probability_block_without_decompression() {
+    let dir = unique_dir("bgen-dosage-skip-compressed-metadata-reject");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_zlib_probability_block_with_invalid_decompressed_len(writer)
+            .expect("first compressed probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_valid_compressed_probability_block(writer, TestCompression::Zlib)
+            .expect("second compressed probability block should write");
+    });
+    let filter = chrom_filter("2");
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+        .expect("metadata-rejected compressed probabilities should be skipped raw");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.values.len(), 2);
+}
+
+#[test]
 fn bgen_dosage_dense_skips_out_of_window_unsupported_probability_block() {
     let dir = unique_dir("bgen-dosage-skip-window");
     let bgen = dir.join("tiny.bgen");
@@ -923,6 +1053,34 @@ fn bgen_dosage_dense_skips_out_of_window_unsupported_probability_block() {
         Some(VariantWindow { start: 1, len: 1 }),
     )
     .expect("out-of-window unsupported probabilities should be skipped");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+}
+
+#[test]
+fn bgen_dosage_dense_skips_out_of_window_compressed_probability_block_without_decompression() {
+    let dir = unique_dir("bgen-dosage-skip-compressed-window");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_zlib_probability_block_with_invalid_decompressed_len(writer)
+            .expect("first compressed probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_valid_compressed_probability_block(writer, TestCompression::Zlib)
+            .expect("second compressed probability block should write");
+    });
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 1 }),
+    )
+    .expect("out-of-window compressed probabilities should be skipped raw");
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs2");
