@@ -81,6 +81,18 @@ pub fn read_bgen_dosage_dense_windowed(
     let all_samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
     let mut diagnostics = selection.diagnostics;
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        diagnostics.retained_variants = 0;
+        return DenseGenotypeMatrix::new(
+            selection.samples.len(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            selection.samples,
+            Vec::new(),
+            diagnostics,
+        );
+    }
 
     reader
         .seek(SeekFrom::Start(u64::from(header.offset) + 4))

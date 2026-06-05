@@ -326,6 +326,30 @@ def test_bgen_dosage_genotype_filters_match_dosage_reference_results(
     np.testing.assert_array_equal(G, np.array(expected_matrix, dtype=np.float32))
 
 
+def test_bgen_dosage_empty_variant_filter_returns_empty_matrix_and_variant_schema(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    G, variants = dataset.read(dosage="dosage", variants=[], return_variants=True)
+
+    assert G.shape == (2, 0)
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
+    assert variants.height == 0
+
+
+def test_bgen_dosage_nonmatching_metadata_filter_returns_empty_matrix_and_variant_schema(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    G, variants = dataset.read(dosage="dosage", variants=genoio.chrom("9"), return_variants=True)
+
+    assert G.shape == (2, 0)
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
+    assert variants.height == 0
+
+
 @pytest.mark.skipif(
     shutil.which("bgzip") is None or shutil.which("tabix") is None,
     reason="indexed VCF public API test requires bgzip and tabix",

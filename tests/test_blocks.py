@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy import sparse as scipy_sparse
-from test_dense_read import write_fixed_width_plink2
+from test_dense_read import write_bgen_dosage, write_fixed_width_plink2
 
 
 def write_bad_variable_width_block_offset_plink2(tmp_path: Path) -> Path:
@@ -147,6 +147,26 @@ def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs5"]]
     np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
     assert full_variants["id"].to_list() == ["rs1", "rs2", "rs5"]
+
+
+def test_bgen_dosage_blocks_yield_no_blocks_for_empty_variant_filter(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    blocks = list(dataset.blocks(size=1, dosage="dosage", variants=[], return_variants=True))
+
+    assert blocks == []
+
+
+def test_bgen_dosage_blocks_yield_no_blocks_for_nonmatching_metadata_filter(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    blocks = list(dataset.blocks(size=1, dosage="dosage", variants=genoio.chrom("9")))
+
+    assert blocks == []
 
 
 def test_plink2_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):

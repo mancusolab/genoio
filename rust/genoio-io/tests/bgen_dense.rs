@@ -468,6 +468,23 @@ fn genotype_stat_filter(name: &str, params: serde_json::Value) -> VariantFilter 
     .expect("genotype-stat filter should parse")
 }
 
+fn contradictory_chrom_filter() -> VariantFilter {
+    VariantFilter::from_json_value(json!({
+        "op": "and",
+        "left": {
+            "op": "predicate",
+            "name": "chrom",
+            "params": {"value": "1"},
+        },
+        "right": {
+            "op": "predicate",
+            "name": "chrom",
+            "params": {"value": "2"},
+        },
+    }))
+    .expect("contradictory chrom filter should parse")
+}
+
 #[test]
 fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
     let dir = unique_dir("bgen-dosage-bit-depth-8");
@@ -521,6 +538,65 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
         assert!((observed - expected).abs() <= 2.0 / 65_535.0);
     }
     assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_empty_for_always_false_filter() {
+    let dir = unique_dir("bgen-dosage-always-false");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+    let filter = contradictory_chrom_filter();
+
+    assert!(filter.is_always_false());
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+        .expect("always-false bgen dosage filter should return empty dense matrix");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 0);
+    assert!(dense.values.is_empty());
+    assert!(dense.missing_mask.is_empty());
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample_1", "sample_2"]
+    );
+    assert!(dense.variants.is_empty());
+    assert_eq!(dense.diagnostics.candidate_variants, 0);
+    assert_eq!(dense.diagnostics.retained_variants, 0);
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 0);
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 0);
+}
+
+#[test]
+fn bgen_dosage_dense_empty_for_metadata_filter_with_no_matches() {
+    let dir = unique_dir("bgen-dosage-empty-metadata-filter");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+    let filter = chrom_filter("9");
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+        .expect("nonmatching metadata bgen dosage filter should return empty dense matrix");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 0);
+    assert!(dense.values.is_empty());
+    assert!(dense.missing_mask.is_empty());
+    assert!(dense.variants.is_empty());
+    assert_eq!(dense.diagnostics.candidate_variants, 2);
+    assert_eq!(dense.diagnostics.retained_variants, 0);
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 2);
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 0);
 }
 
 #[test]
