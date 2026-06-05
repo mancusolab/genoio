@@ -191,15 +191,26 @@ def read_result_tuple(
 
 
 def _impute_missing_by_variant(array: NDArray[Any], mask: NDArray[np.bool_]) -> NDArray[Any]:
+    if not mask.any():
+        return array
+
+    called_mask = ~mask
+    called_counts = called_mask.sum(axis=0)
+    all_missing_columns = np.flatnonzero(mask.any(axis=0) & (called_counts == 0))
+    if all_missing_columns.size:
+        raise MissingDataError(f"cannot impute all-missing variant at column {int(all_missing_columns[0])}")
+
+    called_sums = np.where(mask, 0, array).sum(axis=0)
+    means = np.divide(
+        called_sums,
+        called_counts,
+        out=np.zeros_like(called_sums),
+        where=called_counts != 0,
+    )
+
+    # Each missing entry receives the mean of its own variant column. The
+    # indexed assignment avoids per-variant Python loops on large matrices.
+    missing_rows, missing_columns = np.nonzero(mask)
     imputed = array.copy()
-    for variant_index in range(imputed.shape[1]):
-        missing_rows = mask[:, variant_index]
-        if not missing_rows.any():
-            continue
-        called_rows = ~missing_rows
-        if not called_rows.any():
-            raise MissingDataError(f"cannot impute all-missing variant at column {variant_index}")
-        # Imputation is deliberately column-local: each variant is filled with
-        # its own mean over called samples, preserving sample count and shape.
-        imputed[missing_rows, variant_index] = imputed[called_rows, variant_index].mean()
+    imputed[missing_rows, missing_columns] = means[missing_columns]
     return imputed
