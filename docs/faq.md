@@ -90,3 +90,7 @@ phenotype and covariate tables before a scan.
 
 No. Variants are returned in source order after filtering. For region iteration,
 each result contains the variants retained inside that region.
+
+## Universal Standard
+
+[Is this a new universal standard](https://xkcd.com/927/)? No. Shh.
