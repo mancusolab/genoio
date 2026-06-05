@@ -60,6 +60,23 @@ def write_phased_probability_bgen(tmp_path: Path) -> Path:
     return path
 
 
+def write_layout1_bgen(tmp_path: Path) -> Path:
+    path = tmp_path / "layout1.bgen"
+    contents = bytearray()
+    flags = (1 << 2) | (1 << 31)
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((0).to_bytes(4, "little"))
+    contents.extend((1).to_bytes(4, "little"))
+    contents.extend(b"bgen")
+    contents.extend(flags.to_bytes(4, "little"))
+    contents.extend(_bgen_sample_identifier_block(["sample_1"]))
+    variant_offset = len(contents) - 4
+    contents[0:4] = variant_offset.to_bytes(4, "little")
+    path.write_bytes(contents)
+    return path
+
+
 def _bgen_sample_identifier_block(sample_ids: list[str]) -> bytes:
     contents = bytearray()
     block_len = 8 + sum(2 + len(sample_id.encode()) for sample_id in sample_ids)
@@ -250,6 +267,15 @@ def test_bgen_dataset_metadata_maps_unsupported_probability_representation(tmp_p
     dataset = genoio.bgen(write_phased_probability_bgen(tmp_path))
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="phased"):
+        dataset.variants()
+
+
+def test_bgen_dataset_metadata_maps_unsupported_layout(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_layout1_bgen(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="layout"):
         dataset.variants()
 
 

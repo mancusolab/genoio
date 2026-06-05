@@ -636,6 +636,7 @@ def _is_unsupported_bgen_representation_error(message: str) -> bool:
     unsupported_markers = (
         "unsupported bgen",
         "bgen layout",
+        "bgen metadata parsing requires layout",
         "bgen compression value is reserved",
     )
     representation_markers = (
