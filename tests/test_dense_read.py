@@ -82,27 +82,37 @@ def write_ds_vcf(tmp_path: Path) -> Path:
     return path
 
 
-def write_bgen_dosage(tmp_path: Path, *, missing: bool = False) -> Path:
+def write_bgen_dosage(
+    tmp_path: Path,
+    *,
+    missing: bool = False,
+    sample_ids: list[str] | None = None,
+    variant_calls: list[list[tuple[int, int] | None]] | None = None,
+) -> Path:
     path = tmp_path / "dosage.bgen"
     contents = bytearray()
     flags = (2 << 2) | (1 << 31)
+    sample_ids = ["sample_1", "sample_2"] if sample_ids is None else sample_ids
+    if variant_calls is None:
+        variant_calls = [
+            [(204, 26), None if missing else (51, 128)],
+            [(0, 255), (102, 102)],
+        ]
 
     contents.extend((20).to_bytes(4, "little"))
     contents.extend((20).to_bytes(4, "little"))
     contents.extend((2).to_bytes(4, "little"))
-    contents.extend((2).to_bytes(4, "little"))
+    contents.extend(len(sample_ids).to_bytes(4, "little"))
     contents.extend(b"bgen")
     contents.extend(flags.to_bytes(4, "little"))
-    contents.extend(_bgen_sample_identifier_block(["sample_1", "sample_2"]))
+    contents.extend(_bgen_sample_identifier_block(sample_ids))
     variant_offset = len(contents) - 4
     contents[0:4] = variant_offset.to_bytes(4, "little")
 
-    variant_1_calls: list[tuple[int, int] | None] = [(204, 26), None if missing else (51, 128)]
-    variant_2_calls: list[tuple[int, int] | None] = [(0, 255), (102, 102)]
     contents.extend(_bgen_variant_identifying_data("var1", "rs1", "1", 10, ["A", "G"]))
-    contents.extend(_bgen_dosage_probability_block(8, variant_1_calls))
+    contents.extend(_bgen_dosage_probability_block(8, variant_calls[0]))
     contents.extend(_bgen_variant_identifying_data("var2", "rs2", "2", 20, ["C", "T"]))
-    contents.extend(_bgen_dosage_probability_block(8, variant_2_calls))
+    contents.extend(_bgen_dosage_probability_block(8, variant_calls[1]))
 
     path.write_bytes(contents)
     return path
@@ -370,6 +380,37 @@ def test_dense_bgen_dosage_missing_raise_rejects_missing_calls(tmp_path):
 
     with pytest.raises(genoio.MissingDataError, match="missing genotype"):
         dataset.read(dosage="dosage", missing="raise")
+
+
+def test_dense_bgen_dosage_sample_filter_uses_source_order(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(
+        write_bgen_dosage(
+            tmp_path,
+            sample_ids=["sample_1", "sample_2", "sample_3"],
+            variant_calls=[
+                [(204, 26), (51, 128), (0, 0)],
+                [(0, 255), (102, 102), (255, 0)],
+            ],
+        )
+    )
+
+    G, samples = dataset.read(dosage="dosage", samples=["sample_3", "sample_1"], return_samples=True)
+
+    np.testing.assert_allclose(
+        G,
+        np.array(
+            [
+                [0.29803923, 1.0],
+                [2.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=2.0 / 255.0,
+    )
+    assert samples["iid"].to_list() == ["sample_1", "sample_3"]
 
 
 def test_dense_vcf_dosage_sample_filter_uses_selected_samples(tmp_path):
