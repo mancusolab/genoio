@@ -72,6 +72,21 @@ requested region.
 For BGEN dosage reads, concrete region filters use a same-path bgenix SQLite
 index when present. For `cohort.bgen`, `genoio` looks for `cohort.bgen.bgi`.
 When that index is absent, BGEN reads fall back to the normal sequential scan.
+The index narrows the candidate BGEN records for the region; any additional
+metadata or genotype predicates are still evaluated by the normal filter logic.
+
+```python
+bgen_ds = genoio.bgen("cohort.bgen")
+region = genoio.region("22:20000000-21000000")
+
+for X, variants in bgen_ds.blocks(
+    1_000,
+    dosage="dosage",
+    variants=region,
+    return_variants=True,
+):
+    analyze_region(X, variants)
+```
 
 ---
 

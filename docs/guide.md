@@ -94,10 +94,25 @@ example, `data/chr22_hg38`, `data/chr22_hg38.pgen`, and
 
 BGEN sources can be passed as a `.bgen` member or shared prefix. When a
 same-prefix `.sample` file is present, `genoio` uses it for real sample IDs.
-Read BGEN matrices with `dosage="dosage"`:
+Read BGEN matrices with `dosage="dosage"`. If you only need the matrix, leave
+`return_samples` and `return_variants` at their defaults so the reader can
+avoid assembling metadata frames:
 
 ```python
 X = bgen_ds.read(dosage="dosage")
+```
+
+Concrete BGEN region filters use a same-path bgenix SQLite index when one is
+available. For `data/chr22_hg38.bgen`, the expected index path is
+`data/chr22_hg38.bgen.bgi`:
+
+```python
+region = genoio.region("22:20000000-21000000")
+X, variants = bgen_ds.read(
+    dosage="dosage",
+    variants=region,
+    return_variants=True,
+)
 ```
 
 ---
@@ -118,6 +133,20 @@ y = load_phenotype_vector(samples["iid"])
 for X, variants in ds.blocks(
     5_000,
     variants=rare,
+    return_variants=True,
+):
+    run_association_scan(X, y, samples=samples, variants=variants)
+```
+
+BGEN blocks support the same filter contract. A concrete region filter uses the
+same `.bgen.bgi` pushdown as whole reads, then yields retained variants in BGEN
+source order:
+
+```python
+for X, variants in bgen_ds.blocks(
+    1_000,
+    dosage="dosage",
+    variants=genoio.region("22:20000000-21000000"),
     return_variants=True,
 ):
     run_association_scan(X, y, samples=samples, variants=variants)

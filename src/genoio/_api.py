@@ -114,8 +114,9 @@ class Dataset:
           PLINK2 unphased biallelic dosage reads, and dense BGEN Layout 2
           biallelic diploid dosage reads. Phased BGEN records are collapsed to
           expected diploid A1 dosage. BGEN sample IDs must be embedded in the
-          `.bgen` file or supplied by a companion `.sample` file. Haplotype and
-          sparse reads only support `"hardcall"`.
+          `.bgen` file or supplied by a companion `.sample` file. Concrete
+          BGEN region filters use a same-path `.bgen.bgi` index when present.
+          Haplotype and sparse reads only support `"hardcall"`.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant
@@ -213,7 +214,9 @@ class Dataset:
 
         Each yielded block has at most `size` variants and follows the same
         return contract as [`genoio.Dataset.read`][]. Blocks are ordered by
-        source variant order after any retained-variant filtering.
+        source variant order after any retained-variant filtering. BGEN dosage
+        blocks with a concrete region filter use a same-path `.bgen.bgi` index
+        when present.
 
         **Arguments:**
 
@@ -442,7 +445,9 @@ def bgen(path: str | Path) -> Dataset:
     r"""Resolve a BGEN source and return a reusable dataset.
 
     `path` may be the shared prefix or the `.bgen` member. If a same-prefix
-    `.sample` file exists, it is recorded as an optional companion.
+    `.sample` file exists, it is recorded as an optional companion. Concrete
+    region filters look for a same-path bgenix SQLite index beside the BGEN
+    member, for example `cohort.bgen.bgi`.
 
     **Arguments:**
 

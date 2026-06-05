@@ -88,6 +88,18 @@ counts:
 X = bgen_ds.read(dosage="dosage")
 ```
 
+For BGEN region reads, place a bgenix SQLite index beside the source as
+`cohort.bgen.bgi`. Concrete region filters use that index when present and
+fall back to a sequential BGEN scan when it is absent:
+
+```python
+X, variants = bgen_ds.read(
+    dosage="dosage",
+    variants=genoio.region("22:20000000-21000000"),
+    return_variants=True,
+)
+```
+
 Use serializable filters when reading whole matrices or blocks:
 
 ```python
