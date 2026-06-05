@@ -778,7 +778,7 @@ def test_dense_plink2_metadata_required_paths_reject_malformed_companion_files(
     dataset = genoio.pfile(prefix)
 
     with pytest.raises(genoio.InvalidSourceError, match=match):
-        dataset.read(**read_options)
+        dataset.read(**read_options)  # ty: ignore[invalid-argument-type]
 
 
 def test_missing_policies_nan_raise_and_impute(tmp_path):

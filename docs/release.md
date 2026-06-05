@@ -13,7 +13,7 @@ make verify
 ```
 
 This syncs the locked Python environment, builds the Rust extension, checks Rust
-formatting and lints, runs Rust and Python tests, runs Pyright, builds the
+formatting and lints, runs Rust and Python tests, runs Ty, builds the
 Zensical site with strict checks, and builds Rust docs with warnings treated as
 errors.
 

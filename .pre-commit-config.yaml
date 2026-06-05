@@ -15,9 +15,9 @@ repos:
         pass_filenames: false
         types_or: [python, pyi]
 
-      - id: pyright
-        name: pyright
-        entry: pyright src tests scripts
+      - id: ty
+        name: ty
+        entry: ty check src tests scripts
         language: system
         pass_filenames: false
         types_or: [python, pyi]

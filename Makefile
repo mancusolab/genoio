@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock pyright requirements rust-check rust-doc rust-fmt rust-test test venv verify
+.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock requirements rust-check rust-doc rust-fmt rust-test test ty venv verify
 
 VENV ?= .venv
 SYSTEM_PYTHON ?= python3
@@ -16,7 +16,7 @@ endif
 PYTHON ?= $(VENV_BIN)/python
 CARGO ?= cargo
 ZENSICAL ?= $(VENV_BIN)/zensical
-PYRIGHT ?= $(VENV_BIN)/pyright
+TY ?= $(VENV_BIN)/ty
 PYTEST ?= $(VENV_BIN)/pytest
 MATURIN ?= env -u CONDA_PREFIX VIRTUAL_ENV=$(abspath $(VENV)) $(PYTHON) -m maturin
 DIST_DIR ?= dist
@@ -49,8 +49,8 @@ build-wheel: requirements  ## Build a repaired redistributable wheel
 test: build-dev  ## Run Python tests
 	$(PYTEST) -q
 
-pyright: build-dev  ## Run Python type checks
-	$(PYRIGHT) src tests scripts
+ty: build-dev  ## Run Python type checks
+	$(TY) check src tests scripts
 
 docs: build-dev  ## Build documentation with strict checks
 	$(ZENSICAL) build --strict
@@ -68,7 +68,7 @@ rust-test:  ## Run Rust tests
 rust-doc:  ## Build Rust docs with warnings as errors
 	$(RUST_ENV) RUSTDOCFLAGS=-Dwarnings $(CARGO) doc --manifest-path rust/Cargo.toml --workspace --no-deps
 
-check: rust-fmt rust-check rust-test pyright test docs  ## Run the standard validation suite
+check: rust-fmt rust-check rust-test ty test docs  ## Run the standard validation suite
 
 verify: build-dev check rust-doc  ## Build the extension and run all validation checks
 

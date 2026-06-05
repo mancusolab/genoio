@@ -40,9 +40,9 @@ Issues = "https://github.com/mancusolab/genoio/issues"
 dev = [
     "maturin>=1.10,<2",
     "pre-commit>=3",
-    "pyright>=1.1",
     "pytest>=8",
     "ruff>=0.5",
+    "ty>=0.0.44",
 ]
 docs = [
     "mkdocstrings-python>=1.12",
@@ -72,10 +72,18 @@ addopts = [
     "--strict-markers",
 ]
 
-[tool.pyright]
+[tool.ty.environment]
+extra-paths = ["scripts"]
+python-version = "3.10"
+
+[tool.ty.analysis]
+allowed-unresolved-imports = [
+    "bgen_reader",
+    "cbgen",
+    "cyvcf2",
+    "pandas_plink",
+    "pgenlib",
+]
+
+[tool.ty.src]
 include = ["src", "tests", "scripts"]
-extraPaths = ["scripts"]
-pythonVersion = "3.10"
-typeCheckingMode = "basic"
-venvPath = "."
-venv = ".venv"

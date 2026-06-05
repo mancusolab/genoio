@@ -557,12 +557,12 @@ def _variant_filter_ir(variants: Any) -> dict[str, Any] | None:
         raise InvalidOptionError("variants must be a serializable filter expression or variant ID iterable")
     if isinstance(variants, str) or not isinstance(variants, Iterable):
         raise InvalidOptionError("variants must be a serializable filter expression or variant ID iterable")
-    try:
-        return id_in(list(variants)).to_ir()
-    except InvalidOptionError:
-        raise
-    except TypeError as error:
-        raise InvalidOptionError("variants must be a serializable filter expression or variant ID iterable") from error
+    variant_ids: list[str] = []
+    for variant_id in variants:
+        if not isinstance(variant_id, str):
+            raise InvalidOptionError("variant ID filters must contain only strings")
+        variant_ids.append(variant_id)
+    return id_in(variant_ids).to_ir()
 
 
 def _validate_sample_filter(samples: list[str] | tuple[str, ...] | set[str] | None) -> None:
@@ -684,4 +684,15 @@ def _read_options_with_defaults(read_options: dict[str, Any]) -> _ReadOptions:
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
-    return _ReadOptions(**(defaults | read_options))
+    merged: dict[str, Any] = defaults | read_options
+    return _ReadOptions(
+        kind=merged["kind"],
+        dosage=merged["dosage"],
+        sparse=merged["sparse"],
+        variants=merged["variants"],
+        samples=merged["samples"],
+        missing=merged["missing"],
+        dtype=merged["dtype"],
+        return_samples=merged["return_samples"],
+        return_variants=merged["return_variants"],
+    )

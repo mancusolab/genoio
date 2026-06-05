@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import polars as pl
@@ -99,7 +100,7 @@ def test_filter_expressions_are_frozen_composable_and_json_serializable():
     json.dumps(expr.to_ir())
 
     with pytest.raises(AttributeError):
-        expr.left = genoio.chrom("2")  # pyright: ignore[reportAttributeAccessIssue]
+        expr.left = genoio.chrom("2")  # ty: ignore[unresolved-attribute]
 
 
 @pytest.mark.parametrize(
@@ -149,7 +150,8 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
             "missing_rate": [0.0, 1.0 / 3.0, 0.0, 1.0],
         }
     )
-    expected_ids = (
+    expected_frame = cast(
+        pl.DataFrame,
         source.lazy()
         .filter(
             (pl.col("ref").str.len_chars() == 1)
@@ -158,10 +160,9 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
             & (pl.col("missing_rate") <= 0.5)
         )
         .select("id")
-        .collect()
-        .get_column("id")
-        .to_list()
+        .collect(),
     )
+    expected_ids = expected_frame.get_column("id").to_list()
 
     assert variants["id"].to_list() == expected_ids == ["rs1"]
     assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]

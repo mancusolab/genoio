@@ -141,7 +141,7 @@ def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
     read_options = {"variants": genoio.chrom("1"), "samples": ["S3", "S1"]}
 
-    full, full_variants = dataset.read(**read_options, return_variants=True)
+    full, full_variants = dataset.read(**read_options, return_variants=True)  # ty: ignore[invalid-argument-type]
     blocks = list(dataset.blocks(size=2, **read_options, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs5"]]
@@ -189,7 +189,7 @@ def test_bgen_dosage_filtered_blocks_match_filtered_full_read(tmp_path):
     dataset = genoio.bgen(write_bgen_dosage(tmp_path))
     read_options = {"dosage": "dosage", "variants": genoio.chrom("2")}
 
-    full, full_variants = dataset.read(**read_options, return_variants=True)
+    full, full_variants = dataset.read(**read_options, return_variants=True)  # ty: ignore[invalid-argument-type]
     blocks = list(dataset.blocks(1, **read_options, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs2"]]
