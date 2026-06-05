@@ -53,7 +53,14 @@ def _write_layout2_variant(
         encoded = allele.encode()
         buffer.extend(struct.pack("<I", len(encoded)))
         buffer.extend(encoded)
-    buffer.extend(struct.pack("<IIHBBBB", 10, n_samples, len(alleles), 2, 2, 0, 0))
+    sample_ploidies = bytes([2] * n_samples)
+    packed_probabilities = bytes([0] * (2 * n_samples))
+    probability_payload = struct.pack("<IHBB", n_samples, len(alleles), 2, 2)
+    probability_payload += sample_ploidies
+    probability_payload += struct.pack("<BB", 0, 8)
+    probability_payload += packed_probabilities
+    buffer.extend(struct.pack("<I", len(probability_payload)))
+    buffer.extend(probability_payload)
 
 
 def _write_tiny_bgen(path: Path, *, sample_ids: list[str] | None) -> None:
