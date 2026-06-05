@@ -1502,7 +1502,7 @@ fn skip_exact(reader: &mut impl Read, path: &Path, mut len: u64) -> Result<()> {
                 path: path.to_path_buf(),
                 source,
             })?;
-        len -= u64::try_from(chunk_len).expect("skip chunk length should fit u64");
+        len -= chunk_len as u64;
     }
     Ok(())
 }

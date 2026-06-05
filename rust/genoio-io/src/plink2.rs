@@ -841,18 +841,19 @@ fn read_plink2_dense_source_window(
                     .peek()
                     .is_some_and(|(source_index, _)| *source_index == variant_index)
                 {
-                    let (_, variant) = window_iter.next().expect("peeked variant should exist");
-                    variants.push(variant);
-                    packed_batch.push(&decoder_state.packed);
-                    if packed_batch.is_full() {
-                        flush_packed_variant_batch(
-                            &mut packed_batch,
-                            &selection.source_indices,
-                            &mut batch_start,
-                            n_variants,
-                            &mut values,
-                            &mut missing_mask,
-                        );
+                    if let Some((_, variant)) = window_iter.next() {
+                        variants.push(variant);
+                        packed_batch.push(&decoder_state.packed);
+                        if packed_batch.is_full() {
+                            flush_packed_variant_batch(
+                                &mut packed_batch,
+                                &selection.source_indices,
+                                &mut batch_start,
+                                n_variants,
+                                &mut values,
+                                &mut missing_mask,
+                            );
+                        }
                     }
                 }
             }
@@ -941,16 +942,17 @@ fn read_plink2_sparse_source_window(
                     .peek()
                     .is_some_and(|(source_index, _)| *source_index == variant_index)
                 {
-                    let (_, mut variant) = window_iter.next().expect("peeked variant should exist");
-                    reject_sparse_missing_values(&decoder_state.missing)?;
-                    flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
-                    append_sparse_column(
-                        &mut indptr,
-                        &mut indices,
-                        &mut data,
-                        &decoder_state.values,
-                    );
-                    variants.push(variant);
+                    if let Some((_, mut variant)) = window_iter.next() {
+                        reject_sparse_missing_values(&decoder_state.missing)?;
+                        flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
+                        append_sparse_column(
+                            &mut indptr,
+                            &mut indices,
+                            &mut data,
+                            &decoder_state.values,
+                        );
+                        variants.push(variant);
+                    }
                 }
             }
         }
@@ -985,10 +987,7 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
     if header[0..2] != PGEN_MAGIC {
         return Err(MetadataError::parse(path, "invalid pgen magic bytes"));
     }
-    let variant_ct = usize::try_from(u32::from_le_bytes(header[3..7].try_into().unwrap()))
-        .map_err(|_| MetadataError::parse(path, "pgen variant count is out of range"))?;
-    let sample_ct = usize::try_from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
-        .map_err(|_| MetadataError::parse(path, "pgen sample count is out of range"))?;
+    let (variant_ct, sample_ct) = parse_pgen_header_counts(path, &header)?;
     let bytes_per_variant = sample_ct.div_ceil(4);
     match header[2] {
         PGEN_MODE_FIXED_WIDTH_HARDCALLS => {
@@ -1068,10 +1067,7 @@ fn read_supported_pgen_header_prefix(
     if header[0..2] != PGEN_MAGIC {
         return Err(MetadataError::parse(path, "invalid pgen magic bytes"));
     }
-    let variant_ct = usize::try_from(u32::from_le_bytes(header[3..7].try_into().unwrap()))
-        .map_err(|_| MetadataError::parse(path, "pgen variant count is out of range"))?;
-    let sample_ct = usize::try_from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
-        .map_err(|_| MetadataError::parse(path, "pgen sample count is out of range"))?;
+    let (variant_ct, sample_ct) = parse_pgen_header_counts(path, &header)?;
     let bytes_per_variant = sample_ct.div_ceil(4);
     let prefix_variant_ct = requested_variant_ct.min(variant_ct);
     match header[2] {
@@ -1138,6 +1134,21 @@ fn read_supported_pgen_header_prefix(
             ),
         )),
     }
+}
+
+fn parse_pgen_header_counts(
+    path: &Path,
+    header: &[u8; PGEN_HEADER_LEN as usize],
+) -> Result<(usize, usize)> {
+    let variant_ct = usize::try_from(u32::from_le_bytes([
+        header[3], header[4], header[5], header[6],
+    ]))
+    .map_err(|_| MetadataError::parse(path, "pgen variant count is out of range"))?;
+    let sample_ct = usize::try_from(u32::from_le_bytes([
+        header[7], header[8], header[9], header[10],
+    ]))
+    .map_err(|_| MetadataError::parse(path, "pgen sample count is out of range"))?;
+    Ok((variant_ct, sample_ct))
 }
 
 fn read_variable_width_header_body(
@@ -2928,9 +2939,12 @@ fn parse_pvar_source_window(
             body_started = true;
         }
 
-        let columns = columns
-            .as_ref()
-            .expect("pvar columns should be initialized before parsing body rows");
+        let Some(columns) = columns.as_ref() else {
+            return Err(MetadataError::parse(
+                path,
+                "pvar columns were not initialized before parsing body rows",
+            ));
+        };
         let variant = parse_pvar_line(path, line_index + 1, columns, trimmed)?;
         if source_index >= window.start && source_index < window_end {
             records.push((source_index, variant));
@@ -2990,10 +3004,12 @@ impl PvarRecordReader {
                 self.body_started = true;
             }
 
-            let columns = self
-                .columns
-                .as_ref()
-                .expect("pvar columns should be initialized before parsing body rows");
+            let Some(columns) = self.columns.as_ref() else {
+                return Err(MetadataError::parse(
+                    &self.path,
+                    "pvar columns were not initialized before parsing body rows",
+                ));
+            };
             let variant = parse_pvar_line(&self.path, line_index + 1, columns, trimmed)?;
             let source_index = self.source_index;
             self.source_index += 1;

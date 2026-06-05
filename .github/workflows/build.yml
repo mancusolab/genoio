@@ -12,8 +12,15 @@ permissions:
 
 jobs:
   linux-wheel:
-    name: Wheel (Linux)
+    name: Wheel (Linux, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -21,7 +28,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
@@ -32,12 +39,19 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-linux
+          name: wheel-linux-py${{ matrix.python-version }}
           path: dist/*
 
   macos-wheel:
-    name: Wheel (macOS)
+    name: Wheel (macOS, Python ${{ matrix.python-version }})
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -45,7 +59,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
@@ -56,7 +70,7 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-macos
+          name: wheel-macos-py${{ matrix.python-version }}
           path: dist/*
 
   sdist:

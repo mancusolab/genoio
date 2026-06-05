@@ -144,7 +144,7 @@ fn validate_csc_contract(
             ));
         }
     }
-    let terminal_pointer = *indptr.last().expect("indptr is nonempty");
+    let terminal_pointer = indptr[indptr.len() - 1];
     if terminal_pointer != indices.len() || terminal_pointer != data.len() {
         return Err(MetadataError::parse(
             "<sparse>",
