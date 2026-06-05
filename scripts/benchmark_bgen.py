@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from bench_common import benchmark, compare_summaries, positive_int
 
-SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered")
+SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered", "indexed-region")
 _last_variant_metadata_length: int | None = None
 
 
@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=positive_int, default=3)
     parser.add_argument("--backend", choices=["both", "genoio", "bgen_reader"], default="both")
     parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="matrix-only")
+    parser.add_argument("--region", default="22:20000000-21000000")
     parser.add_argument("--no-compare", action="store_true")
     return parser.parse_args()
 
@@ -86,6 +87,29 @@ def read_genoio_genotype_filtered(prefix: Path, max_variants: int) -> np.ndarray
     )
 
 
+def read_genoio_indexed_region(prefix: Path, max_variants: int, region: str) -> np.ndarray:
+    import genoio
+
+    matrix, variants = next(
+        genoio.bgen(prefix).blocks(
+            max_variants,
+            dosage="dosage",
+            missing="nan",
+            dtype=np.float32,
+            variants=genoio.region(region),
+            return_variants=True,
+        )
+    )
+    if variants.height:
+        chrom, coords = region.split(":", 1)
+        start, end = (int(value) for value in coords.split("-", 1))
+        observed_min = int(variants["pos"].min())
+        observed_max = int(variants["pos"].max())
+        if variants["chrom"].unique().to_list() != [chrom] or observed_min < start or observed_max > end:
+            raise RuntimeError(f"indexed region result escaped requested region: {region}")
+    return matrix
+
+
 def read_bgen_reader_expected_dosage(prefix: Path, max_variants: int) -> np.ndarray:
     _configure_bgen_reader_cache()
     from bgen_reader import open_bgen  # type: ignore[import-not-found]
@@ -139,7 +163,13 @@ def selected_scenarios(scenario: str) -> tuple[str, ...]:
     return (scenario,)
 
 
-def benchmark_genoio_scenario(scenario: str, prefix: Path, max_variants: int, repeats: int) -> np.ndarray:
+def benchmark_genoio_scenario(
+    scenario: str,
+    prefix: Path,
+    max_variants: int,
+    repeats: int,
+    region: str,
+) -> np.ndarray:
     if scenario == "matrix-only":
         return benchmark(
             "genoio_bgen_matrix_only",
@@ -172,6 +202,12 @@ def benchmark_genoio_scenario(scenario: str, prefix: Path, max_variants: int, re
             lambda: read_genoio_genotype_filtered(prefix, max_variants),
             repeats,
         )
+    if scenario == "indexed-region":
+        return benchmark(
+            "genoio_bgen_indexed_region",
+            lambda: read_genoio_indexed_region(prefix, max_variants, region),
+            repeats,
+        )
     raise ValueError(f"unknown scenario: {scenario}")
 
 
@@ -192,7 +228,9 @@ def main() -> None:
         genoio_matrix = None
         bgen_reader_matrix = None
         if args.backend in {"both", "genoio"}:
-            genoio_matrix = benchmark_genoio_scenario(scenario, args.prefix, args.max_variants, args.repeats)
+            genoio_matrix = benchmark_genoio_scenario(
+                scenario, args.prefix, args.max_variants, args.repeats, args.region
+            )
         if args.backend in {"both", "bgen_reader"}:
             bgen_reader_matrix = benchmark_bgen_reader_scenario(
                 scenario,

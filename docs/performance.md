@@ -56,18 +56,21 @@ On the same machine and release build, BGEN scenario medians were:
 
 | Scenario | What it measures | Median |
 |---|---|---:|
-| matrix-only | Read only the dosage matrix. | 0.1160 s |
-| with variants | Return the matrix plus variant metadata. | 0.1217 s |
-| sample-filtered | Read half the samples, preserving source sample order. | 0.1150 s |
-| genotype-filtered | Apply genotype-stat filters before returning retained variants. | 0.7854 s |
+| matrix-only | Read only the dosage matrix. | 0.0532 s |
+| with variants | Return the matrix plus variant metadata. | 0.0699 s |
+| sample-filtered | Read half the samples, preserving source sample order. | 0.0471 s |
+| genotype-filtered | Apply genotype-stat filters before returning retained variants. | 0.3102 s |
+| indexed-region | Read a bounded region through a same-path `.bgen.bgi` index. | 0.0627 s |
 
-At 10,000 variants, BGEN matrix-only median time was 1.1968 s.
+At 10,000 variants, BGEN matrix-only median time was 0.6285 s.
 
 For a direct BGEN matrix-only comparison, `scripts/benchmark_bgen.py` can also
 compute expected dosages through `bgen_reader`/`cbgen`. The high-level
 `bgen_reader.read(slice(...))` path is not used for this mixed-width local
 fixture because it raises worker-thread broadcast errors; the benchmark instead
-uses `open_bgen` metadata with `cbgen.read_probability()` per variant.
+uses `open_bgen` metadata with `cbgen.read_probability()` per variant. The
+comparison package was unavailable during the latest run, so the table below
+records the previous direct comparison.
 
 | Variants | genoio median | bgen_reader/cbgen median | Value check |
 |---:|---:|---:|---|
@@ -98,6 +101,7 @@ For BGEN, use a Layout 2 biallelic diploid dosage fixture:
 ```bash
 python scripts/benchmark_bgen.py --scenario all --max-variants 1000 --repeats 5
 python scripts/benchmark_bgen.py --scenario matrix-only --backend both --max-variants 1000 --repeats 5
+python scripts/benchmark_bgen.py --scenario indexed-region --region 22:20000000-21000000 --max-variants 1000 --repeats 5
 ```
 
 Optional comparison packages are used when installed:

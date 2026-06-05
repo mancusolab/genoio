@@ -36,11 +36,13 @@ PVAR metadata is decompressed by the Rust reader.
 The BGEN benchmark reads dosage values from `<prefix>.bgen` and uses
 `<prefix>.sample` for the sample-filtered scenario when the BGEN file does not
 embed sample identifiers. Phased BGEN records are collapsed to expected diploid
-A1 dosage.
+A1 dosage. The `indexed-region` scenario uses `--region` and a same-path
+`<prefix>.bgen.bgi` index when present.
 
 ```bash
 python scripts/benchmark_bgen.py --scenario all --max-variants 1000 --repeats 5
 python scripts/benchmark_bgen.py --scenario matrix-only --backend both --max-variants 1000 --repeats 5
+python scripts/benchmark_bgen.py --scenario indexed-region --region 22:20000000-21000000 --max-variants 1000 --repeats 5
 ```
 
 The BGEN `--backend both` comparison computes expected dosage through

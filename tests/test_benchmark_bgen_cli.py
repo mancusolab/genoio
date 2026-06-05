@@ -31,6 +31,8 @@ def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch)
             "7",
             "--repeats",
             "2",
+            "--region",
+            "22:1-100",
             "--no-compare",
         ],
     )
@@ -41,6 +43,7 @@ def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch)
     assert args.backend == "bgen_reader"
     assert args.max_variants == 7
     assert args.repeats == 2
+    assert args.region == "22:1-100"
     assert args.no_compare is True
 
 
@@ -82,6 +85,7 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
     monkeypatch.setattr(benchmark_bgen, "read_genoio_with_variants", read_with_variants)
     monkeypatch.setattr(benchmark_bgen, "read_genoio_sample_filtered", lambda prefix, max_variants: _matrix(3.0))
     monkeypatch.setattr(benchmark_bgen, "read_genoio_genotype_filtered", lambda prefix, max_variants: _matrix(4.0))
+    monkeypatch.setattr(benchmark_bgen, "read_genoio_indexed_region", lambda prefix, max_variants, region: _matrix(5.0))
 
     benchmark_bgen.main()
 
@@ -91,6 +95,7 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
     assert "variant_metadata length=3" in output
     assert "genoio_bgen_sample_filtered" in output
     assert "genoio_bgen_genotype_filtered" in output
+    assert "genoio_bgen_indexed_region" in output
 
 
 def test_matrix_only_scenario_compares_bgen_reader(monkeypatch, capsys) -> None:

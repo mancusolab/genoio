@@ -140,6 +140,7 @@ fn read_dense(
                     read_options.requested_samples.as_deref(),
                     read_options.variant_filter.as_ref(),
                     read_options.variant_window,
+                    read_options.matrix_only,
                 ),
             }
         }

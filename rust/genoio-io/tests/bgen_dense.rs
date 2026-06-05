@@ -784,9 +784,15 @@ fn bgen_dosage_dense_metadata_filters_match_variant_metadata() {
     ];
 
     for (filter, expected_ids) in cases {
-        let dense =
-            genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-                .expect("bgen dosage metadata filter should decode");
+        let dense = genoio_io::read_bgen_dosage_dense_windowed(
+            &bgen,
+            None,
+            None,
+            Some(&filter),
+            None,
+            false,
+        )
+        .expect("bgen dosage metadata filter should decode");
 
         assert_eq!(dense.n_variants, expected_ids.len());
         assert_eq!(
@@ -815,7 +821,7 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
     ];
     write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
         .expect("bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 2);
@@ -843,7 +849,7 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
     ];
     write_two_sample_two_variant_dosage_bgen(&bgen, 16, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
         .expect("bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 2);
@@ -870,7 +876,7 @@ fn bgen_dosage_dense_decodes_phased_as_collapsed_a1_dosage() {
     ];
     write_three_sample_two_variant_phased_dosage_bgen(&bgen, 8, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
         .expect("phased bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 3);
@@ -904,8 +910,9 @@ fn bgen_dosage_dense_empty_for_always_false_filter() {
     let filter = contradictory_chrom_filter();
 
     assert!(filter.is_always_false());
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-        .expect("always-false bgen dosage filter should return empty dense matrix");
+    let dense =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("always-false bgen dosage filter should return empty dense matrix");
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 0);
@@ -937,8 +944,9 @@ fn bgen_dosage_dense_empty_for_metadata_filter_with_no_matches() {
     write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
     let filter = chrom_filter("9");
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-        .expect("nonmatching metadata bgen dosage filter should return empty dense matrix");
+    let dense =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("nonmatching metadata bgen dosage filter should return empty dense matrix");
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 0);
@@ -1012,9 +1020,15 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
         expected_n_called,
     ) in cases
     {
-        let dense =
-            genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-                .expect("bgen dosage genotype-stat filter should decode");
+        let dense = genoio_io::read_bgen_dosage_dense_windowed(
+            &bgen,
+            None,
+            None,
+            Some(&filter),
+            None,
+            false,
+        )
+        .expect("bgen dosage genotype-stat filter should decode");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
@@ -1038,7 +1052,7 @@ fn bgen_dosage_dense_preserves_missing_sample_calls() {
     let calls = [[Some((204, 26)), None], [Some((0, 255)), Some((102, 102))]];
     write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None)
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
         .expect("bgen dosage should decode");
 
     assert_eq!(dense.n_samples, 2);
@@ -1053,6 +1067,64 @@ fn bgen_dosage_dense_preserves_missing_sample_calls() {
         ]
     );
     assert_eq!(dense.missing_mask, vec![false, false, true, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_matrix_only_omits_metadata() {
+    let dir = unique_dir("bgen-dosage-matrix-only");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, true)
+        .expect("matrix-only bgen dosage should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert!(dense.samples.is_empty());
+    assert!(dense.variants.is_empty());
+    assert_eq!(
+        dense.values,
+        vec![
+            expected_dosage(8, 204, 26),
+            expected_dosage(8, 0, 255),
+            expected_dosage(8, 51, 128),
+            expected_dosage(8, 102, 102),
+        ]
+    );
+    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_matrix_only_preserves_variant_count_with_no_selected_samples() {
+    let dir = unique_dir("bgen-dosage-matrix-only-empty-samples");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+    ];
+    write_two_sample_two_variant_dosage_bgen(&bgen, 8, &calls);
+    let requested_samples: Vec<String> = Vec::new();
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        Some(&requested_samples),
+        None,
+        None,
+        true,
+    )
+    .expect("matrix-only bgen dosage with no selected samples should decode");
+
+    assert_eq!(dense.n_samples, 0);
+    assert_eq!(dense.n_variants, 2);
+    assert!(dense.samples.is_empty());
+    assert!(dense.variants.is_empty());
+    assert!(dense.values.is_empty());
+    assert!(dense.missing_mask.is_empty());
 }
 
 #[test]
@@ -1072,6 +1144,7 @@ fn bgen_dosage_dense_sample_filter_uses_source_order() {
         Some(&requested_samples),
         None,
         None,
+        false,
     )
     .expect("bgen dosage sample filter should decode");
 
@@ -1114,6 +1187,7 @@ fn bgen_dosage_dense_phased_sample_filter_uses_source_order() {
         Some(&requested_samples),
         None,
         None,
+        false,
     )
     .expect("phased bgen dosage sample filter should decode");
 
@@ -1155,6 +1229,7 @@ fn bgen_dosage_dense_window_reads_unfiltered_retained_variants() {
         None,
         None,
         Some(VariantWindow { start: 1, len: 1 }),
+        false,
     )
     .expect("bgen dosage retained window should decode");
 
@@ -1186,6 +1261,7 @@ fn bgen_dosage_dense_window_is_over_filtered_retained_variants() {
         None,
         Some(&filter),
         Some(VariantWindow { start: 1, len: 1 }),
+        false,
     )
     .expect("filtered bgen dosage retained window should decode");
 
@@ -1212,8 +1288,9 @@ fn bgen_dosage_dense_region_filter_uses_bgi_index_to_skip_out_of_region_payloads
     }))
     .expect("region filter should parse");
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-        .expect("indexed bgen region filter should not decode out-of-region payloads");
+    let dense =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("indexed bgen region filter should not decode out-of-region payloads");
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 1);
@@ -1238,8 +1315,9 @@ fn bgen_dosage_dense_indexed_region_preserves_source_variant_order() {
     }))
     .expect("region filter should parse");
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-        .expect("indexed bgen region filter should decode");
+    let dense =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("indexed bgen region filter should decode");
 
     assert_eq!(
         dense
@@ -1277,6 +1355,7 @@ fn bgen_dosage_dense_stops_after_satisfied_metadata_window() {
         None,
         None,
         Some(VariantWindow { start: 0, len: 1 }),
+        false,
     )
     .expect("bgen dosage reader should stop after a satisfied retained window");
 
@@ -1313,8 +1392,9 @@ fn bgen_dosage_dense_skips_metadata_rejected_unsupported_probability_block() {
     });
     let filter = chrom_filter("2");
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-        .expect("metadata-rejected unsupported probabilities should be skipped");
+    let dense =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("metadata-rejected unsupported probabilities should be skipped");
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs2");
@@ -1337,8 +1417,9 @@ fn bgen_dosage_dense_skips_metadata_rejected_compressed_probability_block_withou
     });
     let filter = chrom_filter("2");
 
-    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
-        .expect("metadata-rejected compressed probabilities should be skipped raw");
+    let dense =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("metadata-rejected compressed probabilities should be skipped raw");
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs2");
@@ -1378,6 +1459,7 @@ fn bgen_dosage_dense_skips_out_of_window_unsupported_probability_block() {
         None,
         None,
         Some(VariantWindow { start: 1, len: 1 }),
+        false,
     )
     .expect("out-of-window unsupported probabilities should be skipped");
 
@@ -1406,6 +1488,7 @@ fn bgen_dosage_dense_skips_out_of_window_compressed_probability_block_without_de
         None,
         None,
         Some(VariantWindow { start: 1, len: 1 }),
+        false,
     )
     .expect("out-of-window compressed probabilities should be skipped raw");
 
