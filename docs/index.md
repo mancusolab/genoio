@@ -1,8 +1,8 @@
 # genoio
 
-`genoio` reads VCF, PLINK1, and PLINK2 genotype files into Python matrices.
-The Python API resolves sources and assembles results. Rust readers parse
-records, apply filters, and build matrices.
+`genoio` reads VCF, PLINK1, PLINK2, and BGEN genotype files into Python
+matrices. The Python API resolves sources and assembles results. Rust readers
+parse records, apply filters, and build matrices.
 
 ```python
 import genoio
@@ -17,11 +17,12 @@ for X, variants in ds.blocks(10_000, return_variants=True):
     run_association_scan(X, y, samples=samples, variants=variants)
 ```
 
-Three constructors resolve supported sources:
+Four constructors resolve supported sources:
 
 - [`vcf`](api/reading.md#genoio.vcf) for VCF/BCF files.
 - [`bfile`](api/reading.md#genoio.bfile) for PLINK1 `.bed/.bim/.fam` file sets.
 - [`pfile`](api/reading.md#genoio.pfile) for PLINK2 `.pgen/.pvar[.zst]/.psam` file sets.
+- [`bgen`](api/reading.md#genoio.bgen) for BGEN `.bgen` files.
 
 Each constructor returns a reusable [`Dataset`](api/reading.md#genoio.Dataset)
 with `read`, `blocks`, `samples`, and `variants` methods.
