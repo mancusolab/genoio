@@ -32,6 +32,67 @@ def placeholder_bgen_dataset(tmp_path: Path):
     return genoio.bgen(path)
 
 
+def write_phased_probability_bgen(tmp_path: Path) -> Path:
+    path = tmp_path / "phased.bgen"
+    contents = bytearray()
+    flags = (2 << 2) | (1 << 31)
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((1).to_bytes(4, "little"))
+    contents.extend((2).to_bytes(4, "little"))
+    contents.extend(b"bgen")
+    contents.extend(flags.to_bytes(4, "little"))
+    contents.extend(_bgen_sample_identifier_block(["sample_1", "sample_2"]))
+    variant_offset = len(contents) - 4
+    contents[0:4] = variant_offset.to_bytes(4, "little")
+    contents.extend(_bgen_variant_identifying_data("var1", "rs1", "1", 10, ["A", "G"]))
+    probability_payload = bytearray()
+    probability_payload.extend((2).to_bytes(4, "little"))
+    probability_payload.extend((2).to_bytes(2, "little"))
+    probability_payload.extend((2).to_bytes(1, "little"))
+    probability_payload.extend((2).to_bytes(1, "little"))
+    probability_payload.extend([2, 2])
+    probability_payload.extend((1).to_bytes(1, "little"))
+    probability_payload.extend((8).to_bytes(1, "little"))
+    contents.extend(len(probability_payload).to_bytes(4, "little"))
+    contents.extend(probability_payload)
+    path.write_bytes(contents)
+    return path
+
+
+def _bgen_sample_identifier_block(sample_ids: list[str]) -> bytes:
+    contents = bytearray()
+    block_len = 8 + sum(2 + len(sample_id.encode()) for sample_id in sample_ids)
+    contents.extend(block_len.to_bytes(4, "little"))
+    contents.extend(len(sample_ids).to_bytes(4, "little"))
+    for sample_id in sample_ids:
+        encoded = sample_id.encode()
+        contents.extend(len(encoded).to_bytes(2, "little"))
+        contents.extend(encoded)
+    return bytes(contents)
+
+
+def _bgen_variant_identifying_data(
+    variant_id: str,
+    rsid: str,
+    chrom: str,
+    pos: int,
+    alleles: list[str],
+) -> bytes:
+    contents = bytearray()
+    for value in (variant_id, rsid, chrom):
+        encoded = value.encode()
+        contents.extend(len(encoded).to_bytes(2, "little"))
+        contents.extend(encoded)
+    contents.extend(pos.to_bytes(4, "little"))
+    contents.extend(len(alleles).to_bytes(2, "little"))
+    for allele in alleles:
+        encoded = allele.encode()
+        contents.extend(len(encoded).to_bytes(4, "little"))
+        contents.extend(encoded)
+    return bytes(contents)
+
+
 def test_import_exposes_public_names_without_reference_packages():
     import genoio
 
@@ -172,6 +233,24 @@ def test_bgen_dataset_read_dosage_rejects_invalid_placeholder_source(tmp_path):
 
     with pytest.raises(genoio.InvalidSourceError, match="bgen"):
         dataset.read(dosage="dosage")
+
+
+def test_bgen_dataset_read_dosage_maps_unsupported_probability_representation(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_phased_probability_bgen(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="phased"):
+        dataset.read(dosage="dosage")
+
+
+def test_bgen_dataset_metadata_maps_unsupported_probability_representation(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_phased_probability_bgen(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="phased"):
+        dataset.variants()
 
 
 def test_dataset_blocks_accepts_explicit_hardcall_dosage_source(tmp_path):

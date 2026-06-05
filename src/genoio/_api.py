@@ -354,6 +354,8 @@ class Dataset:
             try:
                 metadata = _rust.read_metadata(self.source.format.value, members)
             except ValueError as error:
+                if _is_unsupported_bgen_representation_error(str(error)):
+                    raise UnsupportedRepresentation(str(error)) from error
                 raise InvalidSourceError(str(error)) from error
             object.__setattr__(self, "_metadata_cache", metadata)
         assert self._metadata_cache is not None
@@ -599,6 +601,8 @@ def _public_read_error(error: ValueError) -> Exception:
         return MissingDataError(message)
     if "bgen" in message and "not implemented" in message and "dosage reads" not in message:
         return UnsupportedRepresentation(message)
+    if _is_unsupported_bgen_representation_error(message):
+        return UnsupportedRepresentation(message)
     if (
         "FORMAT/DS" in message
         or "pgen does not contain dosage values" in message
@@ -620,6 +624,25 @@ def _public_haplotype_read_error(error: ValueError) -> Exception:
     if "sparse missing values" in message:
         return MissingDataError(message)
     return _public_read_error(error)
+
+
+def _is_unsupported_bgen_representation_error(message: str) -> bool:
+    unsupported_markers = (
+        "unsupported bgen",
+        "bgen layout",
+        "bgen compression value is reserved",
+    )
+    representation_markers = (
+        "multiallelic",
+        "phased",
+        "variable-ploidy",
+        "bit depth",
+        "layout",
+        "compression",
+    )
+    return any(marker in message for marker in unsupported_markers) and any(
+        marker in message for marker in representation_markers
+    )
 
 
 def _validate_bool_option(name: str, value: bool) -> None:

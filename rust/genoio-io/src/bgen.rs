@@ -99,31 +99,17 @@ pub fn read_bgen_dosage_dense_windowed(
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut variant_major_missing =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut source_values = Vec::new();
-    let mut source_missing = Vec::new();
-    let mut selected_values = Vec::new();
-    let mut selected_missing = Vec::new();
+    let mut decode_buffers = DosageDecodeBuffers::default();
     let mut retained_index = 0_usize;
 
     for _ in 0..header.variant_count {
         let mut variant = read_layout2_variant_identifying_data(&mut reader, bgen)?;
         diagnostics.candidate_variants += 1;
-        let payload =
-            read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
-        let decoded = DecodedDosageVariant::decode(bgen, &payload, header.sample_count, 2)?;
-        decoded.debug_assert_supported_subset();
-        decoded.decode_source_order(bgen, &mut source_values, &mut source_missing)?;
-        select_decoded_source_order(
-            &source_values,
-            &source_missing,
-            &selection.source_indices,
-            &mut selected_values,
-            &mut selected_missing,
-        );
-
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
+        let payload =
+            read_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
         match partial_decision {
             PartialFilterDecision::Reject => {
                 diagnostics.dropped_metadata_variants += 1;
@@ -138,7 +124,17 @@ pub fn read_bgen_dosage_dense_windowed(
                 }
             }
             PartialFilterDecision::NeedGenotypes => {
-                let stats = compute_dosage_variant_stats(&selected_values, &selected_missing)?;
+                decode_selected_dosage_values(
+                    bgen,
+                    &payload,
+                    header.sample_count,
+                    &selection.source_indices,
+                    &mut decode_buffers,
+                )?;
+                let stats = compute_dosage_variant_stats(
+                    &decode_buffers.selected_values,
+                    &decode_buffers.selected_missing,
+                )?;
                 if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
                     diagnostics.dropped_genotype_variants += 1;
                     continue;
@@ -153,9 +149,18 @@ pub fn read_bgen_dosage_dense_windowed(
             }
         }
 
+        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            decode_selected_dosage_values(
+                bgen,
+                &payload,
+                header.sample_count,
+                &selection.source_indices,
+                &mut decode_buffers,
+            )?;
+        }
         variants.push(variant);
-        variant_major_values.extend_from_slice(&selected_values);
-        variant_major_missing.extend_from_slice(&selected_missing);
+        variant_major_values.extend_from_slice(&decode_buffers.selected_values);
+        variant_major_missing.extend_from_slice(&decode_buffers.selected_missing);
     }
 
     let n_samples = selection.samples.len();
@@ -175,6 +180,38 @@ pub fn read_bgen_dosage_dense_windowed(
         variants,
         diagnostics,
     )
+}
+
+#[derive(Default)]
+struct DosageDecodeBuffers {
+    source_values: Vec<f32>,
+    source_missing: Vec<bool>,
+    selected_values: Vec<f32>,
+    selected_missing: Vec<bool>,
+}
+
+fn decode_selected_dosage_values(
+    bgen: &Path,
+    payload: &[u8],
+    sample_count: u32,
+    source_indices: &[usize],
+    buffers: &mut DosageDecodeBuffers,
+) -> Result<()> {
+    let decoded = DecodedDosageVariant::decode(bgen, payload, sample_count, 2)?;
+    decoded.debug_assert_supported_subset();
+    decoded.decode_source_order(
+        bgen,
+        &mut buffers.source_values,
+        &mut buffers.source_missing,
+    )?;
+    select_decoded_source_order(
+        &buffers.source_values,
+        &buffers.source_missing,
+        source_indices,
+        &mut buffers.selected_values,
+        &mut buffers.selected_missing,
+    );
+    Ok(())
 }
 
 fn read_bgen_samples(
@@ -735,6 +772,12 @@ impl<'a> DecodedDosageVariant<'a> {
                 "bgen probability block is truncated; packed probabilities are shorter than declared non-missing samples",
             ));
         }
+        if packed_probabilities.len() > required_packed_len {
+            return Err(MetadataError::parse(
+                path,
+                "bgen probability block has trailing packed probability bytes",
+            ));
+        }
 
         Ok(Self {
             header,
@@ -1130,5 +1173,16 @@ mod tests {
             .expect_err("impossible probabilities should fail");
 
         assert!(error.to_string().contains("malformed probability"));
+    }
+
+    #[test]
+    fn decoded_dosage_variant_rejects_trailing_packed_probability_bytes() {
+        let mut payload = layout2_payload(8, &[2], &[Some((0, 0))]);
+        payload.push(0);
+
+        let error = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 1, 2)
+            .expect_err("trailing packed probability bytes should fail");
+
+        assert!(error.to_string().contains("trailing"));
     }
 }

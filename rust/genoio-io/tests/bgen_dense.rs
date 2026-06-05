@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use genoio_core::{VariantFilter, VariantWindow};
+use serde_json::json;
 
 const FLAG_LAYOUT2: u32 = 2 << 2;
 const FLAG_SAMPLE_IDENTIFIERS: u32 = 1 << 31;
@@ -184,6 +186,19 @@ fn write_layout2_dosage_probability_block(
     });
     append_packed_probabilities(&mut block, bit_depth, calls);
 
+    let c = u32::try_from(block.len()).expect("probability block length should fit u32");
+    writer.write_all(&c.to_le_bytes())?;
+    writer.write_all(&block)?;
+    Ok(())
+}
+
+fn write_layout2_probability_block(
+    writer: &mut impl Write,
+    header: ProbabilityBlockHeader<'_>,
+    packed_probabilities: &[u8],
+) -> io::Result<()> {
+    let mut block = layout2_probability_block_header_bytes(header);
+    block.extend_from_slice(packed_probabilities);
     let c = u32::try_from(block.len()).expect("probability block length should fit u32");
     writer.write_all(&c.to_le_bytes())?;
     writer.write_all(&block)?;
@@ -411,6 +426,15 @@ fn assert_metadata_error_contains(error: genoio_core::MetadataError, expected: &
     );
 }
 
+fn chrom_filter(chrom: &str) -> VariantFilter {
+    VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "chrom",
+        "params": {"value": chrom},
+    }))
+    .expect("chrom filter should parse")
+}
+
 #[test]
 fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
     let dir = unique_dir("bgen-dosage-bit-depth-8");
@@ -488,6 +512,82 @@ fn bgen_dosage_dense_preserves_missing_sample_calls() {
         ]
     );
     assert_eq!(dense.missing_mask, vec![false, false, true, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_skips_metadata_rejected_unsupported_probability_block() {
+    let dir = unique_dir("bgen-dosage-skip-metadata-reject");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_probability_block(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 1,
+                bit_depth: 8,
+            },
+            &[],
+        )
+        .expect("unsupported probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, 8, &[Some((0, 255)), Some((102, 102))])
+            .expect("second dosage probability block should write");
+    });
+    let filter = chrom_filter("2");
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None)
+        .expect("metadata-rejected unsupported probabilities should be skipped");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.values.len(), 2);
+}
+
+#[test]
+fn bgen_dosage_dense_skips_out_of_window_unsupported_probability_block() {
+    let dir = unique_dir("bgen-dosage-skip-window");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_probability_block(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 1,
+                bit_depth: 8,
+            },
+            &[],
+        )
+        .expect("unsupported probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, 8, &[Some((0, 255)), Some((102, 102))])
+            .expect("second dosage probability block should write");
+    });
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        None,
+        Some(VariantWindow { start: 1, len: 1 }),
+    )
+    .expect("out-of-window unsupported probabilities should be skipped");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
 }
 
 #[test]
