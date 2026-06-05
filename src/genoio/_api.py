@@ -106,17 +106,22 @@ class Dataset:
         **Arguments:**
 
         - `kind`: `"geno"` for diploid sample-by-variant genotype values or
-          `"haplo"` for phased haplotype rows. Haplotype reads currently require
-          phased VCF.
+          `"haplo"` for phased haplotype rows. VCF/BCF haplotype reads use
+          phased hardcall `FORMAT/GT` records. PLINK2 and BGEN haplotype reads
+          are source-representation-specific and may require dosage-backed
+          records.
         - `dosage`: `"hardcall"` reads allele counts from hard calls.
           `"dosage"` reads dosage-backed genotype values when the source
           supports them. This release supports dense VCF `FORMAT/DS` and
           PLINK2 unphased biallelic dosage reads, and dense BGEN Layout 2
           biallelic diploid dosage reads. Phased BGEN records are collapsed to
           expected diploid A1 dosage. BGEN sample IDs must be embedded in the
-          `.bgen` file or supplied by a companion `.sample` file. Concrete
-          BGEN region filters use a same-path `.bgen.bgi` index when present.
-          Haplotype and sparse reads only support `"hardcall"`.
+          `.bgen` file or supplied by a companion `.sample` file. Dense
+          haplotype dosage reads are planned for source-encoded PLINK2/BGEN
+          phased dosage/probability records only. Concrete BGEN region filters
+          use a same-path `.bgen.bgi` index when present. Sparse reads only
+          support `"hardcall"`. Hardcall-from-dosage conversion is never
+          performed or implied by defaults.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant
@@ -409,10 +414,18 @@ class Dataset:
         dosage: str,
         sparse_format: str | None,
     ) -> None:
+        if kind == "haplo" and sparse_format is not None and self.source.format.value in {"plink2", "bgen"}:
+            raise UnsupportedRepresentation(
+                f"{self.source.format.value} sparse haplotype reads are not implemented; "
+                "use dense haplotype reads with sparse=False"
+            )
         if self.source.format.value == "bgen":
             if kind == "haplo":
+                if dosage == "dosage" and sparse_format is None:
+                    return
                 raise UnsupportedRepresentation(
-                    'bgen haplo reads are not implemented; use kind="geno" with dosage="dosage"'
+                    'bgen hardcall haplotype reads are not implemented; use dosage="dosage" for '
+                    "source-encoded phased haplotype dosage"
                 )
             if dosage == "hardcall":
                 if sparse_format is not None:
@@ -421,6 +434,13 @@ class Dataset:
                     )
                 raise UnsupportedRepresentation('bgen hardcall genotype reads are not implemented; use dosage="dosage"')
             return
+        if kind == "haplo" and dosage == "dosage" and self.source.format.value == "vcf":
+            raise UnsupportedRepresentation(
+                "VCF haplotype dosage reads are unsupported because VCF haplotype support is hardcall GT-based"
+            )
+        if kind == "haplo" and self.source.format.value == "plink2":
+            self._validate_source_supports_dosage(kind, dosage)
+            return
         self._validate_source_supports_kind(kind)
         self._validate_source_supports_dosage(kind, dosage)
 
@@ -428,7 +448,11 @@ class Dataset:
         if dosage == "hardcall":
             return
         if kind == "haplo":
-            raise UnsupportedRepresentation('kind="haplo" does not support dosage-backed reads')
+            if self.source.format.value in {"plink2", "bgen"}:
+                return
+            raise UnsupportedRepresentation(
+                f"{self.source.format.value} does not support dosage-backed haplotype reads"
+            )
         if self.source.format.value in {"vcf", "plink2"}:
             return
         raise UnsupportedRepresentation(f"{self.source.format.value} does not support dosage-backed genotype reads")
@@ -512,7 +536,7 @@ def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:
     normalized_missing = _normalize_missing(options.missing, sparse_format=sparse_format)
     variant_filter_ir = _variant_filter_ir(options.variants)
     normalized_dtype = _normalize_dtype(options.dtype)
-    _validate_dosage_compatibility(options.dosage, sparse_format)
+    _validate_dosage_compatibility(options.kind, options.dosage, sparse_format)
     _validate_sparse_missing_compatibility(sparse_format, normalized_missing)
     _validate_missing_dtype_compatibility(normalized_missing, normalized_dtype)
     _validate_sample_filter(options.samples)
@@ -548,12 +572,18 @@ def _validate_dosage_source(dosage: str) -> None:
 
 
 def _validate_dosage_compatibility(
+    kind: str,
     dosage: str,
     sparse_format: str | None,
 ) -> None:
     if dosage == "hardcall":
         return
     if sparse_format is not None:
+        if kind == "haplo":
+            raise UnsupportedRepresentation(
+                "sparse haplotype reads are not implemented for dosage-backed sources; "
+                "use dense haplotype reads with sparse=False"
+            )
         raise UnsupportedRepresentation("sparse dosage-backed genotype reads are not implemented")
 
 
@@ -658,6 +688,7 @@ def _public_haplotype_read_error(error: ValueError) -> Exception:
         "unphased" in message
         or "unsupported haplotype format" in message
         or ("bgen" in message and "not implemented" in message)
+        or ("plink2" in message and "haplotype" in message and "not implemented" in message)
     ):
         return UnsupportedRepresentation(message)
     if "sparse missing values" in message:

@@ -478,6 +478,38 @@ pub fn read_plink2_dosage_dense_windowed(
     )
 }
 
+/// Placeholder for dense PLINK2 phased hardcall haplotypes.
+pub fn read_plink2_haplotypes_dense_windowed(
+    _pgen: &Path,
+    _pvar: &Path,
+    _psam: &Path,
+    _requested_samples: Option<&[String]>,
+    _variant_filter: Option<&VariantFilter>,
+    _variant_window: Option<VariantWindow>,
+    _matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    Err(MetadataError::parse(
+        "plink2",
+        "plink2 phased haplotype hardcall reads are not implemented yet",
+    ))
+}
+
+/// Placeholder for dense PLINK2 phased haplotype dosages.
+pub fn read_plink2_haplotypes_dosage_dense_windowed(
+    _pgen: &Path,
+    _pvar: &Path,
+    _psam: &Path,
+    _requested_samples: Option<&[String]>,
+    _variant_filter: Option<&VariantFilter>,
+    _variant_window: Option<VariantWindow>,
+    _matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    Err(MetadataError::parse(
+        "plink2",
+        "plink2 phased haplotype dosage reads are not implemented yet",
+    ))
+}
+
 /// Read all retained PLINK2 hard-call genotypes as sparse CSC.
 pub fn read_plink2_sparse(
     pgen: &Path,

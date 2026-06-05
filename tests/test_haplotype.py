@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 from pathlib import Path
 
 import numpy as np
@@ -130,6 +132,15 @@ def test_phased_vcf_haplotype_dense_counts_a1_in_sample_haplotype_order(tmp_path
     assert samples["haplotype_index"].to_list() == [0, 1, 0, 1]
     assert samples["source_sample_index"].to_list() == [0, 0, 1, 1]
     assert variants["id"].to_list() == ["rs1", "rs2"]
+
+
+def test_phased_vcf_haplotype_dosage_reads_raise_hardcall_gt_message(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="VCF haplotype dosage.*hardcall GT"):
+        dataset.read(kind="haplo", dosage="dosage")
 
 
 def test_filtered_haplotype_read_preserves_source_sample_index(tmp_path):

@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 import sys
 from importlib.metadata import metadata, version
 from inspect import signature
@@ -5,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from test_dense_read import write_bgen_dosage, write_fixed_width_plink2
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
@@ -207,12 +210,39 @@ def test_dataset_read_rejects_dosage_source_for_formats_without_reader_support(t
         dataset.read(dosage="dosage")
 
 
-def test_dataset_read_rejects_haplotype_dosage_source(tmp_path):
+def test_vcf_dataset_read_rejects_haplotype_dosage_source(tmp_path):
     import genoio
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match='kind="haplo"'):
+    with pytest.raises(genoio.UnsupportedRepresentation, match="VCF haplotype dosage.*hardcall GT"):
+        dataset.read(kind="haplo", dosage="dosage")
+
+
+def test_plink2_dataset_read_haplotype_hardcall_reaches_backend_placeholder(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="plink2 phased haplotype hardcall reads"):
+        dataset.read(kind="haplo")
+
+
+def test_plink2_dataset_read_haplotype_dosage_reaches_backend_placeholder(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="plink2 phased haplotype dosage reads"):
+        dataset.read(kind="haplo", dosage="dosage")
+
+
+def test_bgen_dataset_read_haplotype_dosage_reaches_backend_placeholder(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="bgen phased haplotype dosage reads"):
         dataset.read(kind="haplo", dosage="dosage")
 
 
@@ -239,8 +269,35 @@ def test_bgen_dataset_read_rejects_haplotypes(tmp_path):
 
     dataset = placeholder_bgen_dataset(tmp_path)
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="haplo"):
+    with pytest.raises(genoio.UnsupportedRepresentation, match="hardcall haplotype"):
         dataset.read(kind="haplo")
+
+
+def test_bgen_dataset_read_default_haplotype_does_not_imply_dosage(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="hardcall haplotype"):
+        dataset.read(kind="haplo")
+
+
+def test_plink2_dataset_read_rejects_sparse_haplotypes_with_dense_mode_message(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse haplotype reads.*dense"):
+        dataset.read(kind="haplo", sparse=True)
+
+
+def test_bgen_dataset_read_rejects_sparse_haplotype_dosage_with_dense_mode_message(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse haplotype reads.*dense"):
+        dataset.read(kind="haplo", dosage="dosage", sparse=True)
 
 
 def test_bgen_dataset_read_dosage_rejects_invalid_placeholder_source(tmp_path):

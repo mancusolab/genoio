@@ -240,6 +240,21 @@ pub fn read_bgen_dosage_dense_windowed(
     )
 }
 
+/// Placeholder for dense BGEN phased haplotype dosages.
+pub fn read_bgen_haplotypes_dosage_dense_windowed(
+    _bgen: &Path,
+    _sample: Option<&Path>,
+    _requested_samples: Option<&[String]>,
+    _variant_filter: Option<&VariantFilter>,
+    _variant_window: Option<VariantWindow>,
+    _matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    Err(MetadataError::parse(
+        "bgen",
+        "bgen phased haplotype dosage reads are not implemented yet",
+    ))
+}
+
 struct BgenDenseParts {
     n_samples: usize,
     n_variants: usize,

@@ -233,7 +233,7 @@ fn read_sparse(
 }
 
 #[pyfunction]
-/// Read phased VCF genotypes as dense haplotype rows.
+/// Read dense haplotype rows from a resolved source.
 fn read_haplotypes_dense(
     py: Python<'_>,
     format: &str,
@@ -245,17 +245,63 @@ fn read_haplotypes_dense(
         "vcf" | "bcf" => {
             let key = if format == "vcf" { "vcf" } else { "bcf" };
             let path = member_path(members, key)?;
-            genoio_io::read_vcf_haplotypes_dense_windowed(
-                &path,
-                read_options.requested_samples.as_deref(),
-                read_options.variant_filter.as_ref(),
-                read_options.variant_window,
-            )
+            match read_options.dosage {
+                DosageSource::Hardcall => genoio_io::read_vcf_haplotypes_dense_windowed(
+                    &path,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                ),
+                DosageSource::Dosage => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "VCF haplotype dosage reads are unsupported because VCF haplotype support is hardcall GT-based",
+                    ));
+                }
+            }
+        }
+        "plink2" => {
+            let pgen = member_path(members, "pgen")?;
+            let pvar = member_path(members, "pvar")?;
+            let psam = member_path(members, "psam")?;
+            match read_options.dosage {
+                DosageSource::Hardcall => genoio_io::read_plink2_haplotypes_dense_windowed(
+                    &pgen,
+                    &pvar,
+                    &psam,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                    read_options.matrix_only,
+                ),
+                DosageSource::Dosage => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+                    &pgen,
+                    &pvar,
+                    &psam,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                    read_options.matrix_only,
+                ),
+            }
         }
         "bgen" => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "bgen does not support haplo reads",
-            ));
+            let bgen = member_path(members, "bgen")?;
+            let sample = optional_member_path(members, "sample")?;
+            match read_options.dosage {
+                DosageSource::Hardcall => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "bgen hardcall haplotype reads are not implemented; use dosage=\"dosage\" for source-encoded phased haplotype dosage",
+                    ));
+                }
+                DosageSource::Dosage => genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+                    &bgen,
+                    sample.as_deref(),
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                    read_options.matrix_only,
+                ),
+            }
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -274,7 +320,7 @@ fn read_haplotypes_dense(
 }
 
 #[pyfunction]
-/// Read phased VCF genotypes as sparse haplotype rows.
+/// Read sparse haplotype rows from a resolved source.
 fn read_haplotypes_sparse(
     py: Python<'_>,
     format: &str,
@@ -295,7 +341,12 @@ fn read_haplotypes_sparse(
         }
         "bgen" => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "bgen does not support haplo reads",
+                "bgen sparse haplotype reads are not implemented; use dense haplotype reads with sparse=False",
+            ));
+        }
+        "plink2" => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "plink2 sparse haplotype reads are not implemented; use dense haplotype reads with sparse=False",
             ));
         }
         other => {
