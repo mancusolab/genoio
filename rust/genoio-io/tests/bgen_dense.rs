@@ -1236,6 +1236,80 @@ fn bgen_metadata_rejects_missing_companion_path_when_sample_ids_not_embedded() {
 }
 
 #[test]
+fn bgen_metadata_rejects_wrong_magic_bytes() {
+    let dir = unique_dir("bgen-wrong-magic");
+    let bgen = dir.join("tiny.bgen");
+    let mut contents = Vec::new();
+    contents.extend_from_slice(&20_u32.to_le_bytes());
+    contents.extend_from_slice(&20_u32.to_le_bytes());
+    contents.extend_from_slice(&0_u32.to_le_bytes());
+    contents.extend_from_slice(&0_u32.to_le_bytes());
+    contents.extend_from_slice(b"nope");
+    contents.extend_from_slice(&FLAG_LAYOUT2.to_le_bytes());
+    fs::write(&bgen, contents).expect("bgen fixture should be written");
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("wrong magic should fail");
+
+    assert_metadata_error_contains(error, "magic");
+}
+
+#[test]
+fn bgen_metadata_rejects_header_length_greater_than_offset() {
+    let dir = unique_dir("bgen-header-length-greater-than-offset");
+    let bgen = dir.join("tiny.bgen");
+    let mut contents = Vec::new();
+    contents.extend_from_slice(&20_u32.to_le_bytes());
+    contents.extend_from_slice(&24_u32.to_le_bytes());
+    contents.extend_from_slice(&0_u32.to_le_bytes());
+    contents.extend_from_slice(&0_u32.to_le_bytes());
+    contents.extend_from_slice(b"bgen");
+    contents.extend_from_slice(b"free");
+    contents.extend_from_slice(&FLAG_LAYOUT2.to_le_bytes());
+    fs::write(&bgen, contents).expect("bgen fixture should be written");
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("header length greater than offset should fail");
+
+    assert_metadata_error_contains(error, "header length exceeds variant data offset");
+}
+
+#[test]
+fn bgen_metadata_rejects_truncated_sample_identifier_block() {
+    let dir = unique_dir("bgen-truncated-sample-identifier-block");
+    let bgen = dir.join("tiny.bgen");
+    let mut contents = Vec::new();
+    write_bgen_header(&mut contents, 2, 0, FLAG_LAYOUT2, true).expect("header should write");
+    contents.extend_from_slice(&12_u32.to_le_bytes());
+    contents.extend_from_slice(&2_u32.to_le_bytes());
+    contents.extend_from_slice(&4_u16.to_le_bytes());
+    fs::write(&bgen, contents).expect("bgen fixture should be written");
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("truncated sample identifier block should fail");
+
+    assert_metadata_error_contains(error, "failed to fill whole buffer");
+}
+
+#[test]
+fn bgen_metadata_rejects_truncated_variant_identifying_data() {
+    let dir = unique_dir("bgen-truncated-variant-identifying-data");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        writer
+            .write_all(&4_u16.to_le_bytes())
+            .expect("variant id length should write");
+        writer
+            .write_all(b"rs")
+            .expect("partial variant id should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("truncated variant identifying data should fail");
+
+    assert_metadata_error_contains(error, "failed to fill whole buffer");
+}
+
+#[test]
 fn bgen_metadata_uses_variant_id_when_rsid_is_empty() {
     let dir = unique_dir("bgen-empty-rsid");
     let bgen = dir.join("tiny.bgen");
@@ -1476,6 +1550,52 @@ fn bgen_metadata_rejects_truncated_packed_probability_bytes() {
         .expect_err("truncated packed probabilities should fail");
 
     assert_metadata_error_contains(error, "truncated");
+}
+
+#[test]
+fn bgen_metadata_rejects_zlib_decompressed_length_mismatch() {
+    let dir = unique_dir("bgen-zlib-decompressed-length-mismatch");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_zlib_probability_block_with_invalid_decompressed_len(writer)
+            .expect("compressed probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("decompressed length mismatch should fail");
+
+    assert_metadata_error_contains(error, "decompressed probability block length");
+}
+
+#[test]
+fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
+    let dir = unique_dir("bgen-probability-sample-count-mismatch");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_layout2_probability_block(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 1,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2],
+                phased: 0,
+                bit_depth: 8,
+            },
+            &[0, 0],
+        )
+        .expect("sample-count-mismatched probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("probability block sample count mismatch should fail");
+
+    assert_metadata_error_contains(error, "sample count does not match");
 }
 
 #[test]

@@ -128,6 +128,33 @@ def write_bgen_dosage(
     return path
 
 
+def write_wrong_magic_bgen(tmp_path: Path) -> Path:
+    path = write_bgen_dosage(tmp_path)
+    contents = bytearray(path.read_bytes())
+    contents[16:20] = b"nope"
+    path.write_bytes(contents)
+    return path
+
+
+def write_truncated_variant_bgen(tmp_path: Path) -> Path:
+    path = tmp_path / "truncated_variant.bgen"
+    contents = bytearray()
+    flags = (2 << 2) | (1 << 31)
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((20).to_bytes(4, "little"))
+    contents.extend((1).to_bytes(4, "little"))
+    contents.extend((2).to_bytes(4, "little"))
+    contents.extend(b"bgen")
+    contents.extend(flags.to_bytes(4, "little"))
+    contents.extend(_bgen_sample_identifier_block(["sample_1", "sample_2"]))
+    variant_offset = len(contents) - 4
+    contents[0:4] = variant_offset.to_bytes(4, "little")
+    contents.extend((4).to_bytes(2, "little"))
+    contents.extend(b"rs")
+    path.write_bytes(contents)
+    return path
+
+
 def _bgen_sample_identifier_block(sample_ids: list[str]) -> bytes:
     contents = bytearray()
     block_len = 8 + sum(2 + len(sample_id.encode()) for sample_id in sample_ids)
@@ -390,6 +417,46 @@ def test_dense_bgen_dosage_missing_raise_rejects_missing_calls(tmp_path):
 
     with pytest.raises(genoio.MissingDataError, match="missing genotype"):
         dataset.read(dosage="dosage", missing="raise")
+
+
+@pytest.mark.parametrize(
+    ("writer", "match"),
+    [
+        (write_wrong_magic_bgen, "magic"),
+        (write_truncated_variant_bgen, "failed to fill whole buffer"),
+    ],
+)
+def test_dense_bgen_dosage_rejects_malformed_files_as_invalid_source(tmp_path, writer, match):
+    import genoio
+
+    dataset = genoio.bgen(writer(tmp_path))
+
+    with pytest.raises(genoio.InvalidSourceError, match=match):
+        dataset.read(dosage="dosage")
+
+
+def test_dense_bgen_dosage_rejects_valid_unsupported_multiallelic_source(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(
+        write_bgen_dosage(
+            tmp_path,
+            variants=[("var1", "rs1", "1", 10, ["A", "C", "G"])],
+            variant_calls=[[(204, 26), (51, 128)]],
+        )
+    )
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="biallelic"):
+        dataset.read(dosage="dosage")
+
+
+def test_dense_bgen_hardcall_error_points_to_supported_dosage_option(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match='dosage="dosage"'):
+        dataset.read()
 
 
 def test_dense_bgen_dosage_sample_filter_uses_source_order(tmp_path):
