@@ -17,6 +17,10 @@ formatting and lints, runs Rust and Python tests, runs Ty, builds the
 Zensical site with strict checks, and builds Rust docs with warnings treated as
 errors.
 
+CI runs the same checks as separate jobs so failures are easier to locate. It
+also runs `cargo audit` for Rust dependency advisories and builds native Linux
+and macOS wheel artifacts plus an sdist.
+
 ## Build a wheel
 
 Build a repaired wheel before testing installation:
@@ -28,6 +32,10 @@ make build-wheel
 On macOS this uses `--auditwheel=repair` and an explicit `CODESIGN_ALLOCATE`
 path so external dynamic libraries are bundled into the wheel instead of
 pointing at a local environment.
+
+GitHub Actions also builds distribution artifacts with `PyO3/maturin-action`
+on pull requests and pushes to `main`. Those artifacts are smoke checks for the
+packaging path; publishing is still manual.
 
 ## Smoke-test the artifact
 

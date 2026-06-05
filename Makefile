@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock requirements rust-check rust-doc rust-fmt rust-test test ty venv verify
+.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock requirements rust-audit rust-check rust-doc rust-fmt rust-test test ty venv verify
 
 VENV ?= .venv
 SYSTEM_PYTHON ?= python3
@@ -61,6 +61,9 @@ rust-fmt:  ## Check Rust formatting
 
 rust-check:  ## Run Rust clippy checks
 	$(RUST_ENV) $(CARGO) clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+
+rust-audit:  ## Audit Rust dependencies with cargo-audit
+	cd rust && $(CARGO) audit
 
 rust-test:  ## Run Rust tests
 	$(RUST_ENV) $(CARGO) test --manifest-path rust/Cargo.toml --workspace

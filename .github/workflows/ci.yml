@@ -6,14 +6,35 @@ on:
     branches:
       - main
 
+env:
+  CC: clang
+  AR: ar
+
 jobs:
-  test:
-    name: Python, Rust, and docs
+  rust:
+    name: Rust
     runs-on: macos-latest
-    env:
-      CC: clang
-      AR: ar
-      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust format
+        run: make rust-fmt
+
+      - name: Rust clippy
+        run: make rust-check
+
+      - name: Rust tests
+        run: make rust-test
+
+  python:
+    name: Python
+    runs-on: macos-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -30,12 +51,72 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
 
-      - name: Verify
-        run: make verify
+      - name: Type check
+        run: make ty
+
+      - name: Python tests
+        run: make test
 
       - name: Prune uv cache
         if: always()
         run: uv cache prune --ci
+
+  docs:
+    name: Docs
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build docs
+        run: make docs
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  rustdoc:
+    name: Rust docs
+    runs-on: macos-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust docs
+        run: make rust-doc
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit dependencies
+        working-directory: rust
+        run: cargo audit
