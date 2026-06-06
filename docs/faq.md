@@ -91,6 +91,18 @@ phenotype and covariate tables before a scan.
 No. Variants are returned in source order after filtering. For region iteration,
 each result contains the variants retained inside that region.
 
+## Which haplotype representations are supported?
+
+VCF/BCF haplotype reads use phased hardcall `GT` records. PLINK2 haplotype
+reads support explicit phased hardcalls with `dosage="hardcall"` and explicit
+phased full dosages with `dosage="dosage"`. BGEN haplotype reads support Layout
+2 phased biallelic diploid probabilities with `kind="haplo",
+dosage="dosage"`, returned as expected A1 dosage per haplotype row.
+
+`genoio` does not convert probabilities into hardcalls. Sparse PLINK2/BGEN
+haplotypes are not supported. If an unsupported record is retained, the read
+fails; metadata-only filters can skip unsupported records before decode.
+
 ## Universal Standard
 
 [Is this a new universal standard](https://xkcd.com/927/)? No. Shh.

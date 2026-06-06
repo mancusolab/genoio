@@ -33,6 +33,8 @@ def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch)
             "2",
             "--region",
             "22:1-100",
+            "--kind",
+            "haplo",
             "--no-compare",
         ],
     )
@@ -44,7 +46,37 @@ def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch)
     assert args.max_variants == 7
     assert args.repeats == 2
     assert args.region == "22:1-100"
+    assert args.kind == "haplo"
     assert args.no_compare is True
+
+
+def test_haplotype_kind_dispatches_genoio_without_bgen_reader_comparison(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_bgen.py",
+            "--scenario",
+            "matrix-only",
+            "--kind",
+            "haplo",
+            "--backend",
+            "both",
+            "--max-variants",
+            "3",
+            "--repeats",
+            "1",
+        ],
+    )
+    monkeypatch.setattr(benchmark_bgen, "read_genoio_matrix_only", lambda prefix, max_variants, kind: _matrix(1.0))
+    monkeypatch.setattr(benchmark_bgen, "read_bgen_reader_expected_dosage", lambda prefix, max_variants: _matrix(1.0))
+
+    benchmark_bgen.main()
+
+    output = capsys.readouterr().out
+    assert "genoio_bgen_haplo_matrix_only" in output
+    assert "skipped bgen_reader comparison for haplo matrix-only" in output
+    assert "bgen_reader_expected_dosage" not in output
 
 
 def test_read_bgen_sample_ids_uses_id_2_and_skips_type_row(tmp_path) -> None:
@@ -81,11 +113,21 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
             "1",
         ],
     )
-    monkeypatch.setattr(benchmark_bgen, "read_genoio_matrix_only", lambda prefix, max_variants: _matrix(1.0))
-    monkeypatch.setattr(benchmark_bgen, "read_genoio_with_variants", read_with_variants)
-    monkeypatch.setattr(benchmark_bgen, "read_genoio_sample_filtered", lambda prefix, max_variants: _matrix(3.0))
-    monkeypatch.setattr(benchmark_bgen, "read_genoio_genotype_filtered", lambda prefix, max_variants: _matrix(4.0))
-    monkeypatch.setattr(benchmark_bgen, "read_genoio_indexed_region", lambda prefix, max_variants, region: _matrix(5.0))
+    monkeypatch.setattr(benchmark_bgen, "read_genoio_matrix_only", lambda prefix, max_variants, kind: _matrix(1.0))
+    monkeypatch.setattr(
+        benchmark_bgen,
+        "read_genoio_with_variants",
+        lambda prefix, max_variants, kind: read_with_variants(prefix, max_variants),
+    )
+    monkeypatch.setattr(benchmark_bgen, "read_genoio_sample_filtered", lambda prefix, max_variants, kind: _matrix(3.0))
+    monkeypatch.setattr(
+        benchmark_bgen, "read_genoio_genotype_filtered", lambda prefix, max_variants, kind: _matrix(4.0)
+    )
+    monkeypatch.setattr(
+        benchmark_bgen,
+        "read_genoio_indexed_region",
+        lambda prefix, max_variants, region, kind: _matrix(5.0),
+    )
 
     benchmark_bgen.main()
 
@@ -114,7 +156,7 @@ def test_matrix_only_scenario_compares_bgen_reader(monkeypatch, capsys) -> None:
             "1",
         ],
     )
-    monkeypatch.setattr(benchmark_bgen, "read_genoio_matrix_only", lambda prefix, max_variants: _matrix(1.0))
+    monkeypatch.setattr(benchmark_bgen, "read_genoio_matrix_only", lambda prefix, max_variants, kind: _matrix(1.0))
     monkeypatch.setattr(benchmark_bgen, "read_bgen_reader_expected_dosage", lambda prefix, max_variants: _matrix(1.0))
 
     benchmark_bgen.main()

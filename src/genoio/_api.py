@@ -107,21 +107,23 @@ class Dataset:
 
         - `kind`: `"geno"` for diploid sample-by-variant genotype values or
           `"haplo"` for phased haplotype rows. VCF/BCF haplotype reads use
-          phased hardcall `FORMAT/GT` records. PLINK2 and BGEN haplotype reads
-          are source-representation-specific and may require dosage-backed
-          records.
+          phased hardcall `FORMAT/GT` records. PLINK2 haplotype reads use
+          source-encoded explicit phased hardcall or phased full-dosage records.
+          BGEN haplotype reads use source-encoded phased Layout 2 biallelic
+          diploid probabilities.
         - `dosage`: `"hardcall"` reads allele counts from hard calls.
           `"dosage"` reads dosage-backed genotype values when the source
           supports them. This release supports dense VCF `FORMAT/DS` and
           PLINK2 unphased biallelic dosage reads, and dense BGEN Layout 2
-          biallelic diploid dosage reads. Phased BGEN records are collapsed to
-          expected diploid A1 dosage. BGEN dense haplotype dosage reads return
-          phased Layout 2 biallelic diploid expected A1 haplotype rows. PLINK2
-          dense haplotype reads support explicit phased hardcall records with
-          `dosage="hardcall"` and explicit phased full dosage records with
-          `dosage="dosage"`. BGEN sample IDs must be embedded in the `.bgen`
-          file or supplied by a companion `.sample` file. Concrete BGEN region
-          filters use a same-path `.bgen.bgi` index when present.
+          biallelic diploid dosage reads. Genotype reads of phased BGEN records
+          sum source haplotype probabilities to expected diploid A1 dosage.
+          BGEN dense haplotype dosage reads return expected A1 dosage per
+          haplotype row. PLINK2 dense haplotype reads support explicit phased
+          hardcall records with `dosage="hardcall"` and explicit phased full
+          dosage records with `dosage="dosage"`. BGEN sample IDs must be
+          embedded in the `.bgen` file or supplied by a companion `.sample`
+          file. Concrete BGEN region filters use a same-path `.bgen.bgi` index
+          when present.
           Sparse reads only support `"hardcall"`. Hardcall-from-dosage
           conversion is never performed or implied by defaults.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
@@ -223,7 +225,8 @@ class Dataset:
         return contract as [`genoio.Dataset.read`][]. Blocks are fixed-width
         retained-variant chunks ordered by source variant order after any
         filtering. BGEN dosage blocks with a concrete region filter use a
-        same-path `.bgen.bgi` index when present.
+        same-path `.bgen.bgi` index when present. Haplotype blocks follow the
+        same source-encoded representation rules as [`genoio.Dataset.read`][].
 
         **Arguments:**
 
@@ -251,7 +254,8 @@ class Dataset:
         object from `regions` and `result` follows the same return contract as
         [`genoio.Dataset.read`][]. Concrete VCF/BCF and BGEN region filters use
         the same indexed pushdown paths as normal reads when an index is
-        present.
+        present. Haplotype region reads follow the same source-encoded
+        representation rules as [`genoio.Dataset.read`][].
 
         **Arguments:**
 

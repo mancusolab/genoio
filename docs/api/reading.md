@@ -18,17 +18,21 @@ policy. The `dosage` option controls this genotype value source:
 `dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
 dosage-backed values. This release supports dense VCF `FORMAT/DS`, PLINK2
 unphased biallelic dosage reads, and BGEN Layout 2 biallelic diploid dosage
-reads. Phased BGEN records are collapsed to expected diploid A1 dosage. PLINK2
-dense haplotype reads support explicit phased hardcall records with
+reads. Genotype reads of phased BGEN records sum source haplotype probabilities
+to expected diploid A1 dosage. PLINK2 dense haplotype reads support explicit
+phased hardcall records with
 `kind="haplo", dosage="hardcall"` and explicit phased full dosage records with
 `kind="haplo", dosage="dosage"`. BGEN dense haplotype dosage reads support
-phased Layout 2 biallelic diploid expected A1 haplotype rows. Dosage values are
-expected copies of `a1`. Sparse dosage, sparse haplotype, and PLINK1 dosage are
+source-encoded phased Layout 2 biallelic diploid probabilities and return
+expected A1 dosage per haplotype row. Dosage values are expected copies of
+`a1`. Sparse dosage, sparse PLINK2/BGEN haplotype reads, and PLINK1 dosage are
 not implemented yet and raise
 `genoio.UnsupportedRepresentation`.
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele
-dosages rather than hardcall counts.
+dosages rather than hardcall counts. For haplotype reads, those filters are
+evaluated on the collapsed diploid expected A1 dosage for each sample, while the
+returned matrix remains haplotype-level.
 
 ## Reading one matrix
 
@@ -186,11 +190,37 @@ Phased VCF genotypes can be read as haplotype rows:
 H = genoio.vcf("phased.vcf.gz").read(kind="haplo")
 ```
 
+PLINK2 explicit phased hardcall records can be read with the default haplotype
+value source:
+
+```python
+H = genoio.pfile("phased_hardcall").read(kind="haplo", dosage="hardcall")
+```
+
+PLINK2 explicit phased full-dosage records are dosage-backed haplotype rows:
+
+```python
+H = genoio.pfile("phased_dosage").read(kind="haplo", dosage="dosage")
+```
+
+BGEN haplotype reads require Layout 2 phased biallelic diploid probability
+records and return source-encoded phased dosage as expected A1 dosage per
+haplotype row:
+
+```python
+H = genoio.bgen("phased.bgen").read(kind="haplo", dosage="dosage")
+```
+
 Each retained sample contributes two output rows. Haplotype reads require
 phased diploid records in retained variants. PLINK2 hardcall haplotypes require
 explicit phased hardcall records; PLINK2 dosage haplotypes require explicit
-phased full dosage records. PLINK1 haplotype reads, sparse PLINK2 haplotypes,
-and hardcall-from-dosage conversion are not implemented in this release.
+phased full dosage records. BGEN haplotypes require phased probability records.
+PLINK1 haplotype reads, sparse PLINK2/BGEN haplotypes, and hardcall-from-dosage
+conversion are not implemented in this release.
+
+Unsupported retained records fail the read. Metadata-only filters, such as
+explicit variant ID lists and concrete regions, can skip unsupported records
+before decoding their genotype or haplotype payloads.
 
 ::: genoio.Dataset
 

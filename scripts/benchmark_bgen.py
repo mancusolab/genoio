@@ -12,6 +12,7 @@ import numpy as np
 from bench_common import benchmark, compare_summaries, positive_int
 
 SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered", "indexed-region")
+KINDS = ("geno", "haplo")
 _last_variant_metadata_length: int | None = None
 
 
@@ -22,42 +23,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=positive_int, default=3)
     parser.add_argument("--backend", choices=["both", "genoio", "bgen_reader"], default="both")
     parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="matrix-only")
+    parser.add_argument(
+        "--kind",
+        choices=KINDS,
+        default="geno",
+        help='Matrix kind to time. Defaults to genotype dosage; "haplo" times dense BGEN haplotype dosage.',
+    )
     parser.add_argument("--region", default="22:20000000-21000000")
     parser.add_argument("--no-compare", action="store_true")
     return parser.parse_args()
 
 
-def read_genoio_matrix_only(prefix: Path, max_variants: int) -> np.ndarray:
+def _read_options(kind: str) -> dict[str, object]:
+    options: dict[str, object] = {
+        "dosage": "dosage",
+        "missing": "nan",
+        "dtype": np.float32,
+    }
+    if kind == "haplo":
+        options["kind"] = "haplo"
+    return options
+
+
+def _genoio_label(kind: str, scenario: str) -> str:
+    suffix = scenario.replace("-", "_")
+    kind_part = "haplo" if kind == "haplo" else ""
+    parts = ["genoio_bgen", kind_part, suffix]
+    return "_".join(part for part in parts if part)
+
+
+def read_genoio_matrix_only(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     return next(
         genoio.bgen(prefix).iter_blocks(
             max_variants,
-            dosage="dosage",
-            missing="nan",
-            dtype=np.float32,
+            **_read_options(kind),
         )
     )
 
 
-def read_genoio_with_variants(prefix: Path, max_variants: int) -> np.ndarray:
+def read_genoio_with_variants(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     global _last_variant_metadata_length
     matrix, variants = next(
         genoio.bgen(prefix).iter_blocks(
             max_variants,
-            dosage="dosage",
-            missing="nan",
-            dtype=np.float32,
             return_variants=True,
+            **_read_options(kind),
         )
     )
     _last_variant_metadata_length = variants.height
     return matrix
 
 
-def read_genoio_sample_filtered(prefix: Path, max_variants: int) -> np.ndarray:
+def read_genoio_sample_filtered(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     sample_ids = _read_bgen_sample_ids(prefix.with_suffix(".sample"))
@@ -65,39 +86,33 @@ def read_genoio_sample_filtered(prefix: Path, max_variants: int) -> np.ndarray:
     return next(
         genoio.bgen(prefix).iter_blocks(
             max_variants,
-            dosage="dosage",
-            missing="nan",
-            dtype=np.float32,
             samples=sample_ids[:keep_count],
+            **_read_options(kind),
         )
     )
 
 
-def read_genoio_genotype_filtered(prefix: Path, max_variants: int) -> np.ndarray:
+def read_genoio_genotype_filtered(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     return next(
         genoio.bgen(prefix).iter_blocks(
             max_variants,
-            dosage="dosage",
-            missing="nan",
-            dtype=np.float32,
             variants=genoio.maf(min=0.01),
+            **_read_options(kind),
         )
     )
 
 
-def read_genoio_indexed_region(prefix: Path, max_variants: int, region: str) -> np.ndarray:
+def read_genoio_indexed_region(prefix: Path, max_variants: int, region: str, kind: str = "geno") -> np.ndarray:
     import genoio
 
     matrix, variants = next(
         genoio.bgen(prefix).iter_blocks(
             max_variants,
-            dosage="dosage",
-            missing="nan",
-            dtype=np.float32,
             variants=genoio.region(region),
             return_variants=True,
+            **_read_options(kind),
         )
     )
     if variants.height:
@@ -165,6 +180,7 @@ def selected_scenarios(scenario: str) -> tuple[str, ...]:
 
 def benchmark_genoio_scenario(
     scenario: str,
+    kind: str,
     prefix: Path,
     max_variants: int,
     repeats: int,
@@ -172,8 +188,8 @@ def benchmark_genoio_scenario(
 ) -> np.ndarray:
     if scenario == "matrix-only":
         return benchmark(
-            "genoio_bgen_matrix_only",
-            lambda: read_genoio_matrix_only(prefix, max_variants),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_matrix_only(prefix, max_variants, kind),
             repeats,
         )
     if scenario == "with-variants":
@@ -183,35 +199,47 @@ def benchmark_genoio_scenario(
 
         def read_matrix() -> np.ndarray:
             nonlocal variant_metadata_length
-            result = read_genoio_with_variants(prefix, max_variants)
+            result = read_genoio_with_variants(prefix, max_variants, kind)
             variant_metadata_length = _last_variant_metadata_length
             return result
 
-        matrix = benchmark("genoio_bgen_with_variants", read_matrix, repeats)
+        matrix = benchmark(_genoio_label(kind, scenario), read_matrix, repeats)
         print(f"  variant_metadata length={variant_metadata_length}")
         return matrix
     if scenario == "sample-filtered":
         return benchmark(
-            "genoio_bgen_sample_filtered",
-            lambda: read_genoio_sample_filtered(prefix, max_variants),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_sample_filtered(prefix, max_variants, kind),
             repeats,
         )
     if scenario == "genotype-filtered":
         return benchmark(
-            "genoio_bgen_genotype_filtered",
-            lambda: read_genoio_genotype_filtered(prefix, max_variants),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_genotype_filtered(prefix, max_variants, kind),
             repeats,
         )
     if scenario == "indexed-region":
         return benchmark(
-            "genoio_bgen_indexed_region",
-            lambda: read_genoio_indexed_region(prefix, max_variants, region),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_indexed_region(prefix, max_variants, region, kind),
             repeats,
         )
     raise ValueError(f"unknown scenario: {scenario}")
 
 
-def benchmark_bgen_reader_scenario(scenario: str, prefix: Path, max_variants: int, repeats: int) -> np.ndarray | None:
+def benchmark_bgen_reader_scenario(
+    scenario: str,
+    kind: str,
+    prefix: Path,
+    max_variants: int,
+    repeats: int,
+) -> np.ndarray | None:
+    if kind == "haplo":
+        print(
+            f"skipped bgen_reader comparison for haplo {scenario}: "
+            "comparison backend only computes diploid expected dosage"
+        )
+        return None
     if scenario == "matrix-only":
         return benchmark(
             "bgen_reader_expected_dosage",
@@ -229,17 +257,19 @@ def main() -> None:
         bgen_reader_matrix = None
         if args.backend in {"both", "genoio"}:
             genoio_matrix = benchmark_genoio_scenario(
-                scenario, args.prefix, args.max_variants, args.repeats, args.region
+                scenario, args.kind, args.prefix, args.max_variants, args.repeats, args.region
             )
         if args.backend in {"both", "bgen_reader"}:
             bgen_reader_matrix = benchmark_bgen_reader_scenario(
                 scenario,
+                args.kind,
                 args.prefix,
                 args.max_variants,
                 args.repeats,
             )
         if (
             scenario == "matrix-only"
+            and args.kind == "geno"
             and not args.no_compare
             and genoio_matrix is not None
             and bgen_reader_matrix is not None

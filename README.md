@@ -111,11 +111,22 @@ bgen_ds = genoio.bgen("cohort.bgen")  # .bgen plus optional .sample
 ```
 
 Use `dosage="dosage"` for stored dosage values. BGEN Layout 2 biallelic diploid
-dosage records, including phased records, are returned as expected A1 allele
-counts:
+dosage records are returned as expected A1 allele counts. Genotype reads of
+phased BGEN records sum source haplotype probabilities to expected diploid A1
+dosage; `kind="haplo", dosage="dosage"` returns expected A1 dosage per
+haplotype row:
 
 ```python
 X = bgen_ds.read(dosage="dosage")
+H = bgen_ds.read(kind="haplo", dosage="dosage")
+```
+
+PLINK2 haplotype reads support source-encoded explicit phased hardcalls and
+explicit phased full dosages:
+
+```python
+H_hardcall = pgen_ds.read(kind="haplo", dosage="hardcall")
+H_dosage = pgen_ds.read(kind="haplo", dosage="dosage")
 ```
 
 For BGEN region reads, place a bgenix SQLite index beside the source as

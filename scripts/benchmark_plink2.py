@@ -11,6 +11,7 @@ import numpy as np
 from bench_common import benchmark, compare_summaries, positive_int
 
 SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered")
+KINDS = ("geno", "haplo-hardcall", "haplo-dosage")
 _last_variant_metadata_length: int | None = None
 
 
@@ -22,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", choices=["both", "genoio", "pgenlib"], default="both")
     parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="matrix-only")
     parser.add_argument(
+        "--kind",
+        choices=KINDS,
+        default="geno",
+        help="Matrix kind to time. Defaults to genotype hardcalls.",
+    )
+    parser.add_argument(
         "--pgenlib-path",
         type=Path,
         default=None,
@@ -31,35 +38,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_genoio_matrix_only(prefix: Path, max_variants: int) -> np.ndarray:
+def _read_options(kind: str) -> dict[str, object]:
+    options: dict[str, object] = {
+        "missing": "nan",
+        "dtype": np.float32,
+    }
+    if kind == "haplo-hardcall":
+        options["kind"] = "haplo"
+        options["dosage"] = "hardcall"
+    elif kind == "haplo-dosage":
+        options["kind"] = "haplo"
+        options["dosage"] = "dosage"
+    return options
+
+
+def _genoio_label(kind: str, scenario: str) -> str:
+    suffix = scenario.replace("-", "_")
+    kind_part = kind.replace("-", "_") if kind != "geno" else ""
+    parts = ["genoio_plink2", kind_part, suffix]
+    return "_".join(part for part in parts if part)
+
+
+def read_genoio_matrix_only(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     return next(
         genoio.pfile(prefix).iter_blocks(
             max_variants,
-            missing="nan",
-            dtype=np.float32,
+            **_read_options(kind),
         )
     )
 
 
-def read_genoio_with_variants(prefix: Path, max_variants: int) -> np.ndarray:
+def read_genoio_with_variants(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     global _last_variant_metadata_length
     matrix, variants = next(
         genoio.pfile(prefix).iter_blocks(
             max_variants,
-            missing="nan",
-            dtype=np.float32,
             return_variants=True,
+            **_read_options(kind),
         )
     )
     _last_variant_metadata_length = variants.height
     return matrix
 
 
-def read_genoio_sample_filtered(prefix: Path, max_variants: int) -> np.ndarray:
+def read_genoio_sample_filtered(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     sample_ids = _read_psam_sample_ids(prefix.with_suffix(".psam"))
@@ -67,22 +93,20 @@ def read_genoio_sample_filtered(prefix: Path, max_variants: int) -> np.ndarray:
     return next(
         genoio.pfile(prefix).iter_blocks(
             max_variants,
-            missing="nan",
-            dtype=np.float32,
             samples=sample_ids[:keep_count],
+            **_read_options(kind),
         )
     )
 
 
-def read_genoio_genotype_filtered(prefix: Path, max_variants: int) -> np.ndarray:
+def read_genoio_genotype_filtered(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
     return next(
         genoio.pfile(prefix).iter_blocks(
             max_variants,
-            missing="nan",
-            dtype=np.float32,
             variants=genoio.maf(min=0.01),
+            **_read_options(kind),
         )
     )
 
@@ -144,11 +168,17 @@ def selected_scenarios(scenario: str) -> tuple[str, ...]:
     return (scenario,)
 
 
-def benchmark_genoio_scenario(scenario: str, prefix: Path, max_variants: int, repeats: int) -> np.ndarray:
+def benchmark_genoio_scenario(
+    scenario: str,
+    kind: str,
+    prefix: Path,
+    max_variants: int,
+    repeats: int,
+) -> np.ndarray:
     if scenario == "matrix-only":
         return benchmark(
-            "genoio_plink2_matrix_only",
-            lambda: read_genoio_matrix_only(prefix, max_variants),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_matrix_only(prefix, max_variants, kind),
             repeats,
         )
     if scenario == "with-variants":
@@ -158,33 +188,38 @@ def benchmark_genoio_scenario(scenario: str, prefix: Path, max_variants: int, re
 
         def read_matrix() -> np.ndarray:
             nonlocal variant_metadata_length
-            result = read_genoio_with_variants(prefix, max_variants)
+            result = read_genoio_with_variants(prefix, max_variants, kind)
             if isinstance(result, tuple):
                 matrix, variant_metadata_length = result
                 return matrix
             variant_metadata_length = _last_variant_metadata_length
             return result
 
-        matrix = benchmark("genoio_plink2_with_variants", read_matrix, repeats)
+        matrix = benchmark(_genoio_label(kind, scenario), read_matrix, repeats)
         print(f"  variant_metadata length={variant_metadata_length}")
         return matrix
     if scenario == "sample-filtered":
         return benchmark(
-            "genoio_plink2_sample_filtered",
-            lambda: read_genoio_sample_filtered(prefix, max_variants),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_sample_filtered(prefix, max_variants, kind),
             repeats,
         )
     if scenario == "genotype-filtered":
         return benchmark(
-            "genoio_plink2_genotype_filtered",
-            lambda: read_genoio_genotype_filtered(prefix, max_variants),
+            _genoio_label(kind, scenario),
+            lambda: read_genoio_genotype_filtered(prefix, max_variants, kind),
             repeats,
         )
     raise ValueError(f"unknown scenario: {scenario}")
 
 
-def print_pgenlib_skip(scenario: str) -> None:
-    message = f"skipped pgenlib comparison for {scenario}: pgenlib does not provide the same metadata/filter contract"
+def print_pgenlib_skip(scenario: str, kind: str) -> None:
+    if kind != "geno":
+        message = f"skipped pgenlib comparison for {kind} {scenario}: benchmark only compares genotype hardcalls"
+    else:
+        message = (
+            f"skipped pgenlib comparison for {scenario}: pgenlib does not provide the same metadata/filter contract"
+        )
     print(message)
 
 
@@ -194,13 +229,14 @@ def main() -> None:
         genoio_matrix = None
         pgenlib_matrix = None
         if args.backend in {"both", "genoio"}:
-            genoio_matrix = benchmark_genoio_scenario(scenario, args.prefix, args.max_variants, args.repeats)
-        if scenario == "matrix-only" and args.backend in {"both", "pgenlib"}:
+            genoio_matrix = benchmark_genoio_scenario(scenario, args.kind, args.prefix, args.max_variants, args.repeats)
+        if scenario == "matrix-only" and args.kind == "geno" and args.backend in {"both", "pgenlib"}:
             pgenlib_matrix = benchmark("pgenlib_pgenreader", lambda: read_pgenlib(args), args.repeats)
-        elif scenario != "matrix-only" and args.backend in {"both", "pgenlib"}:
-            print_pgenlib_skip(scenario)
+        elif args.backend in {"both", "pgenlib"}:
+            print_pgenlib_skip(scenario, args.kind)
         if (
             scenario == "matrix-only"
+            and args.kind == "geno"
             and not args.no_compare
             and genoio_matrix is not None
             and pgenlib_matrix is not None
