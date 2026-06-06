@@ -54,6 +54,8 @@ _RUST_ERROR_MAP = (
     (_rust.RustInvalidOptionError, InvalidOptionError),
     (_rust.RustInvalidSourceError, InvalidSourceError),
 )
+# Rust exposes private exception classes so Python can preserve the public
+# genoio error hierarchy without parsing backend message text.
 _RUST_PUBLIC_ERROR_TYPES = tuple(error_type for error_type, _ in _RUST_ERROR_MAP)
 
 
@@ -85,10 +87,30 @@ class _ReadOptions:
 
 @dataclass(frozen=True, slots=True)
 class _ValidatedReadOptions:
+    # Values that have crossed this boundary are safe to send to Rust or use
+    # for Python-side matrix assembly without rechecking user input types.
     dtype: np.dtype[Any]
     missing: str
     sparse_format: str | None
     variant_filter_ir: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadPayload:
+    # Internal reads keep matrix and metadata separate. Public methods decide
+    # later whether to expose metadata by returning a tuple.
+    matrix: MatrixResult
+    samples: pl.DataFrame | None
+    variants: pl.DataFrame | None
+
+    def to_result(self, options: _ReadOptions) -> ReadResult:
+        return read_result_tuple(
+            self.matrix,
+            self.samples,
+            self.variants,
+            return_samples=options.return_samples,
+            return_variants=options.return_variants,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,17 +638,17 @@ class Dataset:
         while True:
             # Variant windows are expressed in retained-variant coordinates.
             # Rust applies metadata/genotype filters before deciding whether a
-            # retained variant falls into this block.
-            block = self._read_validated(
+            # retained variant belongs to this block.
+            payload = self._read_payload(
                 read_options=read_options,
                 validated_options=validated_options,
                 variant_window={"start": start, "len": size},
             )
-            genotype_matrix = cast(MatrixResult, block[0] if isinstance(block, tuple) else block)
-            if genotype_matrix.shape[1] == 0:
+            variant_count = payload.matrix.shape[1]
+            if variant_count == 0:
                 break
-            yield block
-            if genotype_matrix.shape[1] < size:
+            yield payload.to_result(read_options)
+            if variant_count < size:
                 break
             start += size
 
@@ -637,6 +659,22 @@ class Dataset:
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
     ) -> ReadResult:
+        # Whole reads expose the public return contract immediately. Block
+        # reads use _read_payload first so pagination can inspect matrix shape
+        # without unpacking the public tuple form.
+        return self._read_payload(
+            read_options=read_options,
+            validated_options=validated_options,
+            variant_window=variant_window,
+        ).to_result(read_options)
+
+    def _read_payload(
+        self,
+        *,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+        variant_window: dict[str, int] | None,
+    ) -> _ReadPayload:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
             "samples": None if read_options.samples is None else list(read_options.samples),
@@ -646,6 +684,8 @@ class Dataset:
             "return_samples": read_options.return_samples,
             "return_variants": read_options.return_variants,
             "matrix_only": (
+                # The Rust readers can skip metadata work only when Python will
+                # not need metadata for filtering or for the returned result.
                 not read_options.return_samples
                 and not read_options.return_variants
                 and read_options.samples is None
@@ -682,13 +722,7 @@ class Dataset:
             else None
         )
         variant_metadata = variants_frame(rust_result["variants"]) if read_options.return_variants else None
-        return read_result_tuple(
-            genotype_matrix,
-            sample_metadata,
-            variant_metadata,
-            return_samples=read_options.return_samples,
-            return_variants=read_options.return_variants,
-        )
+        return _ReadPayload(genotype_matrix, sample_metadata, variant_metadata)
 
     def _read_from_rust(
         self,
@@ -742,6 +776,8 @@ class Dataset:
                 "use dense haplotype reads with sparse=False"
             )
         if self.source.format.value == "bgen":
+            # BGEN has no hardcall read path in this API. Layout 2 probability
+            # records are exposed as dosage-backed genotype or haplotype values.
             if kind == "haplo":
                 if dosage == "dosage" and sparse_format is None:
                     return
@@ -938,6 +974,8 @@ def _variant_filter_ir(variants: Any) -> dict[str, Any] | None:
         if not isinstance(variant_id, str):
             raise InvalidOptionError("variant ID filters must contain only strings")
         variant_ids.append(variant_id)
+    # ID lists share the same Rust filter path as declarative predicates.
+    # This keeps variant selection order source-defined for both forms.
     return id_in(variant_ids).to_ir()
 
 
@@ -1007,6 +1045,8 @@ def _read_options_with_defaults(read_options: Mapping[str, object]) -> _ReadOpti
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
+    # Iterator methods accept **read_options, so they reconstruct the same
+    # option object that read() would have built from explicit parameters.
     merged: dict[str, Any] = {**_READ_OPTION_DEFAULTS, **read_options}
     return _ReadOptions(
         kind=merged["kind"],
