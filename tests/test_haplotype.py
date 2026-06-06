@@ -554,7 +554,7 @@ def test_plink2_haplotype_metadata_filter_skips_unsupported_record(tmp_path):
     assert variants["id"].to_list() == ["rs1"]
 
 
-def test_plink2_sparse_hardcall_haplotypes_match_dense_window(tmp_path):
+def test_plink2_sparse_hardcall_haplotypes_match_dense(tmp_path):
     import genoio
 
     dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
@@ -562,7 +562,7 @@ def test_plink2_sparse_hardcall_haplotypes_match_dense_window(tmp_path):
     dense, dense_samples, dense_variants = dataset.read(
         kind="haplo",
         dosage="hardcall",
-        variants=["rs1"],
+        samples=["S1", "S2"],
         return_samples=True,
         return_variants=True,
     )
@@ -570,7 +570,7 @@ def test_plink2_sparse_hardcall_haplotypes_match_dense_window(tmp_path):
         kind="haplo",
         dosage="hardcall",
         sparse=True,
-        variants=["rs1"],
+        samples=["S1", "S2"],
         return_samples=True,
         return_variants=True,
     )
@@ -605,7 +605,15 @@ def test_plink2_sparse_hardcall_haplotype_blocks_concatenate(tmp_path):
     dataset = genoio.pfile(write_ld_phased_hardcall_plink2(tmp_path))
 
     full = dataset.read(kind="haplo", dosage="hardcall", sparse=True, samples=["S1", "S2"])
-    blocks = list(dataset.iter_blocks(size=1, kind="haplo", dosage="hardcall", sparse=True, samples=["S1", "S2"]))
+    blocks = list(
+        dataset.iter_blocks(
+            size=1,
+            kind="haplo",
+            dosage="hardcall",
+            sparse=True,
+            samples=["S1", "S2"],
+        )
+    )
 
     assert len(blocks) == 2
     assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)

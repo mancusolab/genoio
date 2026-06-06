@@ -908,14 +908,16 @@ fn dense_haplotype_hardcalls_to_sparse(dense: DenseGenotypeMatrix) -> Result<Spa
     indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut column = Vec::with_capacity(dense.n_samples);
 
     for col in 0..dense.n_variants {
-        column.clear();
         for row in 0..dense.n_samples {
-            column.push(dense.values[row * dense.n_variants + col]);
+            let value = dense.values[row * dense.n_variants + col];
+            if value != 0.0 {
+                indices.push(row);
+                data.push(value);
+            }
         }
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &column);
+        indptr.push(indices.len());
     }
 
     SparseGenotypeMatrix::new(

@@ -28,8 +28,8 @@ dosages with `dosage="dosage"`. BGEN haplotype reads support source-encoded
 phased Layout 2 biallelic diploid probabilities with `dosage="dosage"` and
 return expected A1 dosage per haplotype row. Sparse PLINK2 explicit phased
 hardcall haplotypes are supported. Sparse dosage, sparse PLINK2 dosage
-haplotypes, sparse BGEN haplotypes, and PLINK1 dosage are not implemented yet and raise
-`genoio.UnsupportedRepresentation`.
+haplotypes, sparse BGEN haplotypes, and PLINK1 dosage are not implemented yet
+and raise `genoio.UnsupportedRepresentation`.
 
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele

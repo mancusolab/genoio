@@ -591,10 +591,8 @@ fn plink2_haplotype_dense_ld_compressed_window_matches_full_read_slice() {
 }
 
 #[test]
-fn plink2_haplotype_sparse_window_reconstructs_dense_hardcalls() {
-    let dir = unique_dir("plink2-haplo-sparse-hardcall-window");
-    // v2 contains retained missing calls in this fixture; the first-variant
-    // window proves sparse hardcall support on a no-missing retained record.
+fn plink2_haplotype_sparse_reconstructs_dense_hardcalls() {
+    let dir = unique_dir("plink2-haplo-sparse-hardcall");
     let record_1 = [0x21, 0x00];
     let record_2 = [0x35, 0x02];
     let pgen_bytes = explicit_phased_hardcall_pgen(&[&record_1, &record_2], 3);
@@ -607,15 +605,15 @@ fn plink2_haplotype_sparse_window_reconstructs_dense_hardcalls() {
 1 20 rs2 C T 40
 ",
     );
-    let window = VariantWindow { start: 0, len: 1 };
+    let keep = vec!["S1".to_string(), "S2".to_string()];
 
     let dense = genoio_io::read_plink2_haplotypes_dense_windowed(
         &pgen,
         &pvar,
         &psam,
+        Some(&keep),
         None,
         None,
-        Some(window),
         false,
     )
     .expect("dense explicit phased hardcall pgen should decode");
@@ -623,9 +621,9 @@ fn plink2_haplotype_sparse_window_reconstructs_dense_hardcalls() {
         &pgen,
         &pvar,
         &psam,
+        Some(&keep),
         None,
         None,
-        Some(window),
     )
     .expect("sparse explicit phased hardcall pgen should decode");
 
@@ -644,7 +642,14 @@ fn plink2_haplotype_sparse_window_reconstructs_dense_hardcalls() {
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>()
     );
-    assert_eq!(sparse.variants[0].id, "rs1");
+    assert_eq!(
+        sparse
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1", "rs2"]
+    );
 }
 
 #[test]
