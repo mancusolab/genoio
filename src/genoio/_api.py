@@ -109,18 +109,19 @@ class Dataset:
           `"haplo"` for one row per source haplotype. VCF/BCF haplotype reads
           use phased hardcall `FORMAT/GT` records. PLINK2 haplotype reads use
           source-encoded explicit phased hardcall or phased full-dosage records.
-          BGEN haplotype reads use source-encoded phased Layout 2 biallelic
-          diploid probabilities.
+          BGEN haplotype reads use source-encoded phased BGEN v1.2+ Layout 2
+          biallelic diploid probabilities.
         - `dosage`: `"hardcall"` reads allele counts from hard calls.
           `"dosage"` reads dosage-backed genotype values when the source
           supports them. Dense genotype dosage reads are supported for VCF
-          `FORMAT/DS`, PLINK2 unphased biallelic dosage records, and BGEN Layout
-          2 biallelic diploid dosage records. Genotype reads of phased BGEN
-          records collapse source haplotype probabilities to expected diploid A1
-          dosage. PLINK2 dense haplotype reads support explicit phased hardcall
-          records with `dosage="hardcall"` and explicit phased full-dosage
-          records with `dosage="dosage"`. BGEN dense haplotype dosage reads
-          return expected A1 dosage per haplotype row. BGEN sample IDs must be
+          `FORMAT/DS`, PLINK2 unphased biallelic dosage records, and BGEN
+          v1.2+ Layout 2 biallelic diploid dosage records. Genotype reads of
+          phased BGEN records collapse source haplotype probabilities to
+          expected diploid A1 dosage. PLINK2 dense haplotype reads support
+          explicit phased hardcall records with `dosage="hardcall"` and
+          explicit phased full-dosage records with `dosage="dosage"`. BGEN
+          dense haplotype dosage reads return expected A1 dosage per haplotype
+          row. BGEN sample IDs must be
           embedded in the `.bgen` file or supplied by a companion `.sample`
           file. Concrete BGEN region filters use a same-path `.bgen.bgi` index
           when present.

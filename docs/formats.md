@@ -9,7 +9,7 @@ BGEN reads can instead use stored dosage values with `dosage="dosage"`.
 | VCF/BCF | `.vcf`, `.vcf.gz`, `.bcf` | yes; dense `FORMAT/DS` dosage supported | phased hardcall `FORMAT/GT` records | Indexed region filters use `.tbi` or `.csi` when available. |
 | PLINK1 | `.bed` + `.bim` + `.fam` | yes | no | Variant-major BED files are supported. |
 | PLINK2 | `.pgen` + `.pvar` or `.pvar.zst` + `.psam` | yes; dense unphased biallelic dosage supported | explicit phased hardcalls with `dosage="hardcall"`; dense explicit phased dosages with `dosage="dosage"` | Biallelic hard-call PGEN records are supported. Sparse PLINK2 hardcall haplotypes are supported; sparse PLINK2 dosage haplotypes are not implemented. |
-| BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | dense Layout 2 phased biallelic diploid probabilities with `kind="haplo", dosage="dosage"` | Dosage-backed BGEN reads use expected A1 dosage values. Concrete region filters use a same-path `.bgen.bgi` index when present. |
+| BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | dense BGEN v1.2+ Layout 2 phased biallelic diploid probabilities with `kind="haplo", dosage="dosage"` | Dosage-backed BGEN reads use expected A1 dosage values. Concrete region filters use a same-path `.bgen.bgi` index when present. |
 
 ---
 
@@ -42,10 +42,11 @@ X = genoio.bgen("cohort.bgen").read(dosage="dosage")
 ```
 
 BGEN reads require real sample IDs, either embedded in the `.bgen` file or
-provided by the same-prefix `.sample` file. Layout 2 biallelic diploid dosage
-records are returned as expected A1 allele dosages. Genotype reads of phased
-BGEN records collapse the two source haplotype probabilities to expected
-diploid A1 dosage; haplotype reads return expected A1 dosage per haplotype row.
+provided by the same-prefix `.sample` file. BGEN v1.2+ Layout 2 biallelic
+diploid dosage records are returned as expected A1 allele dosages. Genotype
+reads of phased BGEN records collapse the two source haplotype probabilities to
+expected diploid A1 dosage; haplotype reads return expected A1 dosage per
+haplotype row.
 Matrix-only BGEN reads avoid returning sample and variant metadata unless
 `return_samples=True` or `return_variants=True` is requested.
 
@@ -63,9 +64,10 @@ metadata or genotype filter path after candidate records are read.
 
 - `dosage="dosage"` currently supports dense VCF `FORMAT/DS` reads, dense
   PLINK2 unphased biallelic genotype dosage reads, dense PLINK2 explicit
-  phased full-dosage haplotype reads, and dense BGEN Layout 2 biallelic diploid
-  dosage reads. Phased BGEN records can return haplotype rows or collapse to
-  expected diploid A1 dosage. Sparse dosage reads are not implemented.
+  phased full-dosage haplotype reads, and dense BGEN v1.2+ Layout 2 biallelic
+  diploid dosage reads. Phased BGEN records can return haplotype rows or
+  collapse to expected diploid A1 dosage. Sparse dosage reads are not
+  implemented.
 - PLINK1 has no dosage representation in BED files.
 - PLINK2 support is limited to biallelic hard-call, unphased genotype dosage,
   explicit phased hardcall haplotype, and explicit phased full-dosage haplotype

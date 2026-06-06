@@ -110,9 +110,9 @@ pgen_ds = genoio.pfile("cohort.pgen") # .pgen/.pvar[.zst]/.psam
 bgen_ds = genoio.bgen("cohort.bgen")  # .bgen plus optional .sample
 ```
 
-Use `dosage="dosage"` for stored dosage values. BGEN Layout 2 biallelic diploid
-dosage records are returned as expected A1 allele counts. Genotype reads of
-phased BGEN records sum source haplotype probabilities to expected diploid A1
+Use `dosage="dosage"` for stored dosage values. BGEN v1.2+ Layout 2 biallelic
+diploid dosage records are returned as expected A1 allele counts. Genotype reads
+of phased BGEN records sum source haplotype probabilities to expected diploid A1
 dosage; `kind="haplo", dosage="dosage"` returns expected A1 dosage per
 haplotype row:
 

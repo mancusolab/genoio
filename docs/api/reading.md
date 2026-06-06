@@ -17,19 +17,19 @@ By default, `kind="geno"` returns diploid hardcall allele counts: `0`, `1`, or
 missing-data policy. The `dosage` option controls this genotype value source:
 `dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
 dosage-backed values. Dense genotype dosage reads are supported for VCF
-`FORMAT/DS`, PLINK2 unphased biallelic dosage records, and BGEN Layout 2
-biallelic diploid dosage records. Genotype reads of phased BGEN records collapse
-the two source haplotype probabilities to expected diploid A1 dosage.
+`FORMAT/DS`, PLINK2 unphased biallelic dosage records, and BGEN v1.2+ Layout 2
+biallelic diploid dosage records. Genotype reads of phased BGEN records
+collapse the two source haplotype probabilities to expected diploid A1 dosage.
 
 Use `kind="haplo"` for one row per source haplotype. VCF/BCF haplotype reads
 use phased hardcall `FORMAT/GT`. PLINK2 haplotype reads support source-encoded
 explicit phased hardcalls with `dosage="hardcall"` and explicit phased full
 dosages with `dosage="dosage"`. BGEN haplotype reads support source-encoded
-phased Layout 2 biallelic diploid probabilities with `dosage="dosage"` and
-return expected A1 dosage per haplotype row. Sparse PLINK2 explicit phased
-hardcall haplotypes are supported. Sparse dosage, sparse PLINK2 dosage
-haplotypes, sparse BGEN haplotypes, and PLINK1 dosage are not implemented yet
-and raise `genoio.UnsupportedRepresentation`.
+phased BGEN v1.2+ Layout 2 biallelic diploid probabilities with
+`dosage="dosage"` and return expected A1 dosage per haplotype row. Sparse
+PLINK2 explicit phased hardcall haplotypes are supported. Sparse dosage, sparse
+PLINK2 dosage haplotypes, sparse BGEN haplotypes, and PLINK1 dosage are not
+implemented yet and raise `genoio.UnsupportedRepresentation`.
 
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele
@@ -206,9 +206,9 @@ PLINK2 explicit phased full-dosage records are dosage-backed haplotype rows:
 H = genoio.pfile("phased_dosage").read(kind="haplo", dosage="dosage")
 ```
 
-BGEN haplotype reads require Layout 2 phased biallelic diploid probability
-records and return source-encoded phased dosage as expected A1 dosage per
-haplotype row:
+BGEN haplotype reads require BGEN v1.2+ Layout 2 phased biallelic diploid
+probability records and return source-encoded phased dosage as expected A1
+dosage per haplotype row:
 
 ```python
 H = genoio.bgen("phased.bgen").read(kind="haplo", dosage="dosage")

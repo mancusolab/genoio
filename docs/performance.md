@@ -50,9 +50,10 @@ The genotype-filtered scenario returned shape `(3202, 1000)`, genotype sum
 variants, but bounded block reads stop once the requested number of retained
 variants has been returned.
 
-The local BGEN fixture stores phased Layout 2 biallelic diploid dosage records.
-`genoio` collapses those haplotype probabilities to expected diploid A1 dosage.
-On the same machine and release build, BGEN scenario medians were:
+The local BGEN fixture stores phased BGEN v1.2+ Layout 2 biallelic diploid
+dosage records. `genoio` collapses those haplotype probabilities to expected
+diploid A1 dosage. On the same machine and release build, BGEN scenario medians
+were:
 
 | Scenario | What it measures | Median |
 |---|---|---:|
@@ -96,7 +97,7 @@ python scripts/benchmark_plink2.py --scenario all --max-variants 1000 --repeats 
 python scripts/benchmark_plink2.py --scenario matrix-only --max-variants 10000 --repeats 5 --no-compare
 ```
 
-For BGEN, use a Layout 2 biallelic diploid dosage fixture:
+For BGEN, use a BGEN v1.2+ Layout 2 biallelic diploid dosage fixture:
 
 ```bash
 python scripts/benchmark_bgen.py --scenario all --max-variants 1000 --repeats 5

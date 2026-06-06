@@ -95,8 +95,8 @@ each result contains the variants retained inside that region.
 
 VCF/BCF haplotype reads use phased hardcall `GT` records. PLINK2 haplotype
 reads support explicit phased hardcalls with `dosage="hardcall"` and explicit
-phased full dosages with `dosage="dosage"`. BGEN haplotype reads support Layout
-2 phased biallelic diploid probabilities with `kind="haplo",
+phased full dosages with `dosage="dosage"`. BGEN haplotype reads support BGEN
+v1.2+ Layout 2 phased biallelic diploid probabilities with `kind="haplo",
 dosage="dosage"`, returned as expected A1 dosage per haplotype row.
 
 `genoio` does not convert probabilities into hardcalls. Sparse PLINK2 dosage
