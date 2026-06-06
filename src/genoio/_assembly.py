@@ -28,12 +28,14 @@ _VARIANT_COLUMNS = [
 MetadataColumns = dict[str, Sequence[Any]]
 
 
-def samples_frame(columns: MetadataColumns) -> pl.DataFrame:
+def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool = False) -> pl.DataFrame:
     r"""Build the public sample metadata frame from Rust sample columns.
 
     **Arguments:**
 
     - `columns`: column-oriented sample payload returned by the Rust extension.
+    - `include_haplotype_columns`: preserve haplotype row mapping columns even
+      when the retained sample set is empty.
 
     **Returns:**
 
@@ -44,7 +46,7 @@ def samples_frame(columns: MetadataColumns) -> pl.DataFrame:
         schema=_SAMPLE_COLUMNS,
     )
     haplotype_indices = columns["haplotype_index"]
-    if haplotype_indices and all(index is not None for index in haplotype_indices):
+    if include_haplotype_columns or (haplotype_indices and all(index is not None for index in haplotype_indices)):
         return frame.with_columns(
             pl.Series("source_sample_index", columns["source_sample_index"]),
             pl.Series("haplotype_index", haplotype_indices),

@@ -470,6 +470,47 @@ def test_dense_bgen_haplotype_dosage_read_returns_haplotype_rows(tmp_path):
     assert samples["haplotype_index"].to_list() == [0, 1, 0, 1]
 
 
+def test_empty_bgen_haplotype_dosage_read_preserves_haplotype_sample_columns(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
+
+    H, samples = dataset.read(kind="haplo", dosage="dosage", samples=[], return_samples=True)
+
+    assert H.shape == (0, 2)
+    assert samples.columns == [
+        "fid",
+        "iid",
+        "father",
+        "mother",
+        "sex",
+        "phenotype",
+        "source_sample_index",
+        "haplotype_index",
+    ]
+    assert samples.to_dict(as_series=False) == {
+        "fid": [],
+        "iid": [],
+        "father": [],
+        "mother": [],
+        "sex": [],
+        "phenotype": [],
+        "source_sample_index": [],
+        "haplotype_index": [],
+    }
+
+
+def test_empty_bgen_genotype_dosage_read_omits_haplotype_sample_columns(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path))
+
+    G, samples = dataset.read(dosage="dosage", samples=[], return_samples=True)
+
+    assert G.shape == (0, 2)
+    assert samples.columns == ["fid", "iid", "father", "mother", "sex", "phenotype"]
+
+
 def test_dense_bgen_dosage_default_missing_policy_returns_nan(tmp_path):
     import genoio
 

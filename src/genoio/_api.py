@@ -345,7 +345,14 @@ class Dataset:
             )
         # Metadata frames are assembled only when requested. Large PLINK2
         # block reads can otherwise avoid parsing full variant metadata.
-        sample_metadata = samples_frame(rust_result["samples"]) if read_options.return_samples else None
+        sample_metadata = (
+            samples_frame(
+                rust_result["samples"],
+                include_haplotype_columns=read_options.kind == "haplo",
+            )
+            if read_options.return_samples
+            else None
+        )
         variant_metadata = variants_frame(rust_result["variants"]) if read_options.return_variants else None
         return read_result_tuple(
             genotype_matrix,
