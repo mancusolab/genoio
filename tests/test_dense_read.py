@@ -374,6 +374,55 @@ def write_phased_dosage_plink2(tmp_path: Path, *, unphased_second_variant: bool 
     return prefix
 
 
+def write_ld_phased_hardcall_plink2(tmp_path: Path) -> Path:
+    prefix = tmp_path / "ld_phased_hardcall"
+    record_1 = bytes([0x21, 0x00])
+    record_2 = bytes([0x02, 0x01, 0x0D, 0x01, 0x02])
+    _write_variable_width_plink2(prefix, [0x10, 0x12], [record_1, record_2], n_samples=3)
+    _write_plink2_pvar(prefix)
+    _write_plink2_psam(prefix)
+    return prefix
+
+
+def write_ld_phased_dosage_plink2(tmp_path: Path) -> Path:
+    prefix = tmp_path / "ld_phased_dosage"
+    record_1 = (
+        bytes([0x25])
+        + _plink2_scaled_dosage(1.0)
+        + _plink2_scaled_dosage(0.5)
+        + _plink2_scaled_dosage(2.0)
+        + _plink2_scaled_phase_delta(0.25, 0.75)
+        + _plink2_scaled_phase_delta(0.0, 0.5)
+        + _plink2_scaled_phase_delta(1.0, 1.0)
+    )
+    record_2 = (
+        bytes([0x03, 0x00, 0x00, 0x01, 0x01])
+        + _plink2_scaled_dosage(0.0)
+        + _plink2_scaled_dosage(0.2)
+        + _plink2_scaled_dosage(0.4)
+        + _plink2_scaled_phase_delta(0.0, 0.0)
+        + _plink2_scaled_phase_delta(0.1, 0.1)
+        + _plink2_scaled_phase_delta(0.2, 0.2)
+    )
+    _write_variable_width_plink2(prefix, [0xC0, 0xC2], [record_1, record_2], n_samples=3)
+    _write_plink2_pvar(prefix)
+    _write_plink2_psam(prefix)
+    return prefix
+
+
+def write_sample_filtered_unphased_hardcall_plink2(tmp_path: Path) -> Path:
+    prefix = tmp_path / "sample_filtered_unphased_hardcall"
+    _write_variable_width_plink2(prefix, [0x10], [bytes([0x15, 0x0D, 0x02])], n_samples=3)
+    prefix.with_suffix(".pvar").write_text(
+        """\
+#CHROM POS ID REF ALT QUAL
+1 10 rs1 A G 30
+"""
+    )
+    _write_plink2_psam(prefix)
+    return prefix
+
+
 def _write_variable_width_plink2(
     prefix: Path,
     record_types: list[int],

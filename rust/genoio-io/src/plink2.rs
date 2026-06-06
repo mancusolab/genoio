@@ -596,6 +596,13 @@ pub fn read_plink2_haplotypes_dense_windowed(
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         diagnostics.candidate_variants += 1;
+        let main_track_cursor = read_plink2_variant_haplotype_main_track(
+            pgen,
+            &mut file,
+            &header,
+            variant_index,
+            &mut decoder_state,
+        )?;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -619,20 +626,12 @@ pub fn read_plink2_haplotypes_dense_windowed(
             PartialFilterDecision::NeedGenotypes => {}
         }
 
-        read_plink2_variant_haplotype_hardcalls(
-            pgen,
-            &mut file,
-            &header,
-            variant_index,
-            &selection.source_indices,
-            &mut decoder_state,
-            &mut haplotype_state,
-        )?;
-        if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
-            let stats = compute_dosage_variant_stats(
-                &haplotype_state.selected_collapsed_values,
-                &haplotype_state.selected_collapsed_missing,
-            )?;
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        if needs_genotype_decision {
+            let stats = decoder_state
+                .packed
+                .stats_for_selected(&selection.source_indices)?;
             if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
                 diagnostics.dropped_genotype_variants += 1;
                 continue;
@@ -649,6 +648,15 @@ pub fn read_plink2_haplotypes_dense_windowed(
                 continue;
             }
         }
+        decode_plink2_haplotype_hardcall_aux(
+            pgen,
+            &header,
+            variant_index,
+            main_track_cursor,
+            &selection.source_indices,
+            &decoder_state,
+            &mut haplotype_state,
+        )?;
         if !matrix_only {
             variants.push(variant);
         }
@@ -739,6 +747,13 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         diagnostics.candidate_variants += 1;
+        let main_track_cursor = read_plink2_variant_haplotype_main_track(
+            pgen,
+            &mut file,
+            &header,
+            variant_index,
+            &mut decoder_state,
+        )?;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -762,16 +777,18 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
             PartialFilterDecision::NeedGenotypes => {}
         }
 
-        read_plink2_variant_haplotype_dosage(
-            pgen,
-            &mut file,
-            &header,
-            variant_index,
-            &selection.source_indices,
-            &mut decoder_state,
-            &mut haplotype_state,
-        )?;
-        if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        if needs_genotype_decision {
+            decode_plink2_haplotype_dosage_aux(
+                pgen,
+                &header,
+                variant_index,
+                main_track_cursor,
+                &selection.source_indices,
+                &decoder_state,
+                &mut haplotype_state,
+            )?;
             let stats = compute_dosage_variant_stats(
                 &haplotype_state.selected_collapsed_values,
                 &haplotype_state.selected_collapsed_missing,
@@ -791,6 +808,16 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
                 }
                 continue;
             }
+        } else {
+            decode_plink2_haplotype_dosage_aux(
+                pgen,
+                &header,
+                variant_index,
+                main_track_cursor,
+                &selection.source_indices,
+                &decoder_state,
+                &mut haplotype_state,
+            )?;
         }
         if !matrix_only {
             variants.push(variant);
@@ -2301,23 +2328,48 @@ fn read_variable_width_dosage_variant_values(
     )
 }
 
-fn read_plink2_variant_haplotype_hardcalls(
+fn read_plink2_variant_haplotype_main_track(
     path: &Path,
     file: &mut File,
     header: &PgenHeader,
     variant_index: usize,
-    source_indices: &[usize],
     decoder_state: &mut PgenDecoderState,
+) -> Result<usize> {
+    validate_variable_width_haplotype_layout(path, header)?;
+    read_variable_width_record(path, file, header, variant_index, decoder_state)?;
+    let cursor = decode_variable_width_main_track(
+        path,
+        decoder_state.record.as_slice(),
+        header.record_types[variant_index],
+        header.sample_ct,
+        &decoder_state.previous_non_ld_packed,
+        decoder_state.has_previous_non_ld,
+        &mut decoder_state.packed,
+    )?;
+    update_variable_width_ld_state(header.record_types[variant_index], decoder_state);
+    Ok(cursor)
+}
+
+fn validate_variable_width_haplotype_layout(path: &Path, header: &PgenHeader) -> Result<()> {
+    if matches!(header.layout, PgenLayout::VariableWidth) {
+        Ok(())
+    } else {
+        Err(MetadataError::parse(
+            path,
+            "plink2 haplotype reads require variable-width explicit phased records",
+        ))
+    }
+}
+
+fn decode_plink2_haplotype_hardcall_aux(
+    path: &Path,
+    header: &PgenHeader,
+    variant_index: usize,
+    cursor: usize,
+    source_indices: &[usize],
+    decoder_state: &PgenDecoderState,
     haplotype_state: &mut PgenHaplotypeDecodeState,
 ) -> Result<()> {
-    if !matches!(header.layout, PgenLayout::VariableWidth) {
-        return Err(MetadataError::parse(
-            path,
-            "plink2 haplotype hardcall reads require variable-width explicit phased records",
-        ));
-    }
-    read_variable_width_record(path, file, header, variant_index, decoder_state)?;
-    let record = decoder_state.record.as_slice();
     let record_type = header.record_types[variant_index];
     if record_type & 0x10 == 0 {
         return Err(MetadataError::parse(
@@ -2331,44 +2383,25 @@ fn read_plink2_variant_haplotype_hardcalls(
             "pgen haplotype hardcall read does not accept dosage records",
         ));
     }
-    let cursor = decode_variable_width_main_track(
+    decode_hardcall_phase_track(
         path,
-        record,
-        record_type,
-        header.sample_ct,
-        &decoder_state.previous_non_ld_packed,
-        decoder_state.has_previous_non_ld,
-        &mut decoder_state.packed,
-    )?;
-    let result = decode_hardcall_phase_track(
-        path,
-        record,
+        decoder_state.record.as_slice(),
         cursor,
         source_indices,
         &decoder_state.packed,
         haplotype_state,
-    );
-    update_variable_width_ld_state(record_type, decoder_state);
-    result
+    )
 }
 
-fn read_plink2_variant_haplotype_dosage(
+fn decode_plink2_haplotype_dosage_aux(
     path: &Path,
-    file: &mut File,
     header: &PgenHeader,
     variant_index: usize,
+    cursor: usize,
     source_indices: &[usize],
-    decoder_state: &mut PgenDecoderState,
+    decoder_state: &PgenDecoderState,
     haplotype_state: &mut PgenHaplotypeDecodeState,
 ) -> Result<()> {
-    if !matches!(header.layout, PgenLayout::VariableWidth) {
-        return Err(MetadataError::parse(
-            path,
-            "plink2 haplotype dosage reads require variable-width explicit phased dosage records",
-        ));
-    }
-    read_variable_width_record(path, file, header, variant_index, decoder_state)?;
-    let record = decoder_state.record.as_slice();
     let record_type = header.record_types[variant_index];
     let dosage_bits = (record_type >> 5) & 0x03;
     if record_type & 0x80 == 0 {
@@ -2383,25 +2416,14 @@ fn read_plink2_variant_haplotype_dosage(
             "unsupported pgen phased dosage representation; only full dosage tracks are supported",
         ));
     }
-    let cursor = decode_variable_width_main_track(
+    decode_full_phased_dosage_tracks(
         path,
-        record,
-        record_type,
-        header.sample_ct,
-        &decoder_state.previous_non_ld_packed,
-        decoder_state.has_previous_non_ld,
-        &mut decoder_state.packed,
-    )?;
-    let result = decode_full_phased_dosage_tracks(
-        path,
-        record,
+        decoder_state.record.as_slice(),
         cursor,
         header.sample_ct,
         source_indices,
         haplotype_state,
-    );
-    update_variable_width_ld_state(record_type, decoder_state);
-    result
+    )
 }
 
 fn read_variable_width_record(
@@ -2505,32 +2527,36 @@ fn decode_hardcall_phase_track(
                     true
                 };
                 heterozygote_index += 1;
-                if !phase_present {
+                if !phase_present && selected_index.is_some() {
                     return Err(MetadataError::parse(
                         path,
                         "unphased pgen heterozygous hardcall retained in haplotype read",
                     ));
                 }
-                let swapped =
-                    bit_is_set_from_abs(record, phaseinfo_start_bit + phased_heterozygote_index);
-                phased_heterozygote_index += 1;
-                if let Some(selected_index) = selected_index {
-                    if swapped {
-                        set_selected_haplotype_pair(
-                            haplotype_state,
-                            selected_index,
-                            1.0,
-                            0.0,
-                            false,
-                        );
-                    } else {
-                        set_selected_haplotype_pair(
-                            haplotype_state,
-                            selected_index,
-                            0.0,
-                            1.0,
-                            false,
-                        );
+                if phase_present {
+                    let swapped = bit_is_set_from_abs(
+                        record,
+                        phaseinfo_start_bit + phased_heterozygote_index,
+                    );
+                    phased_heterozygote_index += 1;
+                    if let Some(selected_index) = selected_index {
+                        if swapped {
+                            set_selected_haplotype_pair(
+                                haplotype_state,
+                                selected_index,
+                                1.0,
+                                0.0,
+                                false,
+                            );
+                        } else {
+                            set_selected_haplotype_pair(
+                                haplotype_state,
+                                selected_index,
+                                0.0,
+                                1.0,
+                                false,
+                            );
+                        }
                     }
                 }
             }

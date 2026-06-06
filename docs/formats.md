@@ -8,8 +8,8 @@ BGEN reads can instead use stored dosage values with `dosage="dosage"`.
 |---|---|---:|---:|---|
 | VCF/BCF | `.vcf`, `.vcf.gz`, `.bcf` | yes; dense `FORMAT/DS` dosage supported | phased VCF only | Indexed region filters use `.tbi` or `.csi` when available. |
 | PLINK1 | `.bed` + `.bim` + `.fam` | yes | no | Variant-major BED files are supported. |
-| PLINK2 | `.pgen` + `.pvar` or `.pvar.zst` + `.psam` | yes; dense unphased biallelic dosage supported | no | Biallelic hard-call PGEN records are supported. |
-| BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | no | Layout 2 biallelic diploid dosages are returned as expected A1 counts; phased records are collapsed to diploid dosage. Concrete region filters use a same-path `.bgen.bgi` index when present. |
+| PLINK2 | `.pgen` + `.pvar` or `.pvar.zst` + `.psam` | yes; dense unphased biallelic dosage supported | dense explicit phased hardcall and full dosage records | Biallelic hard-call PGEN records are supported. Sparse PLINK2 haplotypes are not implemented. |
+| BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | dense phased dosage only | Layout 2 biallelic diploid dosages are returned as expected A1 counts; phased records can return haplotype rows or collapse to diploid dosage. Concrete region filters use a same-path `.bgen.bgi` index when present. |
 
 ---
 
@@ -61,16 +61,20 @@ metadata or genotype filter path after candidate records are read.
 ## Current limitations
 
 - `dosage="dosage"` currently supports dense VCF `FORMAT/DS` reads, dense
-  PLINK2 unphased biallelic dosage reads, and dense BGEN Layout 2 biallelic
-  diploid dosage reads. Phased BGEN records are collapsed to expected diploid
-  A1 dosage. Sparse dosage reads are not implemented.
+  PLINK2 unphased biallelic genotype dosage reads, dense PLINK2 explicit
+  phased full-dosage haplotype reads, and dense BGEN Layout 2 biallelic diploid
+  dosage reads. Phased BGEN records can return haplotype rows or collapse to
+  expected diploid A1 dosage. Sparse dosage reads are not implemented.
 - PLINK1 has no dosage representation in BED files.
-- PLINK2 support is limited to biallelic hard-call and unphased dosage records.
-- BGEN support is limited to dense `kind="geno", dosage="dosage"` reads.
-  Hardcall conversion, sparse reads, haplotype reads, multiallelic BGEN,
-  variable ploidy, and unsupported compression and layout values are not
-  supported. `.bgi` pushdown is limited to concrete region filters.
+- PLINK2 support is limited to biallelic hard-call, unphased genotype dosage,
+  explicit phased hardcall haplotype, and explicit phased full-dosage haplotype
+  records.
+- BGEN support is limited to dense dosage-backed genotype and haplotype reads.
+  Hardcall conversion, sparse reads, multiallelic BGEN, variable ploidy, and
+  unsupported compression and layout values are not supported. `.bgi` pushdown
+  is limited to concrete region filters.
 - Sparse reads do not preserve missing-value masks.
-- Haplotype reads are currently VCF-only.
+- Haplotype reads are implemented for phased VCF hardcalls, explicit phased
+  PLINK2 hardcall/full-dosage records, and phased BGEN dosage records.
 - Region pushdown is implemented for concrete indexed VCF/BCF and BGEN region
   filters, not for arbitrary filter expressions.

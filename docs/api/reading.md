@@ -18,9 +18,13 @@ policy. The `dosage` option controls this genotype value source:
 `dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
 dosage-backed values. This release supports dense VCF `FORMAT/DS`, PLINK2
 unphased biallelic dosage reads, and BGEN Layout 2 biallelic diploid dosage
-reads. Phased BGEN records are collapsed to expected diploid A1 dosage. BGEN
-dosage values are expected copies of `a1`. Sparse dosage, haplotype dosage, and
-PLINK1 dosage are not implemented yet and raise
+reads. Phased BGEN records are collapsed to expected diploid A1 dosage. PLINK2
+dense haplotype reads support explicit phased hardcall records with
+`kind="haplo", dosage="hardcall"` and explicit phased full dosage records with
+`kind="haplo", dosage="dosage"`. BGEN dense haplotype dosage reads support
+phased Layout 2 biallelic diploid expected A1 haplotype rows. Dosage values are
+expected copies of `a1`. Sparse dosage, sparse haplotype, and PLINK1 dosage are
+not implemented yet and raise
 `genoio.UnsupportedRepresentation`.
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele
@@ -183,8 +187,10 @@ H = genoio.vcf("phased.vcf.gz").read(kind="haplo")
 ```
 
 Each retained sample contributes two output rows. Haplotype reads require
-phased diploid genotypes in retained variants. PLINK1 and PLINK2 haplotype
-reads are not implemented in this release.
+phased diploid records in retained variants. PLINK2 hardcall haplotypes require
+explicit phased hardcall records; PLINK2 dosage haplotypes require explicit
+phased full dosage records. PLINK1 haplotype reads, sparse PLINK2 haplotypes,
+and hardcall-from-dosage conversion are not implemented in this release.
 
 ::: genoio.Dataset
 
