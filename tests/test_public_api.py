@@ -7,7 +7,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_dense_read import write_bgen_dosage, write_fixed_width_plink2
+from test_dense_read import (
+    write_bgen_dosage,
+    write_fixed_width_plink2,
+    write_phased_dosage_plink2,
+    write_phased_hardcall_plink2,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
@@ -219,22 +224,24 @@ def test_vcf_dataset_read_rejects_haplotype_dosage_source(tmp_path):
         dataset.read(kind="haplo", dosage="dosage")
 
 
-def test_plink2_dataset_read_haplotype_hardcall_reaches_backend_placeholder(tmp_path):
+def test_plink2_dataset_read_haplotype_hardcall_reaches_backend(tmp_path):
     import genoio
 
-    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="plink2 phased haplotype hardcall reads"):
-        dataset.read(kind="haplo")
+    H = dataset.read(kind="haplo")
+
+    assert H.shape == (6, 2)
 
 
-def test_plink2_dataset_read_haplotype_dosage_reaches_backend_placeholder(tmp_path):
+def test_plink2_dataset_read_haplotype_dosage_reaches_backend(tmp_path):
     import genoio
 
-    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+    dataset = genoio.pfile(write_phased_dosage_plink2(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="plink2 phased haplotype dosage reads"):
-        dataset.read(kind="haplo", dosage="dosage")
+    H = dataset.read(kind="haplo", dosage="dosage")
+
+    assert H.shape == (6, 2)
 
 
 def test_bgen_dataset_read_haplotype_dosage_reaches_backend(tmp_path):

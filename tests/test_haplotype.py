@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy import sparse as scipy_sparse
-from test_dense_read import write_bgen_dosage
+from test_dense_read import write_bgen_dosage, write_phased_dosage_plink2, write_phased_hardcall_plink2
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
@@ -307,6 +307,182 @@ def test_bgen_haplotype_dosage_rejects_unphased_retained_records(tmp_path):
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="unphased"):
         dataset.read(kind="haplo", dosage="dosage")
+
+
+def test_plink2_haplotype_hardcall_read_returns_haplotype_rows_and_metadata(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
+
+    H, samples, variants = dataset.read(
+        kind="haplo",
+        dosage="hardcall",
+        return_samples=True,
+        return_variants=True,
+    )
+
+    np.testing.assert_array_equal(
+        H,
+        np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [1.0, np.nan],
+                [1.0, np.nan],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert samples["iid"].to_list() == ["S1", "S1", "S2", "S2", "S3", "S3"]
+    assert samples["source_sample_index"].to_list() == [0, 0, 1, 1, 2, 2]
+    assert samples["haplotype_index"].to_list() == [0, 1, 0, 1, 0, 1]
+    assert variants["id"].to_list() == ["rs1", "rs2"]
+    assert H.shape[1] == len(variants)
+
+
+def test_plink2_haplotype_dosage_read_returns_haplotype_dosage_rows(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_dosage_plink2(tmp_path))
+
+    H, samples, variants = dataset.read(
+        kind="haplo",
+        dosage="dosage",
+        return_samples=True,
+        return_variants=True,
+    )
+
+    np.testing.assert_allclose(
+        H,
+        np.array(
+            [
+                [0.25, 0.0],
+                [0.75, 0.0],
+                [0.0, 0.1],
+                [0.5, 0.1],
+                [1.0, 0.2],
+                [1.0, 0.2],
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=2.0 / 32768.0,
+    )
+    assert samples["iid"].to_list() == ["S1", "S1", "S2", "S2", "S3", "S3"]
+    assert samples["source_sample_index"].to_list() == [0, 0, 1, 1, 2, 2]
+    assert samples["haplotype_index"].to_list() == [0, 1, 0, 1, 0, 1]
+    assert variants["id"].to_list() == ["rs1", "rs2"]
+    assert H.shape[1] == len(variants)
+
+
+def test_plink2_haplotype_sample_filter_preserves_source_order_and_haplotype_rows(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
+
+    H, samples = dataset.read(kind="haplo", samples=["S3", "S1"], return_samples=True)
+
+    np.testing.assert_array_equal(
+        H,
+        np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [1.0, np.nan],
+                [1.0, np.nan],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert samples["iid"].to_list() == ["S1", "S1", "S3", "S3"]
+    assert samples["source_sample_index"].to_list() == [0, 0, 2, 2]
+    assert samples["haplotype_index"].to_list() == [0, 1, 0, 1]
+
+
+@pytest.mark.parametrize(
+    ("writer", "read_options", "assert_matrix"),
+    [
+        (
+            write_phased_hardcall_plink2,
+            {"kind": "haplo", "dosage": "hardcall"},
+            np.testing.assert_array_equal,
+        ),
+        (
+            write_phased_dosage_plink2,
+            {"kind": "haplo", "dosage": "dosage"},
+            np.testing.assert_allclose,
+        ),
+    ],
+)
+def test_plink2_haplotype_blocks_concatenate_to_full_read(tmp_path, writer, read_options, assert_matrix):
+    import genoio
+
+    dataset = genoio.pfile(writer(tmp_path))
+
+    full, full_variants = dataset.read(**read_options, return_variants=True)
+    blocks = list(dataset.iter_blocks(size=1, **read_options, return_variants=True))
+
+    assert [variants["id"].to_list() for _, variants in blocks] == [["rs1"], ["rs2"]]
+    assert_matrix(np.concatenate([block for block, _ in blocks], axis=1), full)
+    assert [variant_id for _, variants in blocks for variant_id in variants["id"].to_list()] == full_variants[
+        "id"
+    ].to_list()
+
+
+@pytest.mark.parametrize(
+    ("writer", "read_options"),
+    [
+        (write_phased_hardcall_plink2, {"kind": "haplo", "dosage": "hardcall"}),
+        (write_phased_dosage_plink2, {"kind": "haplo", "dosage": "dosage"}),
+    ],
+)
+def test_plink2_haplotype_iter_regions_yields_one_result_per_region(tmp_path, writer, read_options):
+    import genoio
+
+    dataset = genoio.pfile(writer(tmp_path))
+    regions = [genoio.region("1:1-15"), genoio.region("1:16-25")]
+
+    region_reads = list(dataset.iter_regions(regions, **read_options, return_variants=True))
+
+    assert [region for region, _ in region_reads] == regions
+    assert [variants["id"].to_list() for _, (_, variants) in region_reads] == [["rs1"], ["rs2"]]
+    assert [matrix.shape for _, (matrix, _) in region_reads] == [(6, 1), (6, 1)]
+
+
+def test_plink2_haplotype_unphased_retained_record_fails(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path, unphased_second_variant=True))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="unphased"):
+        dataset.read(kind="haplo", variants=["rs2"])
+
+
+def test_plink2_haplotype_metadata_filter_skips_unsupported_record(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_dosage_plink2(tmp_path, unphased_second_variant=True))
+
+    H, variants = dataset.read(kind="haplo", dosage="dosage", variants=["rs1"], return_variants=True)
+
+    np.testing.assert_allclose(
+        H,
+        np.array([[0.25], [0.75], [0.0], [0.5], [1.0], [1.0]], dtype=np.float32),
+        rtol=0,
+        atol=2.0 / 32768.0,
+    )
+    assert variants["id"].to_list() == ["rs1"]
+
+
+def test_plink2_sparse_haplotype_reads_still_fail(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="plink2 sparse haplotype reads"):
+        dataset.read(kind="haplo", sparse=True)
 
 
 def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):
