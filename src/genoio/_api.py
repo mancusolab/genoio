@@ -25,6 +25,7 @@ from ._assembly import (
     variants_frame,
 )
 from ._errors import (
+    InternalError,
     InvalidOptionError,
     InvalidSourceError,
     MissingDataError,
@@ -48,6 +49,7 @@ _PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
     "use dense haplotype reads with sparse=False"
 )
 _RUST_ERROR_MAP = (
+    (_rust.RustInternalError, InternalError),
     (_rust.RustSampleFilterError, SampleFilterError),
     (_rust.RustMissingDataError, MissingDataError),
     (_rust.RustUnsupportedRepresentationError, UnsupportedRepresentation),
@@ -333,6 +335,8 @@ class Dataset:
         - `genoio.InvalidSourceError`: if the source cannot be decoded.
         - `genoio.MissingDataError`: if retained missing calls conflict with
           the requested missing-data policy.
+        - `genoio.InternalError`: if the compiled backend reports an internal
+          invariant failure.
         """
         read_options = _ReadOptions(
             kind=kind,

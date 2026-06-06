@@ -35,3 +35,7 @@ class MissingDataError(GenoioError):
 
 class SampleFilterError(GenoioError):
     r"""Raised when a sample keep list cannot be satisfied."""
+
+
+class InternalError(GenoioError):
+    r"""Raised when the compiled backend reports an internal invariant failure."""

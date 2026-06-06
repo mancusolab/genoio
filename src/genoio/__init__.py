@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from ._api import Dataset, bfile, bgen, pfile, vcf
 from ._errors import (
     GenoioError,
+    InternalError,
     InvalidOptionError,
     InvalidSourceError,
     MissingCompanionFileError,
@@ -62,4 +63,5 @@ __all__ = [
     "InvalidOptionError",
     "MissingDataError",
     "SampleFilterError",
+    "InternalError",
 ]

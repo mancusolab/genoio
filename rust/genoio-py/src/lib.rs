@@ -1,5 +1,7 @@
 // pattern: Imperative Shell
 
+use std::any::Any as PanicPayload;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::slice;
 
@@ -15,6 +17,7 @@ pyo3::create_exception!(genoio_py, RustUnsupportedRepresentationError, PyExcepti
 pyo3::create_exception!(genoio_py, RustInvalidOptionError, PyException);
 pyo3::create_exception!(genoio_py, RustMissingDataError, PyException);
 pyo3::create_exception!(genoio_py, RustSampleFilterError, PyException);
+pyo3::create_exception!(genoio_py, RustInternalError, PyException);
 
 const SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED: &str =
     "sparse dosage-backed genotype reads are intentionally unsupported";
@@ -34,36 +37,16 @@ fn read_metadata(
     format: &str,
     members: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
-    let output = match format {
-        "vcf" | "bcf" => {
-            let key = if format == "vcf" { "vcf" } else { "bcf" };
-            let path = member_path(members, key)?;
-            genoio_io::read_vcf_metadata(&path)
-        }
-        "plink1" => {
-            let bed = member_path(members, "bed")?;
-            let bim = member_path(members, "bim")?;
-            let fam = member_path(members, "fam")?;
-            genoio_io::read_plink1_metadata(&bed, &bim, &fam)
-        }
-        "plink2" => {
-            let pgen = member_path(members, "pgen")?;
-            let pvar = member_path(members, "pvar")?;
-            let psam = member_path(members, "psam")?;
-            genoio_io::read_plink2_metadata(&pgen, &pvar, &psam)
-        }
-        "bgen" => {
-            let bgen = member_path(members, "bgen")?;
-            let sample = optional_member_path(members, "sample")?;
-            genoio_io::read_bgen_metadata(&bgen, sample.as_deref())
-        }
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unsupported metadata format: {other}"
-            )));
-        }
-    }
-    .map_err(genoio_error_to_py)?;
+    catch_internal_panic(|| read_metadata_impl(py, format, members))
+}
+
+fn read_metadata_impl(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    let source = source_members(format, members)?;
+    let output = read_source_metadata(&source).map_err(genoio_error_to_py)?;
 
     metadata_to_py(py, output)
 }
@@ -71,6 +54,15 @@ fn read_metadata(
 #[pyfunction]
 /// Read dense genotypes from a resolved source.
 fn read_dense(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    catch_internal_panic(|| read_dense_impl(py, format, members, options))
+}
+
+fn read_dense_impl(
     py: Python<'_>,
     format: &str,
     members: &Bound<'_, PyDict>,
@@ -97,6 +89,15 @@ fn read_sparse(
     members: &Bound<'_, PyDict>,
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
+    catch_internal_panic(|| read_sparse_impl(py, format, members, options))
+}
+
+fn read_sparse_impl(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     let source = source_members(format, members)?;
     let output = read_sparse_matrix(&source, MatrixKind::Genotype, &read_options)
@@ -113,6 +114,15 @@ fn read_sparse(
 #[pyfunction]
 /// Read dense haplotype rows from a resolved source.
 fn read_haplotypes_dense(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    catch_internal_panic(|| read_haplotypes_dense_impl(py, format, members, options))
+}
+
+fn read_haplotypes_dense_impl(
     py: Python<'_>,
     format: &str,
     members: &Bound<'_, PyDict>,
@@ -139,6 +149,15 @@ fn read_haplotypes_sparse(
     members: &Bound<'_, PyDict>,
     options: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
+    catch_internal_panic(|| read_haplotypes_sparse_impl(py, format, members, options))
+}
+
+fn read_haplotypes_sparse_impl(
+    py: Python<'_>,
+    format: &str,
+    members: &Bound<'_, PyDict>,
+    options: &Bound<'_, PyDict>,
+) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     let source = source_members(format, members)?;
     let output = read_sparse_matrix(&source, MatrixKind::Haplotype, &read_options)
@@ -150,6 +169,28 @@ fn read_haplotypes_sparse(
         read_options.return_samples,
         read_options.return_variants,
     )
+}
+
+fn catch_internal_panic<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    match panic::catch_unwind(AssertUnwindSafe(f)) {
+        // Expected errors are normal Result/PyErr values and pass through
+        // unchanged. Only a Rust panic becomes RustInternalError.
+        Ok(result) => result,
+        Err(payload) => Err(RustInternalError::new_err(format!(
+            "internal Rust backend panic: {}",
+            panic_message(payload.as_ref())
+        ))),
+    }
+}
+
+fn panic_message(payload: &(dyn PanicPayload + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "unknown panic payload"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +244,21 @@ fn source_members(format: &str, members: &Bound<'_, PyDict>) -> PyResult<SourceM
         other => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unsupported source format: {other}"
         ))),
+    }
+}
+
+fn read_source_metadata(
+    source: &SourceMembers,
+) -> Result<genoio_core::MetadataOutput, GenoioError> {
+    match source {
+        SourceMembers::Vcf { path } => genoio_io::read_vcf_metadata(path),
+        SourceMembers::Plink1 { bed, bim, fam } => genoio_io::read_plink1_metadata(bed, bim, fam),
+        SourceMembers::Plink2 { pgen, pvar, psam } => {
+            genoio_io::read_plink2_metadata(pgen, pvar, psam)
+        }
+        SourceMembers::Bgen { bgen, sample } => {
+            genoio_io::read_bgen_metadata(bgen, sample.as_deref())
+        }
     }
 }
 
@@ -436,6 +492,10 @@ fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "RustSampleFilterError",
         module.py().get_type::<RustSampleFilterError>(),
+    )?;
+    module.add(
+        "RustInternalError",
+        module.py().get_type::<RustInternalError>(),
     )?;
     module.add_function(wrap_pyfunction!(backend_name, module)?)?;
     module.add_function(wrap_pyfunction!(read_metadata, module)?)?;

@@ -145,6 +145,7 @@ def test_import_exposes_public_names_without_reference_packages():
         "InvalidSourceError",
         "UnsupportedRepresentation",
         "InvalidOptionError",
+        "InternalError",
     }
 
     assert expected_names <= set(dir(genoio))
@@ -529,8 +530,20 @@ def test_private_rust_errors_map_to_public_error_classes():
     assert issubclass(_rust.RustInvalidOptionError, Exception)
     assert issubclass(_rust.RustMissingDataError, Exception)
     assert issubclass(_rust.RustSampleFilterError, Exception)
+    assert issubclass(_rust.RustInternalError, Exception)
 
     assert genoio.UnsupportedRepresentation.__name__ == "UnsupportedRepresentation"
+    assert genoio.InternalError.__name__ == "InternalError"
+
+
+def test_private_rust_internal_error_maps_to_public_internal_error():
+    import genoio
+    from genoio import _api, _rust
+
+    public_error = _api._public_rust_error(_rust.RustInternalError("panic detail"))
+
+    assert isinstance(public_error, genoio.InternalError)
+    assert str(public_error) == "panic detail"
 
 
 def test_filter_helpers_build_serializable_expressions():
