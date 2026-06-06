@@ -237,13 +237,14 @@ def test_plink2_dataset_read_haplotype_dosage_reaches_backend_placeholder(tmp_pa
         dataset.read(kind="haplo", dosage="dosage")
 
 
-def test_bgen_dataset_read_haplotype_dosage_reaches_backend_placeholder(tmp_path):
+def test_bgen_dataset_read_haplotype_dosage_reaches_backend(tmp_path):
     import genoio
 
     dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="bgen phased haplotype dosage reads"):
-        dataset.read(kind="haplo", dosage="dosage")
+    H = dataset.read(kind="haplo", dosage="dosage")
+
+    assert H.shape == (4, 2)
 
 
 def test_bgen_dataset_read_rejects_hardcall_genotypes(tmp_path):

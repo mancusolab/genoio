@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy import sparse as scipy_sparse
+from test_dense_read import write_bgen_dosage
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
@@ -272,6 +273,40 @@ def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
     assert len(blocks) == 2
     assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)
     np.testing.assert_array_equal(scipy_sparse.hstack(blocks, format="csc").toarray(), full.toarray())
+
+
+def test_bgen_haplotype_dosage_blocks_concatenate_to_full_matrix(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
+
+    full = dataset.read(kind="haplo", dosage="dosage")
+    blocks = list(dataset.iter_blocks(size=1, kind="haplo", dosage="dosage"))
+
+    assert [block.shape for block in blocks] == [(4, 1), (4, 1)]
+    np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+
+
+def test_bgen_haplotype_dosage_iter_regions_yields_one_result_per_region(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
+    regions = [genoio.region("1:1-30"), genoio.region("2:1-30")]
+
+    region_reads = list(dataset.iter_regions(regions, kind="haplo", dosage="dosage", return_variants=True))
+
+    assert [region for region, _ in region_reads] == regions
+    assert [variants["id"].to_list() for _, (_, variants) in region_reads] == [["rs1"], ["rs2"]]
+    assert [matrix.shape for _, (matrix, _) in region_reads] == [(4, 1), (4, 1)]
+
+
+def test_bgen_haplotype_dosage_rejects_unphased_retained_records(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=False))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="unphased"):
+        dataset.read(kind="haplo", dosage="dosage")
 
 
 def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):

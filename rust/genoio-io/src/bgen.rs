@@ -240,19 +240,179 @@ pub fn read_bgen_dosage_dense_windowed(
     )
 }
 
-/// Placeholder for dense BGEN phased haplotype dosages.
+/// Read retained BGEN biallelic diploid phased dosages as dense haplotype rows.
 pub fn read_bgen_haplotypes_dosage_dense_windowed(
-    _bgen: &Path,
-    _sample: Option<&Path>,
-    _requested_samples: Option<&[String]>,
-    _variant_filter: Option<&VariantFilter>,
-    _variant_window: Option<VariantWindow>,
-    _matrix_only: bool,
+    bgen: &Path,
+    sample: Option<&Path>,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    Err(MetadataError::parse(
-        "bgen",
-        "bgen phased haplotype dosage reads are not implemented yet",
-    ))
+    let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
+        path: bgen.to_path_buf(),
+        source,
+    })?;
+    let header = BgenHeader::read_from(&mut reader, bgen)?;
+    header.validate(bgen)?;
+    let all_samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
+    let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
+    let mut diagnostics = selection.diagnostics.clone();
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        diagnostics.retained_variants = 0;
+        return finish_bgen_dense_matrix(
+            BgenDenseParts {
+                n_samples: haplotype_samples.len(),
+                n_variants: 0,
+                values: Vec::new(),
+                missing_mask: Vec::new(),
+                samples: haplotype_samples,
+                variants: Vec::new(),
+                diagnostics,
+            },
+            matrix_only,
+        );
+    }
+    if let Some(index_records) = indexed_region_records(bgen, variant_filter)? {
+        let context = BgenIndexedReadContext {
+            reader: &mut reader,
+            bgen,
+            header: &header,
+            selection,
+            diagnostics,
+            variant_filter,
+            variant_window,
+            matrix_only,
+        };
+        return read_bgen_haplotypes_dosage_dense_indexed(context, &index_records);
+    }
+
+    reader
+        .seek(SeekFrom::Start(u64::from(header.offset) + 4))
+        .map_err(|source| MetadataError::Io {
+            path: bgen.to_path_buf(),
+            source,
+        })?;
+
+    let header_variant_count = usize::try_from(header.variant_count)
+        .map_err(|_| MetadataError::parse(bgen, "bgen variant count is out of range"))?;
+    let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
+        window.len.min(header_variant_count)
+    });
+    let n_haplotypes = selection.samples.len() * 2;
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut decode_buffers = HaplotypeDecodeBuffers::default();
+    let mut retained_index = 0_usize;
+    let mut output_variant_count = 0_usize;
+
+    for _ in 0..header.variant_count {
+        let mut variant = read_layout2_variant_identifying_data(&mut reader, bgen)?;
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        break;
+                    }
+                    skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
+                    continue;
+                }
+                read_layout2_probability_payload_into(
+                    &mut reader,
+                    bgen,
+                    header.flags.compression,
+                    &mut decode_buffers.payload,
+                    &mut decode_buffers.compressed_payload,
+                )?;
+            }
+            PartialFilterDecision::NeedGenotypes => {
+                read_layout2_probability_payload_into(
+                    &mut reader,
+                    bgen,
+                    header.flags.compression,
+                    &mut decode_buffers.payload,
+                    &mut decode_buffers.compressed_payload,
+                )?;
+                decode_buffered_haplotype_values(
+                    bgen,
+                    header.sample_count,
+                    &selection.source_indices,
+                    &mut decode_buffers,
+                )?;
+                let stats = compute_dosage_variant_stats(
+                    &decode_buffers.selected_collapsed_values,
+                    &decode_buffers.selected_collapsed_missing,
+                )?;
+                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                    diagnostics.dropped_genotype_variants += 1;
+                    continue;
+                }
+                attach_variant_stats(&mut variant, stats);
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            decode_buffered_haplotype_values(
+                bgen,
+                header.sample_count,
+                &selection.source_indices,
+                &mut decode_buffers,
+            )?;
+        }
+        if !matrix_only {
+            variants.push(variant);
+        }
+        variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
+        variant_major_missing.extend_from_slice(&decode_buffers.selected_haplotype_missing);
+        output_variant_count += 1;
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
+    }
+
+    let n_samples = n_haplotypes;
+    let n_variants = output_variant_count;
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    finish_bgen_dense_matrix(
+        BgenDenseParts {
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples: haplotype_samples,
+            variants,
+            diagnostics,
+        },
+        matrix_only,
+    )
 }
 
 struct BgenDenseParts {
@@ -448,6 +608,144 @@ fn read_bgen_dosage_dense_indexed(
     )
 }
 
+fn read_bgen_haplotypes_dosage_dense_indexed(
+    context: BgenIndexedReadContext<'_>,
+    index_records: &[BgenIndexRecord],
+) -> Result<DenseGenotypeMatrix> {
+    let BgenIndexedReadContext {
+        reader,
+        bgen,
+        header,
+        selection,
+        mut diagnostics,
+        variant_filter,
+        variant_window,
+        matrix_only,
+    } = context;
+    let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
+    let output_variant_capacity = variant_window.map_or(index_records.len(), |window| {
+        window.len.min(index_records.len())
+    });
+    let n_haplotypes = selection.samples.len() * 2;
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut decode_buffers = HaplotypeDecodeBuffers::default();
+    let mut retained_index = 0_usize;
+    let mut output_variant_count = 0_usize;
+
+    for index_record in index_records {
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            break;
+        }
+        reader
+            .seek(SeekFrom::Start(index_record.file_start_position))
+            .map_err(|source| MetadataError::Io {
+                path: bgen.to_path_buf(),
+                source,
+            })?;
+        let mut variant = read_layout2_variant_identifying_data(reader, bgen)?;
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                validate_index_record_consumed(reader, bgen, index_record)?;
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                    validate_index_record_consumed(reader, bgen, index_record)?;
+                    continue;
+                }
+                read_layout2_probability_payload_into(
+                    reader,
+                    bgen,
+                    header.flags.compression,
+                    &mut decode_buffers.payload,
+                    &mut decode_buffers.compressed_payload,
+                )?;
+            }
+            PartialFilterDecision::NeedGenotypes => {
+                read_layout2_probability_payload_into(
+                    reader,
+                    bgen,
+                    header.flags.compression,
+                    &mut decode_buffers.payload,
+                    &mut decode_buffers.compressed_payload,
+                )?;
+                decode_buffered_haplotype_values(
+                    bgen,
+                    header.sample_count,
+                    &selection.source_indices,
+                    &mut decode_buffers,
+                )?;
+                let stats = compute_dosage_variant_stats(
+                    &decode_buffers.selected_collapsed_values,
+                    &decode_buffers.selected_collapsed_missing,
+                )?;
+                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                    validate_index_record_consumed(reader, bgen, index_record)?;
+                    diagnostics.dropped_genotype_variants += 1;
+                    continue;
+                }
+                attach_variant_stats(&mut variant, stats);
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    validate_index_record_consumed(reader, bgen, index_record)?;
+                    continue;
+                }
+            }
+        }
+
+        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            decode_buffered_haplotype_values(
+                bgen,
+                header.sample_count,
+                &selection.source_indices,
+                &mut decode_buffers,
+            )?;
+        }
+        validate_index_record_consumed(reader, bgen, index_record)?;
+        if !matrix_only {
+            variants.push(variant);
+        }
+        variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
+        variant_major_missing.extend_from_slice(&decode_buffers.selected_haplotype_missing);
+        output_variant_count += 1;
+    }
+
+    let n_samples = n_haplotypes;
+    let n_variants = output_variant_count;
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    finish_bgen_dense_matrix(
+        BgenDenseParts {
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples: haplotype_samples,
+            variants,
+            diagnostics,
+        },
+        matrix_only,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BgenIndexRecord {
     file_start_position: u64,
@@ -561,6 +859,29 @@ struct DosageDecodeBuffers {
     selected_missing: Vec<bool>,
 }
 
+#[derive(Default)]
+struct HaplotypeDecodeBuffers {
+    payload: Vec<u8>,
+    compressed_payload: Vec<u8>,
+    selected_haplotype_values: Vec<f32>,
+    selected_haplotype_missing: Vec<bool>,
+    selected_collapsed_values: Vec<f32>,
+    selected_collapsed_missing: Vec<bool>,
+}
+
+fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Vec<SampleRecord> {
+    let mut haplotype_samples = Vec::with_capacity(selection.samples.len() * 2);
+    for (sample, &source_index) in selection.samples.iter().zip(&selection.source_indices) {
+        for haplotype_index in 0..2 {
+            let mut haplotype_sample = sample.clone();
+            haplotype_sample.source_sample_index = Some(source_index);
+            haplotype_sample.haplotype_index = Some(haplotype_index);
+            haplotype_samples.push(haplotype_sample);
+        }
+    }
+    haplotype_samples
+}
+
 fn decode_buffered_dosage_values(
     bgen: &Path,
     sample_count: u32,
@@ -580,6 +901,33 @@ fn decode_buffered_dosage_values(
         source_indices,
         selected_values,
         selected_missing,
+    )?;
+    Ok(())
+}
+
+fn decode_buffered_haplotype_values(
+    bgen: &Path,
+    sample_count: u32,
+    source_indices: &[usize],
+    buffers: &mut HaplotypeDecodeBuffers,
+) -> Result<()> {
+    let HaplotypeDecodeBuffers {
+        payload,
+        selected_haplotype_values,
+        selected_haplotype_missing,
+        selected_collapsed_values,
+        selected_collapsed_missing,
+        ..
+    } = buffers;
+    let decoded = DecodedDosageVariant::decode(bgen, payload, sample_count, 2)?;
+    decoded.debug_assert_supported_subset();
+    decoded.decode_selected_phased_haplotypes_source_order(
+        bgen,
+        source_indices,
+        selected_haplotype_values,
+        selected_haplotype_missing,
+        selected_collapsed_values,
+        selected_collapsed_missing,
     )?;
     Ok(())
 }
@@ -1327,6 +1675,65 @@ impl<'a> DecodedDosageVariant<'a> {
 
         Ok(())
     }
+
+    fn decode_selected_phased_haplotypes_source_order(
+        &self,
+        path: &Path,
+        source_indices: &[usize],
+        haplotype_values: &mut Vec<f32>,
+        haplotype_missing: &mut Vec<bool>,
+        collapsed_values: &mut Vec<f32>,
+        collapsed_missing: &mut Vec<bool>,
+    ) -> Result<()> {
+        if self.header.phase != BgenPhase::Phased {
+            return Err(MetadataError::parse(
+                path,
+                "unsupported bgen unphased probability block in retained haplotype dosage variant",
+            ));
+        }
+        haplotype_values.clear();
+        haplotype_missing.clear();
+        collapsed_values.clear();
+        collapsed_missing.clear();
+        haplotype_values.reserve(source_indices.len() * 2);
+        haplotype_missing.reserve(source_indices.len() * 2);
+        collapsed_values.reserve(source_indices.len());
+        collapsed_missing.reserve(source_indices.len());
+
+        let mut selected_cursor = 0_usize;
+        let mut bit_reader = LittleEndianBitReader::new(self.packed_probabilities);
+        for (sample_index, &ploidy_byte) in self.header.sample_ploidies.iter().enumerate() {
+            let is_selected = source_indices
+                .get(selected_cursor)
+                .is_some_and(|&source_index| source_index == sample_index);
+            let is_missing = ploidy_byte & 0b1000_0000 != 0;
+            if is_missing {
+                if is_selected {
+                    haplotype_values.extend_from_slice(&[0.0, 0.0]);
+                    haplotype_missing.extend_from_slice(&[true, true]);
+                    collapsed_values.push(0.0);
+                    collapsed_missing.push(true);
+                    selected_cursor += 1;
+                }
+                continue;
+            }
+
+            let first_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
+            let second_raw = bit_reader.read_u32(path, self.header.bit_depth)?;
+            if is_selected {
+                let first = decode_phased_a1_haplotype_dosage(self.header.bit_depth, first_raw);
+                let second = decode_phased_a1_haplotype_dosage(self.header.bit_depth, second_raw);
+                haplotype_values.extend_from_slice(&[first, second]);
+                haplotype_missing.extend_from_slice(&[false, false]);
+                collapsed_values.push((first + second).clamp(0.0, 2.0));
+                collapsed_missing.push(false);
+                selected_cursor += 1;
+            }
+        }
+        debug_assert_eq!(selected_cursor, source_indices.len());
+
+        Ok(())
+    }
 }
 
 struct LittleEndianBitReader<'a> {
@@ -1429,6 +1836,12 @@ fn decode_phased_a1_dosage(bit_depth: u8, p_hap0_a0_raw: u32, p_hap1_a0_raw: u32
     let p_hap0_a0 = p_hap0_a0_raw as f32 / denominator;
     let p_hap1_a0 = p_hap1_a0_raw as f32 / denominator;
     (2.0 - p_hap0_a0 - p_hap1_a0).clamp(0.0, 2.0)
+}
+
+fn decode_phased_a1_haplotype_dosage(bit_depth: u8, p_hap_a0_raw: u32) -> f32 {
+    let denominator = probability_denominator(bit_depth);
+    let p_hap_a0 = p_hap_a0_raw as f32 / denominator;
+    (1.0 - p_hap_a0).clamp(0.0, 1.0)
 }
 
 fn probability_denominator(bit_depth: u8) -> f32 {

@@ -434,6 +434,42 @@ def test_dense_bgen_phased_dosage_read_returns_collapsed_expected_a1_count(tmp_p
     )
 
 
+def test_dense_bgen_haplotype_dosage_read_returns_haplotype_rows(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(
+        write_bgen_dosage(
+            tmp_path,
+            phased=True,
+            variant_calls=[
+                [(255, 0), (128, 64)],
+                [(0, 255), None],
+            ],
+        )
+    )
+
+    H, samples = dataset.read(kind="haplo", dosage="dosage", return_samples=True)
+
+    assert H.shape == (4, 2)
+    np.testing.assert_allclose(
+        H,
+        np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [0.49803922, np.nan],
+                [0.7490196, np.nan],
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=1.0 / 255.0,
+    )
+    assert samples["iid"].to_list() == ["sample_1", "sample_1", "sample_2", "sample_2"]
+    assert samples["source_sample_index"].to_list() == [0, 0, 1, 1]
+    assert samples["haplotype_index"].to_list() == [0, 1, 0, 1]
+
+
 def test_dense_bgen_dosage_default_missing_policy_returns_nan(tmp_path):
     import genoio
 
@@ -454,6 +490,15 @@ def test_dense_bgen_dosage_missing_raise_rejects_missing_calls(tmp_path):
 
     with pytest.raises(genoio.MissingDataError, match="missing genotype"):
         dataset.read(dosage="dosage", missing="raise")
+
+
+def test_dense_bgen_haplotype_dosage_missing_raise_rejects_missing_calls(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, missing=True, phased=True))
+
+    with pytest.raises(genoio.MissingDataError, match="missing genotype"):
+        dataset.read(kind="haplo", dosage="dosage", missing="raise")
 
 
 @pytest.mark.parametrize(

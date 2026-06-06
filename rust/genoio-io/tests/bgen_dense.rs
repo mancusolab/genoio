@@ -547,6 +547,110 @@ fn write_indexed_bgen_with_unsorted_region_positions(path: &Path) {
     );
 }
 
+fn write_indexed_phased_bgen_with_invalid_out_of_region_variant(path: &Path) {
+    let mut bgen = Vec::new();
+    write_bgen_header(&mut bgen, 2, 2, FLAG_LAYOUT2, true).expect("header should write");
+    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
+    bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+
+    let first_start = u64::try_from(bgen.len()).expect("first offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var1", "rs1", "1", 10, &["A", "G", "T"])
+        .expect("first variant identifying data should write");
+    write_layout2_phased_dosage_probability_block(&mut bgen, 8, &[Some((255, 0)), Some((255, 0))])
+        .expect("out-of-region probability block should write");
+    let first_end = u64::try_from(bgen.len()).expect("first end should fit u64");
+
+    let second_start = u64::try_from(bgen.len()).expect("second offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var2", "rs2", "2", 20, &["C", "T"])
+        .expect("second variant identifying data should write");
+    write_layout2_phased_dosage_probability_block(
+        &mut bgen,
+        8,
+        &[Some((0, 255)), Some((102, 102))],
+    )
+    .expect("second dosage probability block should write");
+    let second_end = u64::try_from(bgen.len()).expect("second end should fit u64");
+
+    fs::write(path, bgen).expect("bgen fixture should be written");
+    write_bgen_index(
+        path,
+        &[
+            (
+                "1",
+                10,
+                "rs1",
+                "A",
+                "G",
+                first_start,
+                first_end - first_start,
+            ),
+            (
+                "2",
+                20,
+                "rs2",
+                "C",
+                "T",
+                second_start,
+                second_end - second_start,
+            ),
+        ],
+    );
+}
+
+fn write_indexed_phased_bgen_with_unsorted_region_positions(path: &Path) {
+    let mut bgen = Vec::new();
+    write_bgen_header(&mut bgen, 2, 2, FLAG_LAYOUT2, true).expect("header should write");
+    write_sample_identifier_block(&mut bgen, &["sample_1", "sample_2"])
+        .expect("sample block should write");
+    let variant_offset = u32::try_from(bgen.len() - 4).expect("variant offset should fit u32");
+    bgen[0..4].copy_from_slice(&variant_offset.to_le_bytes());
+
+    let first_start = u64::try_from(bgen.len()).expect("first offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var1", "rs_late", "22", 30, &["A", "G"])
+        .expect("first variant identifying data should write");
+    write_layout2_phased_dosage_probability_block(&mut bgen, 8, &[Some((255, 0)), Some((128, 64))])
+        .expect("first dosage probability block should write");
+    let first_end = u64::try_from(bgen.len()).expect("first end should fit u64");
+
+    let second_start = u64::try_from(bgen.len()).expect("second offset should fit u64");
+    write_layout2_variant_identifying_data(&mut bgen, "var2", "rs_early", "22", 10, &["C", "T"])
+        .expect("second variant identifying data should write");
+    write_layout2_phased_dosage_probability_block(
+        &mut bgen,
+        8,
+        &[Some((0, 255)), Some((102, 102))],
+    )
+    .expect("second dosage probability block should write");
+    let second_end = u64::try_from(bgen.len()).expect("second end should fit u64");
+
+    fs::write(path, bgen).expect("bgen fixture should be written");
+    write_bgen_index(
+        path,
+        &[
+            (
+                "22",
+                30,
+                "rs_late",
+                "A",
+                "G",
+                first_start,
+                first_end - first_start,
+            ),
+            (
+                "22",
+                10,
+                "rs_early",
+                "C",
+                "T",
+                second_start,
+                second_end - second_start,
+            ),
+        ],
+    );
+}
+
 fn write_two_sample_two_variant_bgen(path: &Path) {
     write_two_sample_two_variant_bgen_with_sample_ids(path, true);
 }
@@ -642,6 +746,44 @@ fn write_three_sample_two_variant_phased_dosage_bgen(
     fs::write(path, bgen).expect("bgen fixture should be written");
 }
 
+fn write_two_sample_two_variant_bgen_with_phased_calls(
+    path: &Path,
+    bit_depth: u8,
+    variant_calls: &[[Option<(u32, u32)>; 2]; 2],
+) {
+    write_bgen_fixture(path, FLAG_LAYOUT2, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_phased_dosage_probability_block(writer, bit_depth, &variant_calls[0])
+            .expect("first phased dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_phased_dosage_probability_block(writer, bit_depth, &variant_calls[1])
+            .expect("second phased dosage probability block should write");
+    });
+}
+
+fn write_two_sample_three_variant_phased_dosage_bgen(
+    path: &Path,
+    bit_depth: u8,
+    variant_calls: &[[Option<(u32, u32)>; 2]; 3],
+) {
+    write_bgen_fixture(path, FLAG_LAYOUT2, 3, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "9", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_phased_dosage_probability_block(writer, bit_depth, &variant_calls[0])
+            .expect("first phased dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "1", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_phased_dosage_probability_block(writer, bit_depth, &variant_calls[1])
+            .expect("second phased dosage probability block should write");
+        write_layout2_variant_identifying_data(writer, "var3", "rs3", "1", 30, &["G", "A"])
+            .expect("third variant identifying data should write");
+        write_layout2_phased_dosage_probability_block(writer, bit_depth, &variant_calls[2])
+            .expect("third phased dosage probability block should write");
+    });
+}
+
 fn write_two_sample_three_variant_dosage_bgen(
     path: &Path,
     bit_depth: u8,
@@ -694,6 +836,11 @@ fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
 fn expected_phased_a1_dosage(bit_depth: u8, p_hap0_a0: u32, p_hap1_a0: u32) -> f32 {
     let denominator = ((1_u64 << bit_depth) - 1) as f32;
     2.0 - (p_hap0_a0 as f32 / denominator) - (p_hap1_a0 as f32 / denominator)
+}
+
+fn expected_phased_a1_haplotype_dosage(bit_depth: u8, p_hap_a0: u32) -> f32 {
+    let denominator = ((1_u64 << bit_depth) - 1) as f32;
+    1.0 - (p_hap_a0 as f32 / denominator)
 }
 
 fn write_sample_file(path: &Path, rows: &[&str]) {
@@ -896,6 +1043,315 @@ fn bgen_dosage_dense_decodes_phased_as_collapsed_a1_dosage() {
         dense.missing_mask,
         vec![false, false, false, true, false, false]
     );
+}
+
+#[test]
+fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
+    let dir = unique_dir("bgen-haplo-dosage");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), Some((128, 64)), Some((0, 0))],
+        [Some((0, 255)), None, Some((255, 255))],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 8, &calls);
+
+    let dense =
+        genoio_io::read_bgen_haplotypes_dosage_dense_windowed(&bgen, None, None, None, None, false)
+            .expect("phased bgen haplotype dosage should decode");
+
+    assert_eq!(dense.n_samples, 6);
+    assert_eq!(dense.n_variants, 2);
+    let expected = vec![
+        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 128),
+        0.0,
+        expected_phased_a1_haplotype_dosage(8, 64),
+        0.0,
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
+    ];
+    for (observed, expected) in dense.values.iter().zip(expected) {
+        assert!((observed - expected).abs() <= 1.0 / 255.0);
+    }
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, false, false, true, false, true, false, false, false, false]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample_1", "sample_1", "sample_2", "sample_2", "sample_3", "sample_3"]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.source_sample_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(0), Some(1), Some(1), Some(2), Some(2)]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.haplotype_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(0), Some(1), Some(0), Some(1)]
+    );
+}
+
+#[test]
+fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
+    let dir = unique_dir("bgen-haplo-dosage-sample-filter");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), Some((128, 64)), Some((0, 0))],
+        [Some((0, 255)), None, Some((255, 255))],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 8, &calls);
+    let requested_samples = vec!["sample_3".to_string(), "sample_1".to_string()];
+
+    let dense = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        Some(&requested_samples),
+        None,
+        None,
+        false,
+    )
+    .expect("phased bgen haplotype dosage sample filter should decode");
+
+    assert_eq!(dense.n_samples, 4);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sample_1", "sample_1", "sample_3", "sample_3"]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.source_sample_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(0), Some(2), Some(2)]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.haplotype_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(0), Some(1)]
+    );
+    let expected = vec![
+        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
+    ];
+    for (observed, expected) in dense.values.iter().zip(expected) {
+        assert!((observed - expected).abs() <= 1.0 / 255.0);
+    }
+}
+
+#[test]
+fn bgen_haplotype_dosage_preserves_missing_sample_calls() {
+    let dir = unique_dir("bgen-haplo-dosage-missing");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), None, Some((0, 0))],
+        [Some((0, 255)), Some((128, 64)), Some((255, 255))],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 8, &calls);
+
+    let dense =
+        genoio_io::read_bgen_haplotypes_dosage_dense_windowed(&bgen, None, None, None, None, false)
+            .expect("phased bgen haplotype missing calls should decode");
+
+    assert_eq!(dense.n_samples, 6);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, false, true, false, true, false, false, false, false, false]
+    );
+}
+
+#[test]
+fn bgen_haplotype_metadata_filters_skip_unphased_records_before_decode() {
+    let dir = unique_dir("bgen-haplo-skip-unphased-metadata");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 2, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("first variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, 8, &[Some((255, 0)), Some((255, 0))])
+            .expect("unphased probability block should write");
+        write_layout2_variant_identifying_data(writer, "var2", "rs2", "2", 20, &["C", "T"])
+            .expect("second variant identifying data should write");
+        write_layout2_phased_dosage_probability_block(
+            writer,
+            8,
+            &[Some((0, 255)), Some((102, 102))],
+        )
+        .expect("phased probability block should write");
+    });
+    let filter = chrom_filter("2");
+
+    let dense = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        None,
+        false,
+    )
+    .expect("metadata-rejected unphased probabilities should be skipped");
+
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);
+}
+
+#[test]
+fn bgen_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() {
+    let dir = unique_dir("bgen-haplo-stat-filter");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [[Some((255, 255)), Some((255, 255))], [Some((0, 255)), None]];
+    write_two_sample_two_variant_bgen_with_phased_calls(&bgen, 8, &calls);
+    let filter = genotype_stat_filter("maf", json!({"min": 0.2}));
+
+    let dense = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        None,
+        false,
+    )
+    .expect("haplotype genotype-stat filter should decode");
+
+    assert_eq!(dense.n_samples, 4);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.values, vec![1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(dense.missing_mask, vec![false, false, true, true]);
+    assert_eq!(dense.variants[0].maf, Some(0.5));
+    assert_eq!(dense.variants[0].mac, Some(1));
+    assert_eq!(dense.variants[0].missing_rate, Some(0.5));
+    assert_eq!(dense.variants[0].n_called, Some(1));
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+}
+
+#[test]
+fn bgen_haplotype_dosage_window_is_over_filtered_retained_variants() {
+    let dir = unique_dir("bgen-haplo-filtered-window");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), Some((102, 102))],
+        [Some((255, 0)), Some((0, 0))],
+    ];
+    write_two_sample_three_variant_phased_dosage_bgen(&bgen, 8, &calls);
+    let filter = chrom_filter("1");
+
+    let dense = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 1, len: 1 }),
+        false,
+    )
+    .expect("filtered haplotype retained window should decode");
+
+    assert_eq!(dense.n_samples, 4);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs3");
+    assert_eq!(
+        dense.values,
+        vec![
+            expected_phased_a1_haplotype_dosage(8, 255),
+            expected_phased_a1_haplotype_dosage(8, 0),
+            expected_phased_a1_haplotype_dosage(8, 0),
+            expected_phased_a1_haplotype_dosage(8, 0),
+        ]
+    );
+}
+
+#[test]
+fn bgen_haplotype_dosage_region_filter_uses_bgi_index_to_skip_out_of_region_payloads() {
+    let dir = unique_dir("bgen-haplo-bgi-region");
+    let bgen = dir.join("tiny.bgen");
+    write_indexed_phased_bgen_with_invalid_out_of_region_variant(&bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "2:1-30"}
+    }))
+    .expect("region filter should parse");
+
+    let dense = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        None,
+        false,
+    )
+    .expect("indexed haplotype region filter should not decode out-of-region payloads");
+
+    assert_eq!(dense.n_samples, 4);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(dense.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn bgen_haplotype_dosage_indexed_region_preserves_source_variant_order() {
+    let dir = unique_dir("bgen-haplo-bgi-source-order");
+    let bgen = dir.join("tiny.bgen");
+    write_indexed_phased_bgen_with_unsorted_region_positions(&bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "22:1-40"}
+    }))
+    .expect("region filter should parse");
+
+    let dense = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        None,
+        false,
+    )
+    .expect("indexed haplotype region filter should decode");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs_late", "rs_early"]
+    );
+    assert_eq!(dense.n_samples, 4);
+    assert_eq!(dense.n_variants, 2);
 }
 
 #[test]
