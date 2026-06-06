@@ -8,6 +8,11 @@ use pyo3::types::{
     PyBool, PyByteArray, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
 };
 
+const SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED: &str =
+    "sparse dosage-backed genotype reads are intentionally unsupported";
+const PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED: &str =
+    "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; use dense haplotype reads with sparse=False";
+
 #[pyfunction]
 /// Return the Rust IO backend name for Python diagnostics.
 fn backend_name() -> &'static str {
@@ -171,7 +176,7 @@ fn read_sparse(
     let read_options = read_options(options)?;
     if read_options.dosage != DosageSource::Hardcall {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "sparse dosage-backed genotype reads are not implemented",
+            SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED,
         ));
     }
     let output = match format {
@@ -359,7 +364,7 @@ fn read_haplotypes_sparse(
                 ),
                 DosageSource::Dosage => {
                     return Err(pyo3::exceptions::PyValueError::new_err(
-                        "plink2 sparse haplotype reads are not implemented for dosage-backed sources; use dense haplotype reads with sparse=False",
+                        PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED,
                     ));
                 }
             }

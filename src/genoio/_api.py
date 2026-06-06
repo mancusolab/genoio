@@ -33,6 +33,21 @@ from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile,
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_DOSAGE_SOURCES = {"hardcall", "dosage"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
+_SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED = "sparse dosage-backed genotype reads are intentionally unsupported"
+_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
+    "sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
+    "use dense haplotype reads with sparse=False"
+)
+_PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
+    "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
+    "use dense haplotype reads with sparse=False"
+)
+_BACKEND_UNSUPPORTED_REPRESENTATION_MESSAGES = frozenset(
+    {
+        _SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED,
+        _PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED,
+    }
+)
 
 
 class _DefaultMissing:
@@ -596,11 +611,8 @@ def _validate_dosage_compatibility(
         return
     if sparse_format is not None:
         if kind == "haplo":
-            raise UnsupportedRepresentation(
-                "sparse haplotype reads are not implemented for dosage-backed sources; "
-                "use dense haplotype reads with sparse=False"
-            )
-        raise UnsupportedRepresentation("sparse dosage-backed genotype reads are not implemented")
+            raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED)
+        raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED)
 
 
 def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:
@@ -686,6 +698,8 @@ def _public_read_error(error: ValueError) -> Exception:
         return MissingDataError(message)
     if "bgen" in message and "not implemented" in message and "dosage reads" not in message:
         return UnsupportedRepresentation(message)
+    if _is_backend_unsupported_representation_message(message):
+        return UnsupportedRepresentation(message)
     if _is_unsupported_bgen_representation_error(message):
         return UnsupportedRepresentation(message)
     if (
@@ -707,6 +721,7 @@ def _public_haplotype_read_error(error: ValueError) -> Exception:
         or "does not contain explicit phased dosage values" in message
         or "does not accept dosage records" in message
         or "unsupported haplotype format" in message
+        or _is_backend_unsupported_representation_message(message)
         or ("bgen" in message and "not implemented" in message)
         or ("plink2" in message and "haplotype" in message and "not implemented" in message)
     ):
@@ -714,6 +729,10 @@ def _public_haplotype_read_error(error: ValueError) -> Exception:
     if "sparse missing values" in message:
         return MissingDataError(message)
     return _public_read_error(error)
+
+
+def _is_backend_unsupported_representation_message(message: str) -> bool:
+    return message in _BACKEND_UNSUPPORTED_REPRESENTATION_MESSAGES
 
 
 def _is_unsupported_bgen_representation_error(message: str) -> bool:

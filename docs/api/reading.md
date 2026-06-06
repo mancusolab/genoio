@@ -27,9 +27,10 @@ explicit phased hardcalls with `dosage="hardcall"` and explicit phased full
 dosages with `dosage="dosage"`. BGEN haplotype reads support source-encoded
 phased BGEN v1.2+ Layout 2 biallelic diploid probabilities with
 `dosage="dosage"` and return expected A1 dosage per haplotype row. Sparse
-PLINK2 explicit phased hardcall haplotypes are supported. Sparse dosage, sparse
-PLINK2 dosage haplotypes, sparse BGEN haplotypes, and PLINK1 dosage are not
-implemented yet and raise `genoio.UnsupportedRepresentation`.
+PLINK2 explicit phased hardcall haplotypes are supported. Sparse reads are
+limited to hardcall-derived values; dosage-backed values are expected allele
+counts and are usually not sparse in practice, so sparse dosage reads are
+intentionally unsupported and raise `genoio.UnsupportedRepresentation`.
 
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele
@@ -219,9 +220,10 @@ phased diploid records in retained variants. PLINK2 hardcall haplotypes require
 explicit phased hardcall records; PLINK2 dosage haplotypes require explicit
 phased full dosage records. BGEN haplotypes require phased probability records.
 PLINK2 hardcall haplotypes can be read sparsely when retained calls are
-non-missing. PLINK1 haplotype reads, sparse PLINK2 dosage haplotypes, sparse
-BGEN haplotypes, and hardcall-from-dosage conversion are not implemented in
-this release.
+non-missing. Sparse PLINK2 dosage haplotypes and sparse BGEN haplotypes are
+intentionally unsupported because dosage-backed values are expected allele
+counts rather than sparse hardcall counts. PLINK1 haplotype reads and
+hardcall-from-dosage conversion are not implemented in this release.
 
 Unsupported retained records fail the read. Metadata-only filters, such as
 explicit variant ID lists and concrete regions, can skip unsupported records

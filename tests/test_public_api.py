@@ -520,6 +520,23 @@ def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
         dataset.read(sparse="unsupported")
 
 
+def test_backend_intentionally_unsupported_mapping_is_exact():
+    import genoio
+    from genoio import _api
+
+    genotype_error = ValueError("sparse dosage-backed genotype reads are intentionally unsupported")
+    haplotype_error = ValueError(
+        "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
+        "use dense haplotype reads with sparse=False"
+    )
+    unrelated_error = ValueError("decoder cache is intentionally unsupported in this internal state")
+
+    assert isinstance(_api._public_read_error(genotype_error), genoio.UnsupportedRepresentation)
+    assert isinstance(_api._public_haplotype_read_error(haplotype_error), genoio.UnsupportedRepresentation)
+    assert isinstance(_api._public_read_error(unrelated_error), genoio.InvalidSourceError)
+    assert isinstance(_api._public_haplotype_read_error(unrelated_error), genoio.InvalidSourceError)
+
+
 def test_filter_helpers_build_serializable_expressions():
     import genoio
 
