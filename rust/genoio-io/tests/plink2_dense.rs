@@ -46,6 +46,28 @@ F2 S3 0 0 0 2.0
     (pgen, pvar, psam)
 }
 
+fn write_plink2_fixture_with_variants(
+    dir: &Path,
+    pgen_bytes: &[u8],
+    variants: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let pgen = dir.join("tiny.pgen");
+    let pvar = dir.join("tiny.pvar");
+    let psam = dir.join("tiny.psam");
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    write_text(&pvar, variants);
+    write_text(
+        &psam,
+        "\
+#FID IID PAT MAT SEX PHENO
+F1 S1 0 0 1 -9
+F1 S2 S1 0 2 1.5
+F2 S3 0 0 0 2.0
+",
+    );
+    (pgen, pvar, psam)
+}
+
 fn fixed_width_pgen(records: &[u8], n_samples: u32, n_variants: u32) -> Vec<u8> {
     let mut bytes = vec![0x6c, 0x1b, 0x02];
     bytes.extend(n_variants.to_le_bytes());
@@ -79,9 +101,40 @@ fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -
     bytes
 }
 
+fn explicit_phased_hardcall_pgen(records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    // PGEN variable-width vrtype 0x10: uncompressed biallelic main track
+    // followed by auxiliary track #2 hardcall phase bits.
+    variable_width_pgen(&vec![0x10; records.len()], records, n_samples)
+}
+
+fn explicit_phased_dosage_pgen(records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    // PGEN variable-width vrtype 0xc0: uncompressed biallelic main track,
+    // full dosage track #4, and full explicit phased-dosage track #8.
+    variable_width_pgen(&vec![0xc0; records.len()], records, n_samples)
+}
+
 fn scaled_dosage(value: f32) -> [u8; 2] {
     let raw = (value / 2.0 * 32768.0).round() as u16;
     raw.to_le_bytes()
+}
+
+fn scaled_phase_delta(left: f32, right: f32) -> [u8; 2] {
+    let raw = ((left - right) * 16384.0).round() as i16;
+    raw.to_le_bytes()
+}
+
+fn expected_pgen_dosage(raw: [u8; 2]) -> f32 {
+    f32::from(u16::from_le_bytes(raw)) * (2.0 / 32768.0)
+}
+
+fn expected_pgen_phase_delta(raw: [u8; 2]) -> f32 {
+    f32::from(i16::from_le_bytes(raw)) / 16384.0
+}
+
+fn expected_pgen_haplotype_dosages(left: f32, right: f32) -> (f32, f32) {
+    let total = expected_pgen_dosage(scaled_dosage(left + right));
+    let delta = expected_pgen_phase_delta(scaled_phase_delta(left, right));
+    ((total + delta) * 0.5, (total - delta) * 0.5)
 }
 
 fn write_bad_variable_width_block_offset_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -318,6 +371,332 @@ fn plink2_dosage_dense_decodes_variable_width_full_dosage_records() {
         dense.missing_mask,
         vec![false, false, false, false, true, false, false, false, false]
     );
+}
+
+#[test]
+fn plink2_haplotype_dense_decodes_explicit_phased_hardcalls() {
+    let dir = unique_dir("plink2-haplo-hardcall");
+    // v1: S1 0|1, S2 0/0, S3 1/1. v2: S1 1|0, S2 0|1, S3 missing.
+    let record_1 = [0x21, 0x00];
+    let record_2 = [0x35, 0x02];
+    let pgen_bytes = explicit_phased_hardcall_pgen(&[&record_1, &record_2], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT QUAL
+1 10 rs1 A G 30
+1 20 rs2 C T 40
+",
+    );
+
+    let dense = genoio_io::read_plink2_haplotypes_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect("explicit phased hardcall pgen should decode");
+
+    assert_eq!(dense.n_samples, 6);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(
+        dense.values,
+        vec![0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]
+    );
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, false, false, false, false, false, false, true, false, true]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S1", "S2", "S2", "S3", "S3"]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.source_sample_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(0), Some(1), Some(1), Some(2), Some(2)]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.haplotype_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(0), Some(1), Some(0), Some(1)]
+    );
+}
+
+#[test]
+fn plink2_haplotype_dense_sample_filter_uses_source_order_and_haplotype_order() {
+    let dir = unique_dir("plink2-haplo-hardcall-sample-filter");
+    let record_1 = [0x21, 0x00];
+    let record_2 = [0x35, 0x02];
+    let pgen_bytes = explicit_phased_hardcall_pgen(&[&record_1, &record_2], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 C T
+",
+    );
+    let keep = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense = genoio_io::read_plink2_haplotypes_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        Some(&keep),
+        None,
+        None,
+        false,
+    )
+    .expect("explicit phased hardcall pgen should filter samples");
+
+    assert_eq!(dense.n_samples, 4);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S1", "S3", "S3"]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.source_sample_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(0), Some(2), Some(2)]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.haplotype_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(0), Some(1)]
+    );
+    assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, false, false, true, false, true]
+    );
+}
+
+#[test]
+fn plink2_haplotype_dense_unphased_retained_record_fails() {
+    let dir = unique_dir("plink2-haplo-hardcall-unphased");
+    let pgen_bytes = variable_width_pgen(&[0], &[&[0x21]], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let error = genoio_io::read_plink2_haplotypes_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect_err("unphased retained hardcall record should fail");
+
+    assert!(error.to_string().contains("unphased"));
+}
+
+#[test]
+fn plink2_haplotype_dosage_dense_decodes_explicit_phased_dosage() {
+    let dir = unique_dir("plink2-haplo-dosage");
+    let (s1_l, s1_r) = expected_pgen_haplotype_dosages(0.25, 0.75);
+    let (s2_l, s2_r) = expected_pgen_haplotype_dosages(0.0, 0.5);
+    let (s3_l, s3_r) = expected_pgen_haplotype_dosages(1.0, 1.0);
+    let mut record = vec![0x25];
+    record.extend(scaled_dosage(1.0));
+    record.extend(scaled_dosage(0.5));
+    record.extend(scaled_dosage(2.0));
+    record.extend(scaled_phase_delta(0.25, 0.75));
+    record.extend(scaled_phase_delta(0.0, 0.5));
+    record.extend(scaled_phase_delta(1.0, 1.0));
+    let pgen_bytes = explicit_phased_dosage_pgen(&[&record], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let dense = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect("explicit phased dosage pgen should decode");
+
+    assert_eq!(dense.n_samples, 6);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.values, vec![s1_l, s1_r, s2_l, s2_r, s3_l, s3_r]);
+    assert_eq!(dense.missing_mask, vec![false; 6]);
+}
+
+#[test]
+fn plink2_haplotype_dosage_missing_values_set_missing_mask() {
+    let dir = unique_dir("plink2-haplo-dosage-missing");
+    let (s1_l, s1_r) = expected_pgen_haplotype_dosages(0.25, 0.75);
+    let (s3_l, s3_r) = expected_pgen_haplotype_dosages(1.0, 1.0);
+    let mut record = vec![0x25];
+    record.extend(scaled_dosage(1.0));
+    record.extend(u16::MAX.to_le_bytes());
+    record.extend(scaled_dosage(2.0));
+    record.extend(scaled_phase_delta(0.25, 0.75));
+    record.extend(i16::MIN.to_le_bytes());
+    record.extend(scaled_phase_delta(1.0, 1.0));
+    let pgen_bytes = explicit_phased_dosage_pgen(&[&record], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let dense = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect("explicit phased dosage pgen should decode missing values");
+
+    assert_eq!(dense.values, vec![s1_l, s1_r, 0.0, 0.0, s3_l, s3_r]);
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, true, true, false, false]
+    );
+}
+
+#[test]
+fn plink2_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() {
+    let dir = unique_dir("plink2-haplo-dosage-filter");
+    let (v2_s1_l, v2_s1_r) = expected_pgen_haplotype_dosages(0.0, 0.0);
+    let (v2_s2_l, v2_s2_r) = expected_pgen_haplotype_dosages(0.1, 0.1);
+    let (v2_s3_l, v2_s3_r) = expected_pgen_haplotype_dosages(0.2, 0.2);
+    let mut record_1 = vec![0x25];
+    record_1.extend(scaled_dosage(1.0));
+    record_1.extend(scaled_dosage(0.5));
+    record_1.extend(scaled_dosage(2.0));
+    record_1.extend(scaled_phase_delta(0.25, 0.75));
+    record_1.extend(scaled_phase_delta(0.0, 0.5));
+    record_1.extend(scaled_phase_delta(1.0, 1.0));
+    let mut record_2 = vec![0x00];
+    record_2.extend(scaled_dosage(0.0));
+    record_2.extend(scaled_dosage(0.2));
+    record_2.extend(scaled_dosage(0.4));
+    record_2.extend(scaled_phase_delta(0.0, 0.0));
+    record_2.extend(scaled_phase_delta(0.1, 0.1));
+    record_2.extend(scaled_phase_delta(0.2, 0.2));
+    let pgen_bytes = explicit_phased_dosage_pgen(&[&record_1, &record_2], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 20 rs2 C T
+",
+    );
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "mac",
+        "params": {"max": 1}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        None,
+        false,
+    )
+    .expect("explicit phased dosage pgen should filter on collapsed dosages");
+
+    assert_eq!(dense.n_samples, 6);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(
+        dense.values,
+        vec![v2_s1_l, v2_s1_r, v2_s2_l, v2_s2_r, v2_s3_l, v2_s3_r]
+    );
+    assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+    assert!(dense.variants[0]
+        .af
+        .is_some_and(|af| (af - 0.1).abs() <= 2.0 / 32768.0));
+}
+
+#[test]
+fn plink2_haplotype_dosage_unphased_retained_record_fails() {
+    let dir = unique_dir("plink2-haplo-dosage-unphased");
+    let mut record = vec![0x24];
+    record.extend(scaled_dosage(0.2));
+    record.extend(scaled_dosage(1.4));
+    record.extend(scaled_dosage(1.8));
+    let pgen_bytes = variable_width_pgen(&[0x40], &[&record], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let error = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect_err("unphased retained dosage record should fail");
+
+    assert!(error.to_string().contains("phased dosage"));
+}
+
+#[test]
+fn plink2_dosage_dense_still_decodes_unphased_dosage_records() {
+    let dir = unique_dir("plink2-dosage-unphased-regression");
+    let mut record = vec![0x24];
+    record.extend(scaled_dosage(0.2));
+    record.extend(scaled_dosage(1.4));
+    record.extend(scaled_dosage(1.8));
+    let pgen_bytes = variable_width_pgen(&[0x40], &[&record], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let dense = genoio_io::read_plink2_dosage_dense_windowed(&pgen, &pvar, &psam, None, None, None)
+        .expect("unphased dosage pgen should still decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(
+        dense.values,
+        vec![
+            expected_pgen_dosage(scaled_dosage(0.2)),
+            expected_pgen_dosage(scaled_dosage(1.4)),
+            expected_pgen_dosage(scaled_dosage(1.8)),
+        ]
+    );
+    assert_eq!(dense.missing_mask, vec![false, false, false]);
 }
 
 #[test]

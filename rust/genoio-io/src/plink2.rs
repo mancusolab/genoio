@@ -7,9 +7,9 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_values_to_minor_allele, reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
-    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
-    VariantRecord, VariantWindow,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, DenseSampleSelection,
+    MetadataError, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -50,6 +50,24 @@ struct DosageOverlayTarget<'a> {
     source_indices: &'a [usize],
     values: &'a mut [f32],
     missing: &'a mut [bool],
+}
+
+struct Plink2DenseParts {
+    n_samples: usize,
+    n_variants: usize,
+    values: Vec<f32>,
+    missing_mask: Vec<bool>,
+    samples: Vec<SampleRecord>,
+    variants: Vec<VariantRecord>,
+    diagnostics: genoio_core::DenseDiagnostics,
+}
+
+#[derive(Default)]
+struct PgenHaplotypeDecodeState {
+    selected_haplotype_values: Vec<f32>,
+    selected_haplotype_missing: Vec<bool>,
+    selected_collapsed_values: Vec<f32>,
+    selected_collapsed_missing: Vec<bool>,
 }
 
 struct SelectedSampleCursor<'a> {
@@ -137,6 +155,53 @@ fn flush_packed_variant_batch(
     );
     *batch_start += batch.len();
     batch.clear();
+}
+
+fn finish_plink2_dense_matrix(
+    parts: Plink2DenseParts,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    let Plink2DenseParts {
+        n_samples,
+        n_variants,
+        values,
+        missing_mask,
+        samples,
+        variants,
+        diagnostics,
+    } = parts;
+    if matrix_only {
+        DenseGenotypeMatrix::new_matrix_only(
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            diagnostics,
+        )
+    } else {
+        DenseGenotypeMatrix::new(
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples,
+            variants,
+            diagnostics,
+        )
+    }
+}
+
+fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Vec<SampleRecord> {
+    let mut haplotype_samples = Vec::with_capacity(selection.samples.len() * 2);
+    for (sample, &source_index) in selection.samples.iter().zip(&selection.source_indices) {
+        for haplotype_index in 0..2 {
+            let mut haplotype_sample = sample.clone();
+            haplotype_sample.source_sample_index = Some(source_index);
+            haplotype_sample.haplotype_index = Some(haplotype_index);
+            haplotype_samples.push(haplotype_sample);
+        }
+    }
+    haplotype_samples
 }
 
 #[derive(Debug, Clone)]
@@ -478,36 +543,290 @@ pub fn read_plink2_dosage_dense_windowed(
     )
 }
 
-/// Placeholder for dense PLINK2 phased hardcall haplotypes.
+/// Read retained explicit-phased PLINK2 hard calls as dense haplotype rows.
 pub fn read_plink2_haplotypes_dense_windowed(
-    _pgen: &Path,
-    _pvar: &Path,
-    _psam: &Path,
-    _requested_samples: Option<&[String]>,
-    _variant_filter: Option<&VariantFilter>,
-    _variant_window: Option<VariantWindow>,
-    _matrix_only: bool,
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    Err(MetadataError::parse(
-        "plink2",
-        "plink2 phased haplotype hardcall reads are not implemented yet",
-    ))
+    let header = read_supported_pgen_header(pgen)?;
+    let all_samples = parse_psam(psam)?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let mut diagnostics = selection.diagnostics.clone();
+    let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+            path: pvar.to_path_buf(),
+            source,
+        })?;
+        diagnostics.retained_variants = 0;
+        return finish_plink2_dense_matrix(
+            Plink2DenseParts {
+                n_samples: haplotype_samples.len(),
+                n_variants: 0,
+                values: Vec::new(),
+                missing_mask: Vec::new(),
+                samples: haplotype_samples,
+                variants: Vec::new(),
+                diagnostics,
+            },
+            matrix_only,
+        );
+    }
+
+    let mut pvar_reader = PvarRecordReader::new(pvar)?;
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
+    let mut haplotype_state = PgenHaplotypeDecodeState::default();
+    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
+        window.len.min(header.variant_ct)
+    });
+    let n_haplotypes = selection.samples.len() * 2;
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut retained_index = 0_usize;
+    let mut stopped_after_window = false;
+    let mut output_variant_count = 0_usize;
+
+    while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        stopped_after_window = true;
+                        break;
+                    }
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
+        }
+
+        read_plink2_variant_haplotype_hardcalls(
+            pgen,
+            &mut file,
+            &header,
+            variant_index,
+            &selection.source_indices,
+            &mut decoder_state,
+            &mut haplotype_state,
+        )?;
+        if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            let stats = compute_dosage_variant_stats(
+                &haplotype_state.selected_collapsed_values,
+                &haplotype_state.selected_collapsed_missing,
+            )?;
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            attach_variant_stats(&mut variant, stats);
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    stopped_after_window = true;
+                    break;
+                }
+                continue;
+            }
+        }
+        if !matrix_only {
+            variants.push(variant);
+        }
+        variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
+        variant_major_missing.extend_from_slice(&haplotype_state.selected_haplotype_missing);
+        output_variant_count += 1;
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            stopped_after_window = true;
+            break;
+        }
+    }
+    if !stopped_after_window {
+        pvar_reader.validate_count(header.variant_ct)?;
+    }
+
+    let n_samples = n_haplotypes;
+    let n_variants = output_variant_count;
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    finish_plink2_dense_matrix(
+        Plink2DenseParts {
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples: haplotype_samples,
+            variants,
+            diagnostics,
+        },
+        matrix_only,
+    )
 }
 
-/// Placeholder for dense PLINK2 phased haplotype dosages.
+/// Read retained explicit-phased PLINK2 dosages as dense haplotype rows.
 pub fn read_plink2_haplotypes_dosage_dense_windowed(
-    _pgen: &Path,
-    _pvar: &Path,
-    _psam: &Path,
-    _requested_samples: Option<&[String]>,
-    _variant_filter: Option<&VariantFilter>,
-    _variant_window: Option<VariantWindow>,
-    _matrix_only: bool,
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    Err(MetadataError::parse(
-        "plink2",
-        "plink2 phased haplotype dosage reads are not implemented yet",
-    ))
+    let header = read_supported_pgen_header(pgen)?;
+    let all_samples = parse_psam(psam)?;
+    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let mut diagnostics = selection.diagnostics.clone();
+    let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+            path: pvar.to_path_buf(),
+            source,
+        })?;
+        diagnostics.retained_variants = 0;
+        return finish_plink2_dense_matrix(
+            Plink2DenseParts {
+                n_samples: haplotype_samples.len(),
+                n_variants: 0,
+                values: Vec::new(),
+                missing_mask: Vec::new(),
+                samples: haplotype_samples,
+                variants: Vec::new(),
+                diagnostics,
+            },
+            matrix_only,
+        );
+    }
+
+    let mut pvar_reader = PvarRecordReader::new(pvar)?;
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
+    let mut haplotype_state = PgenHaplotypeDecodeState::default();
+    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
+        window.len.min(header.variant_ct)
+    });
+    let n_haplotypes = selection.samples.len() * 2;
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut retained_index = 0_usize;
+    let mut stopped_after_window = false;
+    let mut output_variant_count = 0_usize;
+
+    while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
+        diagnostics.candidate_variants += 1;
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match partial_decision {
+            PartialFilterDecision::Reject => {
+                diagnostics.dropped_metadata_variants += 1;
+                continue;
+            }
+            PartialFilterDecision::Accept => {
+                let include_in_window =
+                    variant_window.is_none_or(|window| window.contains(retained_index));
+                retained_index += 1;
+                if !include_in_window {
+                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                        stopped_after_window = true;
+                        break;
+                    }
+                    continue;
+                }
+            }
+            PartialFilterDecision::NeedGenotypes => {}
+        }
+
+        read_plink2_variant_haplotype_dosage(
+            pgen,
+            &mut file,
+            &header,
+            variant_index,
+            &selection.source_indices,
+            &mut decoder_state,
+            &mut haplotype_state,
+        )?;
+        if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            let stats = compute_dosage_variant_stats(
+                &haplotype_state.selected_collapsed_values,
+                &haplotype_state.selected_collapsed_missing,
+            )?;
+            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
+                diagnostics.dropped_genotype_variants += 1;
+                continue;
+            }
+            attach_variant_stats(&mut variant, stats);
+            let include_in_window =
+                variant_window.is_none_or(|window| window.contains(retained_index));
+            retained_index += 1;
+            if !include_in_window {
+                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                    stopped_after_window = true;
+                    break;
+                }
+                continue;
+            }
+        }
+        if !matrix_only {
+            variants.push(variant);
+        }
+        variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
+        variant_major_missing.extend_from_slice(&haplotype_state.selected_haplotype_missing);
+        output_variant_count += 1;
+        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            stopped_after_window = true;
+            break;
+        }
+    }
+    if !stopped_after_window {
+        pvar_reader.validate_count(header.variant_ct)?;
+    }
+
+    let n_samples = n_haplotypes;
+    let n_variants = output_variant_count;
+    diagnostics.retained_variants = n_variants;
+    let values =
+        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
+    let missing_mask =
+        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
+
+    finish_plink2_dense_matrix(
+        Plink2DenseParts {
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples: haplotype_samples,
+            variants,
+            diagnostics,
+        },
+        matrix_only,
+    )
 }
 
 /// Read all retained PLINK2 hard-call genotypes as sparse CSC.
@@ -1556,10 +1875,10 @@ fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Resu
             "unsupported pgen hardcall-phase track with dosage",
         ));
     }
-    if record_type & 0x80 != 0 {
+    if record_type & 0x80 != 0 && dosage_bits != 2 {
         return Err(MetadataError::parse(
             path,
-            "unsupported pgen phased-dosage track",
+            "unsupported pgen phased-dosage track without full dosage track",
         ));
     }
     match record_type & 0x07 {
@@ -1980,6 +2299,349 @@ fn read_variable_width_dosage_variant_values(
             missing: &mut decoder_state.missing,
         },
     )
+}
+
+fn read_plink2_variant_haplotype_hardcalls(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
+    if !matches!(header.layout, PgenLayout::VariableWidth) {
+        return Err(MetadataError::parse(
+            path,
+            "plink2 haplotype hardcall reads require variable-width explicit phased records",
+        ));
+    }
+    read_variable_width_record(path, file, header, variant_index, decoder_state)?;
+    let record = decoder_state.record.as_slice();
+    let record_type = header.record_types[variant_index];
+    if record_type & 0x10 == 0 {
+        return Err(MetadataError::parse(
+            path,
+            "unphased pgen hardcall record retained in haplotype read",
+        ));
+    }
+    if ((record_type >> 5) & 0x03) != 0 || record_type & 0x80 != 0 {
+        return Err(MetadataError::parse(
+            path,
+            "pgen haplotype hardcall read does not accept dosage records",
+        ));
+    }
+    let cursor = decode_variable_width_main_track(
+        path,
+        record,
+        record_type,
+        header.sample_ct,
+        &decoder_state.previous_non_ld_packed,
+        decoder_state.has_previous_non_ld,
+        &mut decoder_state.packed,
+    )?;
+    let result = decode_hardcall_phase_track(
+        path,
+        record,
+        cursor,
+        source_indices,
+        &decoder_state.packed,
+        haplotype_state,
+    );
+    update_variable_width_ld_state(record_type, decoder_state);
+    result
+}
+
+fn read_plink2_variant_haplotype_dosage(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
+    if !matches!(header.layout, PgenLayout::VariableWidth) {
+        return Err(MetadataError::parse(
+            path,
+            "plink2 haplotype dosage reads require variable-width explicit phased dosage records",
+        ));
+    }
+    read_variable_width_record(path, file, header, variant_index, decoder_state)?;
+    let record = decoder_state.record.as_slice();
+    let record_type = header.record_types[variant_index];
+    let dosage_bits = (record_type >> 5) & 0x03;
+    if record_type & 0x80 == 0 {
+        return Err(MetadataError::parse(
+            path,
+            "pgen record does not contain explicit phased dosage values",
+        ));
+    }
+    if dosage_bits != 2 {
+        return Err(MetadataError::parse(
+            path,
+            "unsupported pgen phased dosage representation; only full dosage tracks are supported",
+        ));
+    }
+    let cursor = decode_variable_width_main_track(
+        path,
+        record,
+        record_type,
+        header.sample_ct,
+        &decoder_state.previous_non_ld_packed,
+        decoder_state.has_previous_non_ld,
+        &mut decoder_state.packed,
+    )?;
+    let result = decode_full_phased_dosage_tracks(
+        path,
+        record,
+        cursor,
+        header.sample_ct,
+        source_indices,
+        haplotype_state,
+    );
+    update_variable_width_ld_state(record_type, decoder_state);
+    result
+}
+
+fn read_variable_width_record(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    if variant_index >= header.variant_ct || variant_index + 1 >= header.record_offsets.len() {
+        return Err(MetadataError::parse(
+            path,
+            "pgen variant index is outside variable-width record table",
+        ));
+    }
+    let start = header.record_offsets[variant_index];
+    let end = header.record_offsets[variant_index + 1];
+    let record_len = usize::try_from(
+        end.checked_sub(start)
+            .ok_or_else(|| MetadataError::parse(path, "pgen record length is out of range"))?,
+    )
+    .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    decoder_state.record.resize(record_len, 0);
+    file.read_exact(&mut decoder_state.record)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
+fn update_variable_width_ld_state(record_type: u8, decoder_state: &mut PgenDecoderState) {
+    if !matches!(record_type & 0x07, 2 | 3) {
+        decoder_state
+            .previous_non_ld_packed
+            .copy_from(&decoder_state.packed);
+        decoder_state.has_previous_non_ld = true;
+    }
+}
+
+fn decode_hardcall_phase_track(
+    path: &Path,
+    record: &[u8],
+    cursor: usize,
+    source_indices: &[usize],
+    packed: &PackedGenotypes,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
+    let heterozygote_ct = (0..packed.sample_ct())
+        .filter(|sample_index| packed.get(*sample_index) == 1)
+        .count();
+    ensure_record_bytes(path, record, cursor, 1)?;
+    let phasepresent_stored = bit_is_set(&record[cursor..], 0);
+    let phaseinfo_start_bit = if phasepresent_stored {
+        let phasepresent_bits = 1 + heterozygote_ct;
+        ensure_record_bytes(path, record, cursor, phasepresent_bits.div_ceil(8))?;
+        cursor
+            .checked_add(phasepresent_bits.div_ceil(8))
+            .ok_or_else(|| MetadataError::parse(path, "pgen phase offset is out of range"))?
+            * 8
+    } else {
+        cursor
+            .checked_mul(8)
+            .and_then(|bit| bit.checked_add(1))
+            .ok_or_else(|| MetadataError::parse(path, "pgen phase offset is out of range"))?
+    };
+    ensure_record_bits(path, record, phaseinfo_start_bit, heterozygote_ct)?;
+
+    haplotype_state.selected_haplotype_values.clear();
+    haplotype_state.selected_haplotype_missing.clear();
+    haplotype_state.selected_collapsed_values.clear();
+    haplotype_state.selected_collapsed_missing.clear();
+    haplotype_state
+        .selected_haplotype_values
+        .resize(source_indices.len() * 2, 0.0);
+    haplotype_state
+        .selected_haplotype_missing
+        .resize(source_indices.len() * 2, false);
+
+    let mut selected_cursor = SelectedSampleCursor::new(source_indices);
+    let mut heterozygote_index = 0_usize;
+    let mut phased_heterozygote_index = 0_usize;
+    for sample_index in 0..packed.sample_ct() {
+        let category = packed.get(sample_index);
+        let selected_index = selected_cursor.selected_index_for(sample_index);
+        match category {
+            0 => {
+                if let Some(selected_index) = selected_index {
+                    set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, false);
+                }
+            }
+            1 => {
+                let phase_present = if phasepresent_stored {
+                    bit_is_set_from_abs(record, cursor * 8 + 1 + heterozygote_index)
+                } else {
+                    true
+                };
+                heterozygote_index += 1;
+                if !phase_present {
+                    return Err(MetadataError::parse(
+                        path,
+                        "unphased pgen heterozygous hardcall retained in haplotype read",
+                    ));
+                }
+                let swapped =
+                    bit_is_set_from_abs(record, phaseinfo_start_bit + phased_heterozygote_index);
+                phased_heterozygote_index += 1;
+                if let Some(selected_index) = selected_index {
+                    if swapped {
+                        set_selected_haplotype_pair(
+                            haplotype_state,
+                            selected_index,
+                            1.0,
+                            0.0,
+                            false,
+                        );
+                    } else {
+                        set_selected_haplotype_pair(
+                            haplotype_state,
+                            selected_index,
+                            0.0,
+                            1.0,
+                            false,
+                        );
+                    }
+                }
+            }
+            2 => {
+                if let Some(selected_index) = selected_index {
+                    set_selected_haplotype_pair(haplotype_state, selected_index, 1.0, 1.0, false);
+                }
+            }
+            3 => {
+                if let Some(selected_index) = selected_index {
+                    set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, true);
+                }
+            }
+            _ => unreachable!("two-bit hard-call code should be masked"),
+        }
+    }
+    let end_bit = phaseinfo_start_bit + phased_heterozygote_index;
+    if end_bit.div_ceil(8) != record.len() {
+        return Err(MetadataError::parse(
+            path,
+            "pgen phased hardcall record has trailing or missing bytes",
+        ));
+    }
+    for source_index in source_indices {
+        match packed.get(*source_index) {
+            0 => push_collapsed_dosage(haplotype_state, 0.0, false),
+            1 => push_collapsed_dosage(haplotype_state, 1.0, false),
+            2 => push_collapsed_dosage(haplotype_state, 2.0, false),
+            3 => push_collapsed_dosage(haplotype_state, 0.0, true),
+            _ => unreachable!("two-bit hard-call code should be masked"),
+        }
+    }
+    Ok(())
+}
+
+fn decode_full_phased_dosage_tracks(
+    path: &Path,
+    record: &[u8],
+    cursor: usize,
+    sample_ct: usize,
+    source_indices: &[usize],
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
+    let dosage_bytes_len = sample_ct
+        .checked_mul(2)
+        .ok_or_else(|| MetadataError::parse(path, "pgen dosage byte count is out of range"))?;
+    ensure_record_bytes(path, record, cursor, dosage_bytes_len)?;
+    let phase_cursor = cursor
+        .checked_add(dosage_bytes_len)
+        .ok_or_else(|| MetadataError::parse(path, "pgen phased dosage offset is out of range"))?;
+    ensure_record_bytes(path, record, phase_cursor, dosage_bytes_len)?;
+    if phase_cursor + dosage_bytes_len != record.len() {
+        return Err(MetadataError::parse(
+            path,
+            "pgen phased dosage record has trailing or missing bytes",
+        ));
+    }
+
+    haplotype_state.selected_haplotype_values.clear();
+    haplotype_state.selected_haplotype_missing.clear();
+    haplotype_state.selected_collapsed_values.clear();
+    haplotype_state.selected_collapsed_missing.clear();
+    for source_index in source_indices {
+        let dosage_offset = cursor + source_index * 2;
+        let phase_offset = phase_cursor + source_index * 2;
+        let dosage_raw = u16::from_le_bytes([record[dosage_offset], record[dosage_offset + 1]]);
+        let phase_raw = i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]);
+        if dosage_raw == u16::MAX || phase_raw == i16::MIN {
+            haplotype_state.selected_haplotype_values.extend([0.0, 0.0]);
+            haplotype_state
+                .selected_haplotype_missing
+                .extend([true, true]);
+            push_collapsed_dosage(haplotype_state, 0.0, true);
+            continue;
+        }
+        let total = f32::from(dosage_raw) * (2.0 / 32768.0);
+        let delta = f32::from(phase_raw) / 16384.0;
+        let left = (total + delta) * 0.5;
+        let right = (total - delta) * 0.5;
+        haplotype_state
+            .selected_haplotype_values
+            .extend([left, right]);
+        haplotype_state
+            .selected_haplotype_missing
+            .extend([false, false]);
+        push_collapsed_dosage(haplotype_state, total, false);
+    }
+    Ok(())
+}
+
+fn set_selected_haplotype_pair(
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+    selected_index: usize,
+    left: f32,
+    right: f32,
+    missing: bool,
+) {
+    let offset = selected_index * 2;
+    haplotype_state.selected_haplotype_values[offset] = left;
+    haplotype_state.selected_haplotype_values[offset + 1] = right;
+    haplotype_state.selected_haplotype_missing[offset] = missing;
+    haplotype_state.selected_haplotype_missing[offset + 1] = missing;
+}
+
+fn push_collapsed_dosage(
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+    value: f32,
+    missing: bool,
+) {
+    haplotype_state.selected_collapsed_values.push(value);
+    haplotype_state.selected_collapsed_missing.push(missing);
 }
 
 fn decode_variable_width_main_track(
@@ -2547,7 +3209,24 @@ fn ensure_record_bytes(path: &Path, record: &[u8], cursor: usize, len: usize) ->
     Ok(())
 }
 
+fn ensure_record_bits(path: &Path, record: &[u8], start_bit: usize, len: usize) -> Result<()> {
+    let end_bit = start_bit
+        .checked_add(len)
+        .ok_or_else(|| MetadataError::parse(path, "pgen bit range is out of range"))?;
+    if end_bit > record.len() * 8 {
+        return Err(MetadataError::parse(
+            path,
+            "pgen record ended before expected bitarray data",
+        ));
+    }
+    Ok(())
+}
+
 fn bit_is_set(bytes: &[u8], bit_index: usize) -> bool {
+    bytes[bit_index / 8] & (1 << (bit_index % 8)) != 0
+}
+
+fn bit_is_set_from_abs(bytes: &[u8], bit_index: usize) -> bool {
     bytes[bit_index / 8] & (1 << (bit_index % 8)) != 0
 }
 
