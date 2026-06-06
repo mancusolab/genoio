@@ -122,10 +122,12 @@ H = bgen_ds.read(kind="haplo", dosage="dosage")
 ```
 
 PLINK2 haplotype reads support source-encoded explicit phased hardcalls and
-explicit phased full dosages:
+explicit phased full dosages. Explicit phased hardcall haplotypes can also be
+read sparsely when retained calls are non-missing:
 
 ```python
 H_hardcall = pgen_ds.read(kind="haplo", dosage="hardcall")
+H_hardcall_sparse = pgen_ds.read(kind="haplo", dosage="hardcall", sparse=True)
 H_dosage = pgen_ds.read(kind="haplo", dosage="dosage")
 ```
 

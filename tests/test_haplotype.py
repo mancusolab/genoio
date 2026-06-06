@@ -554,13 +554,62 @@ def test_plink2_haplotype_metadata_filter_skips_unsupported_record(tmp_path):
     assert variants["id"].to_list() == ["rs1"]
 
 
-def test_plink2_sparse_haplotype_reads_still_fail(tmp_path):
+def test_plink2_sparse_hardcall_haplotypes_match_dense_window(tmp_path):
     import genoio
 
     dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="plink2 sparse haplotype reads"):
-        dataset.read(kind="haplo", sparse=True)
+    dense, dense_samples, dense_variants = dataset.read(
+        kind="haplo",
+        dosage="hardcall",
+        variants=["rs1"],
+        return_samples=True,
+        return_variants=True,
+    )
+    H, samples, variants = dataset.read(
+        kind="haplo",
+        dosage="hardcall",
+        sparse=True,
+        variants=["rs1"],
+        return_samples=True,
+        return_variants=True,
+    )
+
+    assert scipy_sparse.isspmatrix_csc(H)
+    np.testing.assert_array_equal(H.toarray(), dense)
+    assert samples.equals(dense_samples)
+    assert variants.equals(dense_variants)
+
+
+def test_plink2_sparse_hardcall_haplotypes_reject_retained_missing(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
+
+    with pytest.raises(genoio.MissingDataError, match="sparse missing values"):
+        dataset.read(kind="haplo", dosage="hardcall", sparse=True)
+
+
+def test_plink2_sparse_dosage_haplotypes_still_fail(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_dosage_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse haplotype reads.*dense"):
+        dataset.read(kind="haplo", dosage="dosage", sparse=True)
+
+
+def test_plink2_sparse_hardcall_haplotype_blocks_concatenate(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_ld_phased_hardcall_plink2(tmp_path))
+
+    full = dataset.read(kind="haplo", dosage="hardcall", sparse=True, samples=["S1", "S2"])
+    blocks = list(dataset.iter_blocks(size=1, kind="haplo", dosage="hardcall", sparse=True, samples=["S1", "S2"]))
+
+    assert len(blocks) == 2
+    assert all(scipy_sparse.isspmatrix_csc(block) for block in blocks)
+    np.testing.assert_array_equal(scipy_sparse.hstack(blocks, format="csc").toarray(), full.toarray())
 
 
 def test_sparse_genotype_reads_still_minor_allele_flip_by_default(tmp_path):

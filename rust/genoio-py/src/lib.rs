@@ -345,9 +345,24 @@ fn read_haplotypes_sparse(
             ));
         }
         "plink2" => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "plink2 sparse haplotype reads are not implemented; use dense haplotype reads with sparse=False",
-            ));
+            let pgen = member_path(members, "pgen")?;
+            let pvar = member_path(members, "pvar")?;
+            let psam = member_path(members, "psam")?;
+            match read_options.dosage {
+                DosageSource::Hardcall => genoio_io::read_plink2_haplotypes_sparse_windowed(
+                    &pgen,
+                    &pvar,
+                    &psam,
+                    read_options.requested_samples.as_deref(),
+                    read_options.variant_filter.as_ref(),
+                    read_options.variant_window,
+                ),
+                DosageSource::Dosage => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "plink2 sparse haplotype reads are not implemented for dosage-backed sources; use dense haplotype reads with sparse=False",
+                    ));
+                }
+            }
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(

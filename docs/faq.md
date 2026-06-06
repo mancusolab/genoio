@@ -99,9 +99,11 @@ phased full dosages with `dosage="dosage"`. BGEN haplotype reads support Layout
 2 phased biallelic diploid probabilities with `kind="haplo",
 dosage="dosage"`, returned as expected A1 dosage per haplotype row.
 
-`genoio` does not convert probabilities into hardcalls. Sparse PLINK2/BGEN
-haplotypes are not supported. If an unsupported record is retained, the read
-fails; metadata-only filters can skip unsupported records before decode.
+`genoio` does not convert probabilities into hardcalls. Sparse PLINK2 dosage
+haplotypes and sparse BGEN haplotypes are not supported, while PLINK2 explicit
+phased hardcall haplotypes can be read sparsely when retained calls are
+non-missing. If an unsupported record is retained, the read fails;
+metadata-only filters can skip unsupported records before decode.
 
 ## Universal Standard
 

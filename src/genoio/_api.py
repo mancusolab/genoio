@@ -124,8 +124,9 @@ class Dataset:
           embedded in the `.bgen` file or supplied by a companion `.sample`
           file. Concrete BGEN region filters use a same-path `.bgen.bgi` index
           when present.
-          Sparse reads only support `"hardcall"`. Hardcall-from-dosage
-          conversion is never performed or implied by defaults.
+          Sparse reads only support `"hardcall"`; VCF/BCF and PLINK2 explicit
+          phased hardcall haplotypes can also be read sparsely. Hardcall-from-
+          dosage conversion is never performed or implied by defaults.
         - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
           `"csr"` for CSR.
         - `variants`: filter expression from `genoio` or iterable of variant
@@ -427,7 +428,7 @@ class Dataset:
         dosage: str,
         sparse_format: str | None,
     ) -> None:
-        if kind == "haplo" and sparse_format is not None and self.source.format.value in {"plink2", "bgen"}:
+        if kind == "haplo" and sparse_format is not None and self.source.format.value == "bgen":
             raise UnsupportedRepresentation(
                 f"{self.source.format.value} sparse haplotype reads are not implemented; "
                 "use dense haplotype reads with sparse=False"

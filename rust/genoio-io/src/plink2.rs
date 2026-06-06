@@ -863,6 +863,73 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     )
 }
 
+/// Read all retained explicit-phased PLINK2 hard calls as sparse haplotype CSC.
+pub fn read_plink2_haplotypes_sparse(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+) -> Result<SparseGenotypeMatrix> {
+    read_plink2_haplotypes_sparse_windowed(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        None,
+    )
+}
+
+/// Read retained explicit-phased PLINK2 hard calls as sparse haplotype CSC.
+pub fn read_plink2_haplotypes_sparse_windowed(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Result<SparseGenotypeMatrix> {
+    let dense = read_plink2_haplotypes_dense_windowed(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        false,
+    )?;
+    dense_haplotype_hardcalls_to_sparse(dense)
+}
+
+fn dense_haplotype_hardcalls_to_sparse(dense: DenseGenotypeMatrix) -> Result<SparseGenotypeMatrix> {
+    reject_sparse_missing_values(&dense.missing_mask)?;
+    let mut indptr = Vec::with_capacity(dense.n_variants + 1);
+    indptr.push(0);
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    let mut column = Vec::with_capacity(dense.n_samples);
+
+    for col in 0..dense.n_variants {
+        column.clear();
+        for row in 0..dense.n_samples {
+            column.push(dense.values[row * dense.n_variants + col]);
+        }
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &column);
+    }
+
+    SparseGenotypeMatrix::new(
+        dense.n_samples,
+        dense.n_variants,
+        indptr,
+        indices,
+        data,
+        dense.samples,
+        dense.variants,
+        dense.diagnostics,
+    )
+}
+
 /// Read all retained PLINK2 hard-call genotypes as sparse CSC.
 pub fn read_plink2_sparse(
     pgen: &Path,

@@ -306,12 +306,12 @@ def test_bgen_dataset_read_default_haplotype_does_not_imply_dosage(tmp_path):
         dataset.read(kind="haplo")
 
 
-def test_plink2_dataset_read_rejects_sparse_haplotypes_with_dense_mode_message(tmp_path):
+def test_plink2_dataset_read_rejects_fixed_width_sparse_hardcall_haplotypes(tmp_path):
     import genoio
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse haplotype reads.*dense"):
+    with pytest.raises(genoio.UnsupportedRepresentation, match="variable-width explicit phased records"):
         dataset.read(kind="haplo", sparse=True)
 
 

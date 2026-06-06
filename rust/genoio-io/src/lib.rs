@@ -25,7 +25,8 @@ pub use plink1::{
 pub use plink2::{
     read_plink2_dense, read_plink2_dense_windowed, read_plink2_dosage_dense_windowed,
     read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,
-    read_plink2_metadata, read_plink2_sparse, read_plink2_sparse_windowed,
+    read_plink2_haplotypes_sparse, read_plink2_haplotypes_sparse_windowed, read_plink2_metadata,
+    read_plink2_sparse, read_plink2_sparse_windowed,
 };
 pub use vcf::{
     read_vcf_dense, read_vcf_dense_windowed, read_vcf_dosage_dense_windowed,
