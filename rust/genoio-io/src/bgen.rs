@@ -1832,20 +1832,24 @@ fn decode_unphased_a1_dosage(
 }
 
 fn decode_phased_a1_dosage(bit_depth: u8, p_hap0_a0_raw: u32, p_hap1_a0_raw: u32) -> f32 {
-    let denominator = probability_denominator(bit_depth);
-    let p_hap0_a0 = p_hap0_a0_raw as f32 / denominator;
-    let p_hap1_a0 = p_hap1_a0_raw as f32 / denominator;
-    (2.0 - p_hap0_a0 - p_hap1_a0).clamp(0.0, 2.0)
+    let denominator = probability_denominator_f64(bit_depth);
+    let p_hap0_a0 = p_hap0_a0_raw as f64 / denominator;
+    let p_hap1_a0 = p_hap1_a0_raw as f64 / denominator;
+    (2.0 - p_hap0_a0 - p_hap1_a0).clamp(0.0, 2.0) as f32
 }
 
 fn decode_phased_a1_haplotype_dosage(bit_depth: u8, p_hap_a0_raw: u32) -> f32 {
-    let denominator = probability_denominator(bit_depth);
-    let p_hap_a0 = p_hap_a0_raw as f32 / denominator;
-    (1.0 - p_hap_a0).clamp(0.0, 1.0)
+    let denominator = probability_denominator_f64(bit_depth);
+    let p_hap_a0 = p_hap_a0_raw as f64 / denominator;
+    (1.0 - p_hap_a0).clamp(0.0, 1.0) as f32
 }
 
 fn probability_denominator(bit_depth: u8) -> f32 {
     ((1_u64 << bit_depth) - 1) as f32
+}
+
+fn probability_denominator_f64(bit_depth: u8) -> f64 {
+    ((1_u64 << bit_depth) - 1) as f64
 }
 
 fn decompress_probability_block_into(

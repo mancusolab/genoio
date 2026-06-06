@@ -834,13 +834,14 @@ fn expected_dosage(bit_depth: u8, p_aa: u32, p_ab: u32) -> f32 {
 }
 
 fn expected_phased_a1_dosage(bit_depth: u8, p_hap0_a0: u32, p_hap1_a0: u32) -> f32 {
-    let denominator = ((1_u64 << bit_depth) - 1) as f32;
-    2.0 - (p_hap0_a0 as f32 / denominator) - (p_hap1_a0 as f32 / denominator)
+    let denominator = ((1_u64 << bit_depth) - 1) as f64;
+    (2.0 - (p_hap0_a0 as f64 / denominator) - (p_hap1_a0 as f64 / denominator)).clamp(0.0, 2.0)
+        as f32
 }
 
 fn expected_phased_a1_haplotype_dosage(bit_depth: u8, p_hap_a0: u32) -> f32 {
-    let denominator = ((1_u64 << bit_depth) - 1) as f32;
-    1.0 - (p_hap_a0 as f32 / denominator)
+    let denominator = ((1_u64 << bit_depth) - 1) as f64;
+    (1.0 - (p_hap_a0 as f64 / denominator)).clamp(0.0, 1.0) as f32
 }
 
 fn write_sample_file(path: &Path, rows: &[&str]) {
@@ -1046,6 +1047,37 @@ fn bgen_dosage_dense_decodes_phased_as_collapsed_a1_dosage() {
 }
 
 #[test]
+fn bgen_dosage_dense_preserves_32_bit_low_end_phased_a1_dosage() {
+    let dir = unique_dir("bgen-phased-dosage-bit32-low-end");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [
+            Some((u32::MAX - 1, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+        ],
+        [
+            Some((u32::MAX, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+        ],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 32, &calls);
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
+        .expect("32-bit phased bgen dosage should decode");
+
+    let expected = expected_phased_a1_dosage(32, u32::MAX - 1, u32::MAX);
+    assert!(expected > 0.0);
+    assert!(
+        dense.values[0] > 0.0,
+        "expected low-end phased A1 dosage to remain nonzero, got {}",
+        dense.values[0]
+    );
+    assert!((dense.values[0] - expected).abs() <= f32::EPSILON);
+}
+
+#[test]
 fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     let dir = unique_dir("bgen-haplo-dosage");
     let bgen = dir.join("tiny.bgen");
@@ -1106,6 +1138,38 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
             .collect::<Vec<_>>(),
         vec![Some(0), Some(1), Some(0), Some(1), Some(0), Some(1)]
     );
+}
+
+#[test]
+fn bgen_haplotype_dosage_preserves_32_bit_low_end_a1_probability() {
+    let dir = unique_dir("bgen-haplo-dosage-bit32-low-end");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [
+            Some((u32::MAX - 1, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+        ],
+        [
+            Some((u32::MAX, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+            Some((u32::MAX, u32::MAX)),
+        ],
+    ];
+    write_three_sample_two_variant_phased_dosage_bgen(&bgen, 32, &calls);
+
+    let dense =
+        genoio_io::read_bgen_haplotypes_dosage_dense_windowed(&bgen, None, None, None, None, false)
+            .expect("32-bit phased bgen haplotype dosage should decode");
+
+    let expected = expected_phased_a1_haplotype_dosage(32, u32::MAX - 1);
+    assert!(expected > 0.0);
+    assert!(
+        dense.values[0] > 0.0,
+        "expected low-end A1 haplotype dosage to remain nonzero, got {}",
+        dense.values[0]
+    );
+    assert!((dense.values[0] - expected).abs() <= f32::EPSILON);
 }
 
 #[test]
