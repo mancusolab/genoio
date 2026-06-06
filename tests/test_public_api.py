@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from test_dense_read import (
     write_bgen_dosage,
+    write_fixed_width_phased_dosage_plink2,
     write_fixed_width_plink2,
     write_phased_dosage_plink2,
     write_phased_hardcall_plink2,
@@ -244,6 +245,21 @@ def test_plink2_dataset_read_haplotype_dosage_reaches_backend(tmp_path):
     assert H.shape == (6, 2)
 
 
+def test_plink2_dataset_read_fixed_width_phased_dosage_reaches_backend(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_phased_dosage_plink2(tmp_path))
+
+    H = dataset.read(kind="haplo", dosage="dosage")
+
+    assert H.shape == (6, 2)
+    np.testing.assert_allclose(
+        H[:, 0],
+        [0.25, 0.75, 0.0, 0.5, 1.0, 1.0],
+        atol=2.0 / 32768.0,
+    )
+
+
 def test_bgen_dataset_read_haplotype_dosage_reaches_backend(tmp_path):
     import genoio
 
@@ -297,6 +313,27 @@ def test_plink2_dataset_read_rejects_sparse_haplotypes_with_dense_mode_message(t
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="sparse haplotype reads.*dense"):
         dataset.read(kind="haplo", sparse=True)
+
+
+def test_plink2_dataset_read_fixed_width_hardcall_haplotype_is_unsupported(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
+
+    with pytest.raises(
+        genoio.UnsupportedRepresentation,
+        match="variable-width explicit phased records",
+    ):
+        dataset.read(kind="haplo")
+
+
+def test_plink2_dataset_read_phased_hardcall_as_haplotype_dosage_is_unsupported(tmp_path):
+    import genoio
+
+    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="explicit phased dosage values"):
+        dataset.read(kind="haplo", dosage="dosage")
 
 
 def test_bgen_dataset_read_rejects_sparse_haplotype_dosage_with_dense_mode_message(tmp_path):

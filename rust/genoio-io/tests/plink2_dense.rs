@@ -113,6 +113,21 @@ fn explicit_phased_dosage_pgen(records: &[&[u8]], n_samples: u32) -> Vec<u8> {
     variable_width_pgen(&vec![0xc0; records.len()], records, n_samples)
 }
 
+fn fixed_width_phased_dosage_pgen(records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    // PGEN fixed-width mode 0x04 stores each variant as an effective vrtype
+    // 0xc0 record: hardcall main track, full dosage track, and full explicit
+    // phased-dosage track, without a per-variant vrtype byte.
+    let n_variants = u32::try_from(records.len()).expect("test variant count fits u32");
+    let mut bytes = vec![0x6c, 0x1b, 0x04];
+    bytes.extend(n_variants.to_le_bytes());
+    bytes.extend(n_samples.to_le_bytes());
+    bytes.push(0);
+    for record in records {
+        bytes.extend(*record);
+    }
+    bytes
+}
+
 fn explicit_phased_hardcall_ld_pgen() -> Vec<u8> {
     // rs1 is a non-LD explicit-phased hardcall. rs2 is vrtype 0x12:
     // LD-compressed main track plus hardcall phase bits, so windowed reads
@@ -648,6 +663,40 @@ fn plink2_haplotype_dosage_dense_decodes_explicit_phased_dosage() {
         &pgen, &pvar, &psam, None, None, None, false,
     )
     .expect("explicit phased dosage pgen should decode");
+
+    assert_eq!(dense.n_samples, 6);
+    assert_eq!(dense.n_variants, 1);
+    assert_eq!(dense.values, vec![s1_l, s1_r, s2_l, s2_r, s3_l, s3_r]);
+    assert_eq!(dense.missing_mask, vec![false; 6]);
+}
+
+#[test]
+fn plink2_haplotype_dosage_dense_decodes_fixed_width_phased_dosage() {
+    let dir = unique_dir("plink2-haplo-fixed-width-phased-dosage");
+    let (s1_l, s1_r) = expected_pgen_haplotype_dosages(0.25, 0.75);
+    let (s2_l, s2_r) = expected_pgen_haplotype_dosages(0.0, 0.5);
+    let (s3_l, s3_r) = expected_pgen_haplotype_dosages(1.0, 1.0);
+    let mut record = vec![0x25];
+    record.extend(scaled_dosage(1.0));
+    record.extend(scaled_dosage(0.5));
+    record.extend(scaled_dosage(2.0));
+    record.extend(scaled_phase_delta(0.25, 0.75));
+    record.extend(scaled_phase_delta(0.0, 0.5));
+    record.extend(scaled_phase_delta(1.0, 1.0));
+    let pgen_bytes = fixed_width_phased_dosage_pgen(&[&record], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let dense = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect("fixed-width explicit phased dosage pgen should decode");
 
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 1);

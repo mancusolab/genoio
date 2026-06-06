@@ -695,6 +695,10 @@ def _public_haplotype_read_error(error: ValueError) -> Exception:
     message = str(error)
     if (
         "unphased" in message
+        or "require variable-width explicit phased records" in message
+        or "requires explicit phased dosage records" in message
+        or "does not contain explicit phased dosage values" in message
+        or "does not accept dosage records" in message
         or "unsupported haplotype format" in message
         or ("bgen" in message and "not implemented" in message)
         or ("plink2" in message and "haplotype" in message and "not implemented" in message)

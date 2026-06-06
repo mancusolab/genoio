@@ -20,6 +20,7 @@ use crate::hardcall::{HardcallBatch as PackedVariantBatch, PackedHardcalls as Pa
 const PGEN_MAGIC: [u8; 2] = [0x6c, 0x1b];
 const PGEN_MODE_FIXED_WIDTH_HARDCALLS: u8 = 0x02;
 const PGEN_MODE_FIXED_WIDTH_DOSAGE: u8 = 0x03;
+const PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE: u8 = 0x04;
 const PGEN_MODE_VARIABLE_WIDTH: u8 = 0x10;
 const PGEN_HEADER_LEN: u64 = 12;
 const PGEN_VARIANT_BLOCK_SIZE: usize = 65_536;
@@ -208,6 +209,7 @@ fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Ve
 enum PgenLayout {
     FixedWidth,
     FixedWidthDosage,
+    FixedWidthPhasedDosage,
     VariableWidth,
 }
 
@@ -747,7 +749,7 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         diagnostics.candidate_variants += 1;
-        let main_track_cursor = read_plink2_variant_haplotype_main_track(
+        let main_track_cursor = read_plink2_variant_haplotype_dosage_track(
             pgen,
             &mut file,
             &header,
@@ -1061,7 +1063,9 @@ fn read_plink2_dense_matrix_only_source_window(
     // Unfiltered source windows know their final retained width up front, so
     // construct the public sample-major buffers directly.
     match header.layout {
-        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
+        PgenLayout::FixedWidth
+        | PgenLayout::FixedWidthDosage
+        | PgenLayout::FixedWidthPhasedDosage => {
             if n_variants > 0 {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
             }
@@ -1167,7 +1171,9 @@ fn read_plink2_dense_source_window(
     // This metadata-bearing source-window path uses the same packed batch
     // expansion as matrix-only windows while preserving metadata alignment.
     match header.layout {
-        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
+        PgenLayout::FixedWidth
+        | PgenLayout::FixedWidthDosage
+        | PgenLayout::FixedWidthPhasedDosage => {
             if let Some((first_variant_index, _)) = window_variants.first() {
                 seek_fixed_width_variant_record(pgen, &mut file, &header, *first_variant_index)?;
             }
@@ -1285,7 +1291,9 @@ fn read_plink2_sparse_source_window(
     let mut variants = Vec::new();
 
     match header.layout {
-        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
+        PgenLayout::FixedWidth
+        | PgenLayout::FixedWidthDosage
+        | PgenLayout::FixedWidthPhasedDosage => {
             // Fixed-width records can be decoded by direct source index.
             for (variant_index, mut variant) in window_variants {
                 read_plink2_variant_values(
@@ -1407,6 +1415,28 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
                 record_offsets: Vec::new(),
             })
         }
+        PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE => {
+            if header[11] != 0 {
+                return Err(MetadataError::parse(
+                    path,
+                    "unsupported pgen header flags; only fixed-width biallelic phased dosage without header extensions is supported",
+                ));
+            }
+            validate_fixed_width_pgen_payload_len(
+                path,
+                &file,
+                variant_ct,
+                fixed_width_phased_dosage_record_len(sample_ct),
+            )?;
+            Ok(PgenHeader {
+                layout: PgenLayout::FixedWidthPhasedDosage,
+                variant_ct,
+                sample_ct,
+                bytes_per_variant,
+                record_types: Vec::new(),
+                record_offsets: Vec::new(),
+            })
+        }
         PGEN_MODE_VARIABLE_WIDTH => {
             let (record_types, record_offsets) =
                 read_variable_width_header_body(path, &mut file, variant_ct, header[11])?;
@@ -1481,6 +1511,28 @@ fn read_supported_pgen_header_prefix(
             )?;
             Ok(PgenHeader {
                 layout: PgenLayout::FixedWidthDosage,
+                variant_ct,
+                sample_ct,
+                bytes_per_variant,
+                record_types: Vec::new(),
+                record_offsets: Vec::new(),
+            })
+        }
+        PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE => {
+            if header[11] != 0 {
+                return Err(MetadataError::parse(
+                    path,
+                    "unsupported pgen header flags; only fixed-width biallelic phased dosage without header extensions is supported",
+                ));
+            }
+            validate_fixed_width_pgen_payload_len(
+                path,
+                &file,
+                variant_ct,
+                fixed_width_phased_dosage_record_len(sample_ct),
+            )?;
+            Ok(PgenHeader {
+                layout: PgenLayout::FixedWidthPhasedDosage,
                 variant_ct,
                 sample_ct,
                 bytes_per_variant,
@@ -1921,10 +1973,17 @@ fn fixed_width_dosage_record_len(sample_ct: usize) -> usize {
     sample_ct.div_ceil(4) + sample_ct * 2
 }
 
+fn fixed_width_phased_dosage_record_len(sample_ct: usize) -> usize {
+    sample_ct.div_ceil(4) + sample_ct * 4
+}
+
 fn fixed_width_record_len(header: &PgenHeader) -> usize {
     match header.layout {
         PgenLayout::FixedWidth => header.bytes_per_variant,
         PgenLayout::FixedWidthDosage => fixed_width_dosage_record_len(header.sample_ct),
+        PgenLayout::FixedWidthPhasedDosage => {
+            fixed_width_phased_dosage_record_len(header.sample_ct)
+        }
         PgenLayout::VariableWidth => header.bytes_per_variant,
     }
 }
@@ -2039,6 +2098,14 @@ fn read_plink2_variant_dosage(
             source_indices,
             decoder_state,
         ),
+        PgenLayout::FixedWidthPhasedDosage => read_fixed_width_phased_dosage_variant_values(
+            path,
+            file,
+            header,
+            variant_index,
+            source_indices,
+            decoder_state,
+        ),
         PgenLayout::VariableWidth => read_variable_width_dosage_variant_values(
             path,
             file,
@@ -2062,7 +2129,9 @@ fn read_plink2_variant_packed(
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
     match header.layout {
-        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => {
+        PgenLayout::FixedWidth
+        | PgenLayout::FixedWidthDosage
+        | PgenLayout::FixedWidthPhasedDosage => {
             read_fixed_width_variant_packed(path, file, header, variant_index, decoder_state)
         }
         PgenLayout::VariableWidth => {
@@ -2257,6 +2326,83 @@ fn read_fixed_width_dosage_variant_values(
     )
 }
 
+fn read_fixed_width_phased_dosage_variant_record(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    decoder_state: &mut PgenDecoderState,
+) -> Result<usize> {
+    let record_len = fixed_width_phased_dosage_record_len(header.sample_ct);
+    let payload_offset = variant_index
+        .checked_mul(record_len)
+        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+    let offset = PGEN_HEADER_LEN
+        .checked_add(
+            u64::try_from(payload_offset)
+                .map_err(|_| MetadataError::parse(path, "pgen variant offset is out of range"))?,
+        )
+        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    decoder_state.record.resize(record_len, 0);
+    file.read_exact(&mut decoder_state.record)
+        .map_err(|source| MetadataError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    decoder_state.packed.load_pgen_payload(
+        &decoder_state.record[..header.bytes_per_variant],
+        header.sample_ct,
+    );
+    if decoder_state.packed.sample_ct() != header.sample_ct {
+        return Err(MetadataError::parse(
+            path,
+            "pgen decoded category count does not match sample count",
+        ));
+    }
+    Ok(header.bytes_per_variant)
+}
+
+fn read_fixed_width_phased_dosage_variant_values(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    let cursor = read_fixed_width_phased_dosage_variant_record(
+        path,
+        file,
+        header,
+        variant_index,
+        decoder_state,
+    )?;
+    decoder_state.packed.expand_selected(
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing,
+    );
+    let dosage_end =
+        cursor
+            .checked_add(header.sample_ct.checked_mul(2).ok_or_else(|| {
+                MetadataError::parse(path, "pgen dosage byte count is out of range")
+            })?)
+            .ok_or_else(|| MetadataError::parse(path, "pgen dosage byte count is out of range"))?;
+    overlay_fixed_width_dosages(
+        path,
+        &decoder_state.record[cursor..dosage_end],
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing,
+    )
+}
+
 fn read_variable_width_dosage_variant_values(
     path: &Path,
     file: &mut File,
@@ -2350,6 +2496,35 @@ fn read_plink2_variant_haplotype_main_track(
     Ok(cursor)
 }
 
+fn read_plink2_variant_haplotype_dosage_track(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    decoder_state: &mut PgenDecoderState,
+) -> Result<usize> {
+    match header.layout {
+        PgenLayout::FixedWidthPhasedDosage => read_fixed_width_phased_dosage_variant_record(
+            path,
+            file,
+            header,
+            variant_index,
+            decoder_state,
+        ),
+        PgenLayout::VariableWidth => read_plink2_variant_haplotype_main_track(
+            path,
+            file,
+            header,
+            variant_index,
+            decoder_state,
+        ),
+        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => Err(MetadataError::parse(
+            path,
+            "plink2 haplotype dosage reads require explicit phased dosage records",
+        )),
+    }
+}
+
 fn validate_variable_width_haplotype_layout(path: &Path, header: &PgenHeader) -> Result<()> {
     if matches!(header.layout, PgenLayout::VariableWidth) {
         Ok(())
@@ -2371,16 +2546,16 @@ fn decode_plink2_haplotype_hardcall_aux(
     haplotype_state: &mut PgenHaplotypeDecodeState,
 ) -> Result<()> {
     let record_type = header.record_types[variant_index];
-    if record_type & 0x10 == 0 {
-        return Err(MetadataError::parse(
-            path,
-            "unphased pgen hardcall record retained in haplotype read",
-        ));
-    }
     if ((record_type >> 5) & 0x03) != 0 || record_type & 0x80 != 0 {
         return Err(MetadataError::parse(
             path,
             "pgen haplotype hardcall read does not accept dosage records",
+        ));
+    }
+    if record_type & 0x10 == 0 {
+        return Err(MetadataError::parse(
+            path,
+            "unphased pgen hardcall record retained in haplotype read",
         ));
     }
     decode_hardcall_phase_track(
@@ -2402,6 +2577,16 @@ fn decode_plink2_haplotype_dosage_aux(
     decoder_state: &PgenDecoderState,
     haplotype_state: &mut PgenHaplotypeDecodeState,
 ) -> Result<()> {
+    if matches!(header.layout, PgenLayout::FixedWidthPhasedDosage) {
+        return decode_full_phased_dosage_tracks(
+            path,
+            decoder_state.record.as_slice(),
+            cursor,
+            header.sample_ct,
+            source_indices,
+            haplotype_state,
+        );
+    }
     let record_type = header.record_types[variant_index];
     let dosage_bits = (record_type >> 5) & 0x03;
     if record_type & 0x80 == 0 {
