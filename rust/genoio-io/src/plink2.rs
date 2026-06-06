@@ -8,7 +8,7 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_values_to_minor_allele, reject_sparse_missing_values, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, DenseSampleSelection,
-    MetadataError, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
+    GenoioError, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
     SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 
@@ -278,7 +278,7 @@ pub fn read_plink2_dense_windowed(
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+        fs::metadata(pvar).map_err(|source| GenoioError::Io {
             path: pvar.to_path_buf(),
             source,
         })?;
@@ -437,7 +437,7 @@ pub fn read_plink2_dosage_dense_windowed(
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+        fs::metadata(pvar).map_err(|source| GenoioError::Io {
             path: pvar.to_path_buf(),
             source,
         })?;
@@ -567,7 +567,7 @@ pub fn read_plink2_haplotypes_dense_windowed(
     let mut diagnostics = selection.diagnostics.clone();
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+        fs::metadata(pvar).map_err(|source| GenoioError::Io {
             path: pvar.to_path_buf(),
             source,
         })?;
@@ -718,7 +718,7 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     let mut diagnostics = selection.diagnostics.clone();
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+        fs::metadata(pvar).map_err(|source| GenoioError::Io {
             path: pvar.to_path_buf(),
             source,
         })?;
@@ -964,7 +964,7 @@ pub fn read_plink2_sparse_windowed(
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let mut diagnostics = selection.diagnostics;
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| MetadataError::Io {
+        fs::metadata(pvar).map_err(|source| GenoioError::Io {
             path: pvar.to_path_buf(),
             source,
         })?;
@@ -1113,10 +1113,10 @@ fn read_plink2_dense_matrix_only_source_window(
     let decode_variant_ct = window
         .start
         .checked_add(window.len)
-        .ok_or_else(|| MetadataError::parse(pgen, "variant window end is out of range"))?;
+        .ok_or_else(|| GenoioError::invalid_source(pgen, "variant window end is out of range"))?;
     let header = read_supported_pgen_header_prefix(pgen, decode_variant_ct)?;
     if window.start > header.variant_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             pgen,
             format!(
                 "variant window start {} exceeds pgen variant count {}",
@@ -1434,25 +1434,28 @@ fn read_plink2_sparse_source_window(
 }
 
 fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
-    let mut file = File::open(path).map_err(|source| MetadataError::Io {
+    let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     let mut header = [0_u8; PGEN_HEADER_LEN as usize];
     file.read_exact(&mut header)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     if header[0..2] != PGEN_MAGIC {
-        return Err(MetadataError::parse(path, "invalid pgen magic bytes"));
+        return Err(GenoioError::invalid_source(
+            path,
+            "invalid pgen magic bytes",
+        ));
     }
     let (variant_ct, sample_ct) = parse_pgen_header_counts(path, &header)?;
     let bytes_per_variant = sample_ct.div_ceil(4);
     match header[2] {
         PGEN_MODE_FIXED_WIDTH_HARDCALLS => {
             if header[11] != 0 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "unsupported pgen header flags; only fixed-width biallelic hardcalls without header extensions are supported",
                 ));
@@ -1469,7 +1472,7 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
         }
         PGEN_MODE_FIXED_WIDTH_DOSAGE => {
             if header[11] != 0 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "unsupported pgen header flags; only fixed-width biallelic dosage without header extensions is supported",
                 ));
@@ -1491,7 +1494,7 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
         }
         PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE => {
             if header[11] != 0 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "unsupported pgen header flags; only fixed-width biallelic phased dosage without header extensions is supported",
                 ));
@@ -1523,7 +1526,7 @@ fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
                 record_offsets,
             })
         }
-        mode => Err(MetadataError::parse(
+        mode => Err(GenoioError::invalid_source(
             path,
             format!(
                 "unsupported pgen mode 0x{mode:02x}; only fixed-width and variable-width biallelic hardcalls are supported"
@@ -1536,18 +1539,21 @@ fn read_supported_pgen_header_prefix(
     path: &Path,
     requested_variant_ct: usize,
 ) -> Result<PgenHeader> {
-    let mut file = File::open(path).map_err(|source| MetadataError::Io {
+    let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     let mut header = [0_u8; PGEN_HEADER_LEN as usize];
     file.read_exact(&mut header)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     if header[0..2] != PGEN_MAGIC {
-        return Err(MetadataError::parse(path, "invalid pgen magic bytes"));
+        return Err(GenoioError::invalid_source(
+            path,
+            "invalid pgen magic bytes",
+        ));
     }
     let (variant_ct, sample_ct) = parse_pgen_header_counts(path, &header)?;
     let bytes_per_variant = sample_ct.div_ceil(4);
@@ -1555,7 +1561,7 @@ fn read_supported_pgen_header_prefix(
     match header[2] {
         PGEN_MODE_FIXED_WIDTH_HARDCALLS => {
             if header[11] != 0 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "unsupported pgen header flags; only fixed-width biallelic hardcalls without header extensions are supported",
                 ));
@@ -1572,7 +1578,7 @@ fn read_supported_pgen_header_prefix(
         }
         PGEN_MODE_FIXED_WIDTH_DOSAGE => {
             if header[11] != 0 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "unsupported pgen header flags; only fixed-width biallelic dosage without header extensions is supported",
                 ));
@@ -1594,7 +1600,7 @@ fn read_supported_pgen_header_prefix(
         }
         PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE => {
             if header[11] != 0 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "unsupported pgen header flags; only fixed-width biallelic phased dosage without header extensions is supported",
                 ));
@@ -1631,7 +1637,7 @@ fn read_supported_pgen_header_prefix(
                 record_offsets,
             })
         }
-        mode => Err(MetadataError::parse(
+        mode => Err(GenoioError::invalid_source(
             path,
             format!(
                 "unsupported pgen mode 0x{mode:02x}; only fixed-width and variable-width biallelic hardcalls or unphased dosages are supported"
@@ -1647,11 +1653,11 @@ fn parse_pgen_header_counts(
     let variant_ct = usize::try_from(u32::from_le_bytes([
         header[3], header[4], header[5], header[6],
     ]))
-    .map_err(|_| MetadataError::parse(path, "pgen variant count is out of range"))?;
+    .map_err(|_| GenoioError::invalid_source(path, "pgen variant count is out of range"))?;
     let sample_ct = usize::try_from(u32::from_le_bytes([
         header[7], header[8], header[9], header[10],
     ]))
-    .map_err(|_| MetadataError::parse(path, "pgen sample count is out of range"))?;
+    .map_err(|_| GenoioError::invalid_source(path, "pgen sample count is out of range"))?;
     Ok((variant_ct, sample_ct))
 }
 
@@ -1666,7 +1672,7 @@ fn read_variable_width_header_body(
         0..=3 => 4,
         4..=7 => 8,
         other => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("unsupported pgen variant-record type/length format {other}"),
             ));
@@ -1675,7 +1681,7 @@ fn read_variable_width_header_body(
     let length_width = usize::from((type_length_format & 0x03) + 1);
     let allele_count_format = (header_format >> 4) & 0x03;
     if allele_count_format != 0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "unsupported pgen allele-count table; multiallelic PGEN decode is not implemented",
         ));
@@ -1686,7 +1692,7 @@ fn read_variable_width_header_body(
     for _ in 0..block_ct {
         let mut bytes = [0_u8; 8];
         file.read_exact(&mut bytes)
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -1700,7 +1706,7 @@ fn read_variable_width_header_body(
         if type_width_bits == 8 {
             let mut types = vec![0_u8; block_variant_ct];
             file.read_exact(&mut types)
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
@@ -1708,7 +1714,7 @@ fn read_variable_width_header_body(
         } else {
             let mut packed_types = vec![0_u8; block_variant_ct.div_ceil(2)];
             file.read_exact(&mut packed_types)
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
@@ -1726,7 +1732,7 @@ fn read_variable_width_header_body(
         for _ in 0..block_variant_ct {
             let mut bytes = [0_u8; 4];
             file.read_exact(&mut bytes[..length_width])
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
@@ -1736,7 +1742,7 @@ fn read_variable_width_header_body(
     for record_type in &record_types {
         validate_supported_variable_record_type(path, *record_type)?;
     }
-    let header_end = file.stream_position().map_err(|source| MetadataError::Io {
+    let header_end = file.stream_position().map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -1749,7 +1755,7 @@ fn read_variable_width_header_body(
         let mut offset = *block_offset;
         if record_offsets.len() == block_start {
             if block_index == 0 && offset != header_end {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen first variant-block offset does not match header length",
                 ));
@@ -1759,33 +1765,33 @@ fn read_variable_width_header_body(
             .get(block_start)
             .is_none_or(|expected_offset| *expected_offset != offset)
         {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "pgen variant-block offset does not match preceding record lengths",
             ));
         }
         for length in &record_lengths[block_start..block_end] {
-            offset = offset
-                .checked_add(u64::from(*length))
-                .ok_or_else(|| MetadataError::parse(path, "pgen record offset is out of range"))?;
+            offset = offset.checked_add(u64::from(*length)).ok_or_else(|| {
+                GenoioError::invalid_source(path, "pgen record offset is out of range")
+            })?;
             record_offsets.push(offset);
         }
     }
     if record_offsets.len() != variant_ct + 1 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen variable-width header did not yield one offset per variant",
         ));
     }
     let actual_len = file
         .metadata()
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?
         .len();
     if record_offsets[variant_ct] > actual_len {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen variable-width records extend past end of file",
         ));
@@ -1806,7 +1812,7 @@ fn read_variable_width_header_body_prefix(
         0..=3 => 4,
         4..=7 => 8,
         other => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("unsupported pgen variant-record type/length format {other}"),
             ));
@@ -1815,7 +1821,7 @@ fn read_variable_width_header_body_prefix(
     let length_width = usize::from((type_length_format & 0x03) + 1);
     let allele_count_format = (header_format >> 4) & 0x03;
     if allele_count_format != 0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "unsupported pgen allele-count table; multiallelic PGEN decode is not implemented",
         ));
@@ -1826,7 +1832,7 @@ fn read_variable_width_header_body_prefix(
     for _ in 0..block_ct {
         let mut bytes = [0_u8; 8];
         file.read_exact(&mut bytes)
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -1861,7 +1867,7 @@ fn read_variable_width_header_body_prefix(
         )?;
         if record_offsets.is_empty() {
             if block_index == 0 && block_offset != header_end {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen first variant-block offset does not match header length",
                 ));
@@ -1871,7 +1877,7 @@ fn read_variable_width_header_body_prefix(
             .get(block_start)
             .is_none_or(|expected_offset| *expected_offset != block_offset)
         {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "pgen variant-block offset does not match preceding record lengths",
             ));
@@ -1880,13 +1886,15 @@ fn read_variable_width_header_body_prefix(
         for _ in 0..needed_in_block {
             let mut bytes = [0_u8; 4];
             file.read_exact(&mut bytes[..length_width])
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
             offset = offset
                 .checked_add(u64::from(u32::from_le_bytes(bytes)))
-                .ok_or_else(|| MetadataError::parse(path, "pgen record offset is out of range"))?;
+                .ok_or_else(|| {
+                    GenoioError::invalid_source(path, "pgen record offset is out of range")
+                })?;
             record_offsets.push(offset);
         }
         let remaining_lengths = block_variant_ct - needed_in_block;
@@ -1900,13 +1908,13 @@ fn read_variable_width_header_body_prefix(
     if let Some(prefix_end) = record_offsets.last() {
         let actual_len = file
             .metadata()
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: path.to_path_buf(),
                 source,
             })?
             .len();
         if *prefix_end > actual_len {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "pgen variable-width records extend past end of file",
             ));
@@ -1922,14 +1930,16 @@ fn variable_width_header_end(
     length_width: usize,
 ) -> Result<u64> {
     let block_ct = variant_ct.div_ceil(PGEN_VARIANT_BLOCK_SIZE);
-    let block_offsets_len = block_ct
-        .checked_mul(8)
-        .ok_or_else(|| MetadataError::parse(path, "pgen variable-width header is out of range"))?;
+    let block_offsets_len = block_ct.checked_mul(8).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen variable-width header is out of range")
+    })?;
     let mut header_end = PGEN_HEADER_LEN
         .checked_add(u64::try_from(block_offsets_len).map_err(|_| {
-            MetadataError::parse(path, "pgen variable-width header is out of range")
+            GenoioError::invalid_source(path, "pgen variable-width header is out of range")
         })?)
-        .ok_or_else(|| MetadataError::parse(path, "pgen variable-width header is out of range"))?;
+        .ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen variable-width header is out of range")
+        })?;
     for block_index in 0..block_ct {
         let block_variant_ct = block_variant_count(variant_ct, block_index);
         let type_table_len = if type_width_bits == 8 {
@@ -1938,19 +1948,19 @@ fn variable_width_header_end(
             block_variant_ct.div_ceil(2)
         };
         let length_table_len = block_variant_ct.checked_mul(length_width).ok_or_else(|| {
-            MetadataError::parse(path, "pgen variable-width header is out of range")
+            GenoioError::invalid_source(path, "pgen variable-width header is out of range")
         })?;
         let table_len = type_table_len
             .checked_add(length_table_len)
             .ok_or_else(|| {
-                MetadataError::parse(path, "pgen variable-width header is out of range")
+                GenoioError::invalid_source(path, "pgen variable-width header is out of range")
             })?;
         header_end = header_end
             .checked_add(u64::try_from(table_len).map_err(|_| {
-                MetadataError::parse(path, "pgen variable-width header is out of range")
+                GenoioError::invalid_source(path, "pgen variable-width header is out of range")
             })?)
             .ok_or_else(|| {
-                MetadataError::parse(path, "pgen variable-width header is out of range")
+                GenoioError::invalid_source(path, "pgen variable-width header is out of range")
             })?;
     }
     Ok(header_end)
@@ -1967,7 +1977,7 @@ fn read_variable_record_type_prefix(
     if type_width_bits == 8 {
         let mut types = vec![0_u8; needed_in_block];
         file.read_exact(&mut types)
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -1979,7 +1989,7 @@ fn read_variable_record_type_prefix(
     let packed_needed = needed_in_block.div_ceil(2);
     let mut packed_types = vec![0_u8; packed_needed];
     file.read_exact(&mut packed_types)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -1999,10 +2009,10 @@ fn read_variable_record_type_prefix(
 }
 
 fn skip_bytes(path: &Path, file: &mut File, len: usize) -> Result<()> {
-    let offset =
-        i64::try_from(len).map_err(|_| MetadataError::parse(path, "pgen skip is out of range"))?;
+    let offset = i64::try_from(len)
+        .map_err(|_| GenoioError::invalid_source(path, "pgen skip is out of range"))?;
     file.seek(SeekFrom::Current(offset))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2016,27 +2026,27 @@ fn block_variant_count(variant_ct: usize, block_index: usize) -> usize {
 
 fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Result<()> {
     if record_type & 0x08 != 0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "unsupported pgen multiallelic hard-call patch set",
         ));
     }
     let dosage_bits = (record_type >> 5) & 0x03;
     if dosage_bits != 0 && record_type & 0x10 != 0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "unsupported pgen hardcall-phase track with dosage",
         ));
     }
     if record_type & 0x80 != 0 && dosage_bits != 2 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "unsupported pgen phased-dosage track without full dosage track",
         ));
     }
     match record_type & 0x07 {
         0 | 1 | 2 | 3 | 4 | 6 | 7 => Ok(()),
-        compression => Err(MetadataError::parse(
+        compression => Err(GenoioError::invalid_source(
             path,
             format!("unsupported pgen main-track compression type {compression}"),
         )),
@@ -2070,22 +2080,21 @@ fn validate_fixed_width_pgen_payload_len(
 ) -> Result<()> {
     let payload_len = variant_ct
         .checked_mul(bytes_per_record)
-        .ok_or_else(|| MetadataError::parse(path, "pgen payload length is out of range"))?;
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen payload length is out of range"))?;
     let expected_len = PGEN_HEADER_LEN
-        .checked_add(
-            u64::try_from(payload_len)
-                .map_err(|_| MetadataError::parse(path, "pgen payload length is out of range"))?,
-        )
-        .ok_or_else(|| MetadataError::parse(path, "pgen payload length is out of range"))?;
+        .checked_add(u64::try_from(payload_len).map_err(|_| {
+            GenoioError::invalid_source(path, "pgen payload length is out of range")
+        })?)
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen payload length is out of range"))?;
     let actual_len = file
         .metadata()
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?
         .len();
     if actual_len != expected_len {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("pgen payload length {actual_len} does not match fixed-width header"),
         ));
@@ -2101,7 +2110,7 @@ fn validate_plink2_dimensions(
 ) -> Result<()> {
     validate_plink2_sample_count(path, header, sample_ct)?;
     if header.variant_ct != variant_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "pgen variant count {} does not match pvar variant count {variant_ct}",
@@ -2114,7 +2123,7 @@ fn validate_plink2_dimensions(
 
 fn validate_plink2_sample_count(path: &Path, header: &PgenHeader, sample_ct: usize) -> Result<()> {
     if header.sample_ct != sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "pgen sample count {} does not match psam sample count {sample_ct}",
@@ -2126,12 +2135,12 @@ fn validate_plink2_sample_count(path: &Path, header: &PgenHeader, sample_ct: usi
 }
 
 fn open_pgen_payload(path: &Path) -> Result<File> {
-    let mut file = File::open(path).map_err(|source| MetadataError::Io {
+    let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     file.seek(SeekFrom::Start(PGEN_HEADER_LEN))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2188,8 +2197,7 @@ fn read_plink2_variant_dosage(
             source_indices,
             decoder_state,
         ),
-        PgenLayout::FixedWidth => Err(MetadataError::parse(
-            path,
+        PgenLayout::FixedWidth => Err(GenoioError::unsupported(
             "pgen does not contain dosage values",
         )),
     }
@@ -2233,15 +2241,14 @@ fn seek_fixed_width_variant_record(
 ) -> Result<()> {
     let payload_offset = variant_index
         .checked_mul(fixed_width_record_len(header))
-        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen variant offset is out of range"))?;
     let offset = PGEN_HEADER_LEN
-        .checked_add(
-            u64::try_from(payload_offset)
-                .map_err(|_| MetadataError::parse(path, "pgen variant offset is out of range"))?,
-        )
-        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+        .checked_add(u64::try_from(payload_offset).map_err(|_| {
+            GenoioError::invalid_source(path, "pgen variant offset is out of range")
+        })?)
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen variant offset is out of range"))?;
     file.seek(SeekFrom::Start(offset))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2258,7 +2265,7 @@ fn read_fixed_width_variant_packed_sequential(
         .record
         .resize(fixed_width_record_len(header), 0);
     file.read_exact(&mut decoder_state.record)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2279,19 +2286,19 @@ fn read_variable_width_variant_packed(
 ) -> Result<()> {
     let start = header.record_offsets[variant_index];
     let end = header.record_offsets[variant_index + 1];
-    let record_len = usize::try_from(
-        end.checked_sub(start)
-            .ok_or_else(|| MetadataError::parse(path, "pgen record length is out of range"))?,
-    )
-    .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
+    let record_len =
+        usize::try_from(end.checked_sub(start).ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen record length is out of range")
+        })?)
+        .map_err(|_| GenoioError::invalid_source(path, "pgen record length is out of range"))?;
     file.seek(SeekFrom::Start(start))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     decoder_state.record.resize(record_len, 0);
     file.read_exact(&mut decoder_state.record)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2301,7 +2308,7 @@ fn read_variable_width_variant_packed(
     match compression {
         0 => {
             if record.len() < header.bytes_per_variant {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen uncompressed record is shorter than expected",
                 ));
@@ -2313,7 +2320,7 @@ fn read_variable_width_variant_packed(
         1 => decode_one_bit_record(path, record, header.sample_ct, &mut decoder_state.packed)?,
         2 | 3 => {
             if !decoder_state.has_previous_non_ld {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen LD-compressed record appears before any non-LD record",
                 ));
@@ -2331,14 +2338,14 @@ fn read_variable_width_variant_packed(
         6 => decode_difflist_record(path, record, header.sample_ct, 2, &mut decoder_state.packed)?,
         7 => decode_difflist_record(path, record, header.sample_ct, 3, &mut decoder_state.packed)?,
         other => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("unsupported pgen main-track compression type {other}"),
             ));
         }
     }
     if decoder_state.packed.sample_ct() != header.sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen decoded category count does not match sample count",
         ));
@@ -2363,21 +2370,20 @@ fn read_fixed_width_dosage_variant_values(
     let record_len = fixed_width_dosage_record_len(header.sample_ct);
     let payload_offset = variant_index
         .checked_mul(record_len)
-        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen variant offset is out of range"))?;
     let offset = PGEN_HEADER_LEN
-        .checked_add(
-            u64::try_from(payload_offset)
-                .map_err(|_| MetadataError::parse(path, "pgen variant offset is out of range"))?,
-        )
-        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+        .checked_add(u64::try_from(payload_offset).map_err(|_| {
+            GenoioError::invalid_source(path, "pgen variant offset is out of range")
+        })?)
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen variant offset is out of range"))?;
     file.seek(SeekFrom::Start(offset))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     decoder_state.record.resize(record_len, 0);
     file.read_exact(&mut decoder_state.record)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2410,21 +2416,20 @@ fn read_fixed_width_phased_dosage_variant_record(
     let record_len = fixed_width_phased_dosage_record_len(header.sample_ct);
     let payload_offset = variant_index
         .checked_mul(record_len)
-        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen variant offset is out of range"))?;
     let offset = PGEN_HEADER_LEN
-        .checked_add(
-            u64::try_from(payload_offset)
-                .map_err(|_| MetadataError::parse(path, "pgen variant offset is out of range"))?,
-        )
-        .ok_or_else(|| MetadataError::parse(path, "pgen variant offset is out of range"))?;
+        .checked_add(u64::try_from(payload_offset).map_err(|_| {
+            GenoioError::invalid_source(path, "pgen variant offset is out of range")
+        })?)
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen variant offset is out of range"))?;
     file.seek(SeekFrom::Start(offset))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     decoder_state.record.resize(record_len, 0);
     file.read_exact(&mut decoder_state.record)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2434,7 +2439,7 @@ fn read_fixed_width_phased_dosage_variant_record(
         header.sample_ct,
     );
     if decoder_state.packed.sample_ct() != header.sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen decoded category count does not match sample count",
         ));
@@ -2462,12 +2467,13 @@ fn read_fixed_width_phased_dosage_variant_values(
         &mut decoder_state.values,
         &mut decoder_state.missing,
     );
-    let dosage_end =
-        cursor
-            .checked_add(header.sample_ct.checked_mul(2).ok_or_else(|| {
-                MetadataError::parse(path, "pgen dosage byte count is out of range")
-            })?)
-            .ok_or_else(|| MetadataError::parse(path, "pgen dosage byte count is out of range"))?;
+    let dosage_end = cursor
+        .checked_add(header.sample_ct.checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen dosage byte count is out of range")
+        })?)
+        .ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen dosage byte count is out of range")
+        })?;
     overlay_fixed_width_dosages(
         path,
         &decoder_state.record[cursor..dosage_end],
@@ -2487,19 +2493,19 @@ fn read_variable_width_dosage_variant_values(
 ) -> Result<()> {
     let start = header.record_offsets[variant_index];
     let end = header.record_offsets[variant_index + 1];
-    let record_len = usize::try_from(
-        end.checked_sub(start)
-            .ok_or_else(|| MetadataError::parse(path, "pgen record length is out of range"))?,
-    )
-    .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
+    let record_len =
+        usize::try_from(end.checked_sub(start).ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen record length is out of range")
+        })?)
+        .map_err(|_| GenoioError::invalid_source(path, "pgen record length is out of range"))?;
     file.seek(SeekFrom::Start(start))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     decoder_state.record.resize(record_len, 0);
     file.read_exact(&mut decoder_state.record)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2508,8 +2514,7 @@ fn read_variable_width_dosage_variant_values(
     let record_type = header.record_types[variant_index];
     let dosage_bits = (record_type >> 5) & 0x03;
     if dosage_bits == 0 {
-        return Err(MetadataError::parse(
-            path,
+        return Err(GenoioError::unsupported(
             "pgen record does not contain dosage values",
         ));
     }
@@ -2592,19 +2597,17 @@ fn read_plink2_variant_haplotype_dosage_track(
             variant_index,
             decoder_state,
         ),
-        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => Err(MetadataError::parse(
-            path,
+        PgenLayout::FixedWidth | PgenLayout::FixedWidthDosage => Err(GenoioError::unsupported(
             "plink2 haplotype dosage reads require explicit phased dosage records",
         )),
     }
 }
 
-fn validate_variable_width_haplotype_layout(path: &Path, header: &PgenHeader) -> Result<()> {
+fn validate_variable_width_haplotype_layout(_path: &Path, header: &PgenHeader) -> Result<()> {
     if matches!(header.layout, PgenLayout::VariableWidth) {
         Ok(())
     } else {
-        Err(MetadataError::parse(
-            path,
+        Err(GenoioError::unsupported(
             "plink2 haplotype reads require variable-width explicit phased records",
         ))
     }
@@ -2621,14 +2624,12 @@ fn decode_plink2_haplotype_hardcall_aux(
 ) -> Result<()> {
     let record_type = header.record_types[variant_index];
     if ((record_type >> 5) & 0x03) != 0 || record_type & 0x80 != 0 {
-        return Err(MetadataError::parse(
-            path,
+        return Err(GenoioError::unsupported(
             "pgen haplotype hardcall read does not accept dosage records",
         ));
     }
     if record_type & 0x10 == 0 {
-        return Err(MetadataError::parse(
-            path,
+        return Err(GenoioError::unsupported(
             "unphased pgen hardcall record retained in haplotype read",
         ));
     }
@@ -2664,14 +2665,12 @@ fn decode_plink2_haplotype_dosage_aux(
     let record_type = header.record_types[variant_index];
     let dosage_bits = (record_type >> 5) & 0x03;
     if record_type & 0x80 == 0 {
-        return Err(MetadataError::parse(
-            path,
+        return Err(GenoioError::unsupported(
             "pgen record does not contain explicit phased dosage values",
         ));
     }
     if dosage_bits != 2 {
-        return Err(MetadataError::parse(
-            path,
+        return Err(GenoioError::unsupported(
             "unsupported pgen phased dosage representation; only full dosage tracks are supported",
         ));
     }
@@ -2693,26 +2692,26 @@ fn read_variable_width_record(
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
     if variant_index >= header.variant_ct || variant_index + 1 >= header.record_offsets.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen variant index is outside variable-width record table",
         ));
     }
     let start = header.record_offsets[variant_index];
     let end = header.record_offsets[variant_index + 1];
-    let record_len = usize::try_from(
-        end.checked_sub(start)
-            .ok_or_else(|| MetadataError::parse(path, "pgen record length is out of range"))?,
-    )
-    .map_err(|_| MetadataError::parse(path, "pgen record length is out of range"))?;
+    let record_len =
+        usize::try_from(end.checked_sub(start).ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen record length is out of range")
+        })?)
+        .map_err(|_| GenoioError::invalid_source(path, "pgen record length is out of range"))?;
     file.seek(SeekFrom::Start(start))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     decoder_state.record.resize(record_len, 0);
     file.read_exact(&mut decoder_state.record)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2746,13 +2745,13 @@ fn decode_hardcall_phase_track(
         ensure_record_bytes(path, record, cursor, phasepresent_bits.div_ceil(8))?;
         cursor
             .checked_add(phasepresent_bits.div_ceil(8))
-            .ok_or_else(|| MetadataError::parse(path, "pgen phase offset is out of range"))?
+            .ok_or_else(|| GenoioError::invalid_source(path, "pgen phase offset is out of range"))?
             * 8
     } else {
         cursor
             .checked_mul(8)
             .and_then(|bit| bit.checked_add(1))
-            .ok_or_else(|| MetadataError::parse(path, "pgen phase offset is out of range"))?
+            .ok_or_else(|| GenoioError::invalid_source(path, "pgen phase offset is out of range"))?
     };
     ensure_record_bits(path, record, phaseinfo_start_bit, heterozygote_ct)?;
 
@@ -2787,8 +2786,7 @@ fn decode_hardcall_phase_track(
                 };
                 heterozygote_index += 1;
                 if !phase_present && selected_index.is_some() {
-                    return Err(MetadataError::parse(
-                        path,
+                    return Err(GenoioError::unsupported(
                         "unphased pgen heterozygous hardcall retained in haplotype read",
                     ));
                 }
@@ -2834,7 +2832,7 @@ fn decode_hardcall_phase_track(
     }
     let end_bit = phaseinfo_start_bit + phased_heterozygote_index;
     if end_bit.div_ceil(8) != record.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen phased hardcall record has trailing or missing bytes",
         ));
@@ -2859,16 +2857,16 @@ fn decode_full_phased_dosage_tracks(
     source_indices: &[usize],
     haplotype_state: &mut PgenHaplotypeDecodeState,
 ) -> Result<()> {
-    let dosage_bytes_len = sample_ct
-        .checked_mul(2)
-        .ok_or_else(|| MetadataError::parse(path, "pgen dosage byte count is out of range"))?;
+    let dosage_bytes_len = sample_ct.checked_mul(2).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen dosage byte count is out of range")
+    })?;
     ensure_record_bytes(path, record, cursor, dosage_bytes_len)?;
-    let phase_cursor = cursor
-        .checked_add(dosage_bytes_len)
-        .ok_or_else(|| MetadataError::parse(path, "pgen phased dosage offset is out of range"))?;
+    let phase_cursor = cursor.checked_add(dosage_bytes_len).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen phased dosage offset is out of range")
+    })?;
     ensure_record_bytes(path, record, phase_cursor, dosage_bytes_len)?;
     if phase_cursor + dosage_bytes_len != record.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen phased dosage record has trailing or missing bytes",
         ));
@@ -2916,7 +2914,7 @@ fn decode_phased_dosage_total(path: &Path, raw: u16) -> Result<Option<f32>> {
         return Ok(None);
     }
     if raw > PGEN_MAX_DOSAGE_RAW {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("pgen phased dosage total raw value {raw} exceeds 32768"),
         ));
@@ -2929,7 +2927,7 @@ fn decode_phased_dosage_delta(path: &Path, raw: i16) -> Result<Option<f32>> {
         return Ok(None);
     }
     if !(PGEN_MIN_PHASE_RAW..=PGEN_MAX_PHASE_RAW).contains(&raw) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("pgen phased dosage phase raw value {raw} is outside [-16384, 16384]"),
         ));
@@ -2941,7 +2939,7 @@ fn validate_phased_dosage_haplotype_components(path: &Path, left: f32, right: f3
     if (0.0..=1.0).contains(&left) && (0.0..=1.0).contains(&right) {
         return Ok(());
     }
-    Err(MetadataError::parse(
+    Err(GenoioError::invalid_source(
         path,
         format!(
             "pgen phased dosage haplotype components are outside [0, 1]: left={left}, right={right}"
@@ -2986,7 +2984,7 @@ fn decode_variable_width_main_track(
         0 => {
             let bytes_per_variant = sample_ct.div_ceil(4);
             if record.len() < bytes_per_variant {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen uncompressed record is shorter than expected",
                 ));
@@ -2997,7 +2995,7 @@ fn decode_variable_width_main_track(
         1 => decode_one_bit_record_with_cursor(path, record, sample_ct, packed),
         2 | 3 => {
             if !has_previous_non_ld {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen LD-compressed record appears before any non-LD record",
                 ));
@@ -3005,7 +3003,7 @@ fn decode_variable_width_main_track(
             let mut cursor = 0;
             let entries = decode_difflist(path, record, &mut cursor, sample_ct, true)?;
             if previous_non_ld_packed.sample_ct() != sample_ct {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "pgen LD state length does not match sample count",
                 ));
@@ -3022,7 +3020,7 @@ fn decode_variable_width_main_track(
         4 => decode_difflist_record_with_cursor(path, record, sample_ct, 0, packed),
         6 => decode_difflist_record_with_cursor(path, record, sample_ct, 2, packed),
         7 => decode_difflist_record_with_cursor(path, record, sample_ct, 3, packed),
-        other => Err(MetadataError::parse(
+        other => Err(GenoioError::invalid_source(
             path,
             format!("unsupported pgen main-track compression type {other}"),
         )),
@@ -3036,7 +3034,7 @@ fn decode_one_bit_record_with_cursor(
     packed: &mut PackedGenotypes,
 ) -> Result<usize> {
     let common_categories = *record.first().ok_or_else(|| {
-        MetadataError::parse(path, "pgen 1-bit record is missing common-category byte")
+        GenoioError::invalid_source(path, "pgen 1-bit record is missing common-category byte")
     })?;
     let (low_category, high_category) = match common_categories {
         1 => (0, 1),
@@ -3046,7 +3044,7 @@ fn decode_one_bit_record_with_cursor(
         6 => (1, 3),
         9 => (2, 3),
         other => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("invalid pgen 1-bit common-category byte {other}"),
             ));
@@ -3054,7 +3052,7 @@ fn decode_one_bit_record_with_cursor(
     };
     let bitarray_len = sample_ct.div_ceil(8);
     if record.len() < 1 + bitarray_len {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen 1-bit record is shorter than expected",
         ));
@@ -3110,7 +3108,7 @@ fn overlay_variable_width_dosages(
         )?,
         2 => {
             let dosage_bytes_len = sample_ct.checked_mul(2).ok_or_else(|| {
-                MetadataError::parse(path, "pgen dosage byte count is out of range")
+                GenoioError::invalid_source(path, "pgen dosage byte count is out of range")
             })?;
             ensure_record_bytes(path, record, cursor, dosage_bytes_len)?;
             for sample_index in 0..sample_ct {
@@ -3128,7 +3126,7 @@ fn overlay_variable_width_dosages(
                 .filter(|sample_index| bit_is_set(bitarray, *sample_index))
                 .count();
             let dosage_bytes_len = dosage_ct.checked_mul(2).ok_or_else(|| {
-                MetadataError::parse(path, "pgen dosage byte count is out of range")
+                GenoioError::invalid_source(path, "pgen dosage byte count is out of range")
             })?;
             ensure_record_bytes(path, record, cursor, dosage_bytes_len)?;
             let mut dosage_index = 0;
@@ -3147,7 +3145,7 @@ fn overlay_variable_width_dosages(
             }
         }
         other => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("unsupported pgen dosage track type {other}"),
             ));
@@ -3169,7 +3167,7 @@ fn overlay_difflist_dosages(
         return Ok(());
     }
     if list_len > sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen difflist length exceeds sample count",
         ));
@@ -3201,9 +3199,9 @@ fn overlay_difflist_dosages(
         |_, _| {},
     )?;
 
-    let dosage_bytes_len = list_len
-        .checked_mul(2)
-        .ok_or_else(|| MetadataError::parse(path, "pgen dosage byte count is out of range"))?;
+    let dosage_bytes_len = list_len.checked_mul(2).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen dosage byte count is out of range")
+    })?;
     ensure_record_bytes(path, record, values_start, dosage_bytes_len)?;
 
     let mut ids_cursor = deltas_start;
@@ -3246,7 +3244,7 @@ fn walk_difflist_ids(
         for _ in 1..group_len {
             let delta = read_base128_varint(path, record, cursor)?;
             sample_id = sample_id.checked_add(delta).ok_or_else(|| {
-                MetadataError::parse(path, "pgen difflist sample id is out of range")
+                GenoioError::invalid_source(path, "pgen difflist sample id is out of range")
             })?;
             validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
             visit(sample_id, entry_index);
@@ -3279,9 +3277,9 @@ fn overlay_fixed_width_dosages(
     missing: &mut [bool],
 ) -> Result<()> {
     for (selected_index, source_index) in source_indices.iter().copied().enumerate() {
-        let byte_index = source_index
-            .checked_mul(2)
-            .ok_or_else(|| MetadataError::parse(path, "pgen dosage offset is out of range"))?;
+        let byte_index = source_index.checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen dosage offset is out of range")
+        })?;
         ensure_record_bytes(path, dosage_bytes, byte_index, 2)?;
         let raw = u16::from_le_bytes([dosage_bytes[byte_index], dosage_bytes[byte_index + 1]]);
         apply_pgen_dosage(
@@ -3310,7 +3308,7 @@ fn decode_one_bit_record(
     packed: &mut PackedGenotypes,
 ) -> Result<()> {
     let common_categories = *record.first().ok_or_else(|| {
-        MetadataError::parse(path, "pgen 1-bit record is missing common-category byte")
+        GenoioError::invalid_source(path, "pgen 1-bit record is missing common-category byte")
     })?;
     let (low_category, high_category) = match common_categories {
         1 => (0, 1),
@@ -3320,7 +3318,7 @@ fn decode_one_bit_record(
         6 => (1, 3),
         9 => (2, 3),
         other => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("invalid pgen 1-bit common-category byte {other}"),
             ));
@@ -3328,7 +3326,7 @@ fn decode_one_bit_record(
     };
     let bitarray_len = sample_ct.div_ceil(8);
     if record.len() < 1 + bitarray_len {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen 1-bit record is shorter than expected",
         ));
@@ -3357,7 +3355,7 @@ fn decode_ld_compressed_record(
     packed: &mut PackedGenotypes,
 ) -> Result<()> {
     if previous_non_ld_packed.sample_ct() != sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen LD state length does not match sample count",
         ));
@@ -3401,7 +3399,7 @@ fn decode_difflist(
         return Ok(Vec::new());
     }
     if list_len > sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen difflist length exceeds sample count",
         ));
@@ -3439,7 +3437,7 @@ fn decode_difflist(
         for _ in 1..group_len {
             let delta = read_base128_varint(path, record, cursor)?;
             sample_id = sample_id.checked_add(delta).ok_or_else(|| {
-                MetadataError::parse(path, "pgen difflist sample id is out of range")
+                GenoioError::invalid_source(path, "pgen difflist sample id is out of range")
             })?;
             validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
             entries.push((
@@ -3460,13 +3458,16 @@ fn read_base128_varint(path: &Path, record: &[u8], cursor: &mut usize) -> Result
         *cursor += 1;
         value |= usize::from(byte & 0x7f)
             .checked_shl(shift)
-            .ok_or_else(|| MetadataError::parse(path, "pgen varint is out of range"))?;
+            .ok_or_else(|| GenoioError::invalid_source(path, "pgen varint is out of range"))?;
         if byte & 0x80 == 0 {
             return Ok(value);
         }
         shift += 7;
         if shift >= usize::BITS {
-            return Err(MetadataError::parse(path, "pgen varint is out of range"));
+            return Err(GenoioError::invalid_source(
+                path,
+                "pgen varint is out of range",
+            ));
         }
     }
 }
@@ -3512,13 +3513,13 @@ fn validate_difflist_sample_id(
     previous_sample_id: &mut Option<usize>,
 ) -> Result<()> {
     if sample_id >= sample_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen difflist sample id is outside sample count",
         ));
     }
     if previous_sample_id.is_some_and(|previous| sample_id <= previous) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen difflist sample ids must be strictly increasing",
         ));
@@ -3529,7 +3530,7 @@ fn validate_difflist_sample_id(
 
 fn ensure_record_bytes(path: &Path, record: &[u8], cursor: usize, len: usize) -> Result<()> {
     if cursor.checked_add(len).is_none_or(|end| end > record.len()) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen record ended before expected data",
         ));
@@ -3540,9 +3541,9 @@ fn ensure_record_bytes(path: &Path, record: &[u8], cursor: usize, len: usize) ->
 fn ensure_record_bits(path: &Path, record: &[u8], start_bit: usize, len: usize) -> Result<()> {
     let end_bit = start_bit
         .checked_add(len)
-        .ok_or_else(|| MetadataError::parse(path, "pgen bit range is out of range"))?;
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen bit range is out of range"))?;
     if end_bit > record.len() * 8 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "pgen record ended before expected bitarray data",
         ));
@@ -3820,7 +3821,7 @@ mod tests {
 }
 
 fn parse_psam(path: &Path) -> Result<Vec<SampleRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -3837,7 +3838,7 @@ fn parse_psam(path: &Path) -> Result<Vec<SampleRecord>> {
         }
         let columns = header
             .as_ref()
-            .ok_or_else(|| MetadataError::parse(path, "psam header line is required"))?;
+            .ok_or_else(|| GenoioError::invalid_source(path, "psam header line is required"))?;
         records.push(parse_psam_line(path, line_index + 1, columns, trimmed)?);
     }
     Ok(records)
@@ -3888,7 +3889,7 @@ fn parse_psam_line(
         .max(columns.sex.unwrap_or(0))
         .max(columns.phenotype.unwrap_or(0));
     if fields.len() <= required {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("psam line {line_number} has too few fields"),
         ));
@@ -3916,7 +3917,7 @@ fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
     let mut contents = String::new();
     reader
         .read_to_string(&mut contents)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -3956,7 +3957,7 @@ fn parse_pvar_source_window(
     let mut records = Vec::with_capacity(window.len);
 
     for (line_index, line_result) in reader.lines().enumerate() {
-        let line = line_result.map_err(|source| MetadataError::Io {
+        let line = line_result.map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -3979,7 +3980,7 @@ fn parse_pvar_source_window(
         }
 
         let Some(columns) = columns.as_ref() else {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "pvar columns were not initialized before parsing body rows",
             ));
@@ -3992,7 +3993,7 @@ fn parse_pvar_source_window(
     }
 
     if source_index != expected_variant_ct {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "pvar variant count {source_index} does not match pgen variant count {expected_variant_ct}",
@@ -4024,7 +4025,7 @@ impl PvarRecordReader {
 
     fn next_record(&mut self) -> Result<Option<(usize, VariantRecord)>> {
         for (line_index, line_result) in self.lines.by_ref() {
-            let line = line_result.map_err(|source| MetadataError::Io {
+            let line = line_result.map_err(|source| GenoioError::Io {
                 path: self.path.clone(),
                 source,
             })?;
@@ -4044,7 +4045,7 @@ impl PvarRecordReader {
             }
 
             let Some(columns) = self.columns.as_ref() else {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     &self.path,
                     "pvar columns were not initialized before parsing body rows",
                 ));
@@ -4059,7 +4060,7 @@ impl PvarRecordReader {
 
     fn validate_count(&self, expected_variant_ct: usize) -> Result<()> {
         if self.source_index != expected_variant_ct {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 &self.path,
                 format!(
                     "pvar variant count {} does not match pgen variant count {expected_variant_ct}",
@@ -4072,7 +4073,7 @@ impl PvarRecordReader {
 }
 
 fn open_pvar_reader(path: &Path) -> Result<Box<dyn BufRead>> {
-    let file = File::open(path).map_err(|source| MetadataError::Io {
+    let file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -4081,11 +4082,10 @@ fn open_pvar_reader(path: &Path) -> Result<Box<dyn BufRead>> {
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".pvar.zst"))
     {
-        let decoder =
-            zstd::stream::read::Decoder::new(file).map_err(|source| MetadataError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let decoder = zstd::stream::read::Decoder::new(file).map_err(|source| GenoioError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         return Ok(Box::new(BufReader::new(decoder)));
     }
     Ok(Box::new(BufReader::new(file)))
@@ -4114,14 +4114,15 @@ fn parse_pvar_header(line: &str) -> Result<PvarColumns> {
     };
     Ok(PvarColumns {
         chrom: find("CHROM")
-            .ok_or_else(|| MetadataError::parse("<pvar>", "pvar header missing #CHROM"))?,
+            .ok_or_else(|| GenoioError::invalid_source("<pvar>", "pvar header missing #CHROM"))?,
         pos: find("POS")
-            .ok_or_else(|| MetadataError::parse("<pvar>", "pvar header missing POS"))?,
-        id: find("ID").ok_or_else(|| MetadataError::parse("<pvar>", "pvar header missing ID"))?,
+            .ok_or_else(|| GenoioError::invalid_source("<pvar>", "pvar header missing POS"))?,
+        id: find("ID")
+            .ok_or_else(|| GenoioError::invalid_source("<pvar>", "pvar header missing ID"))?,
         ref_allele: find("REF")
-            .ok_or_else(|| MetadataError::parse("<pvar>", "pvar header missing REF"))?,
+            .ok_or_else(|| GenoioError::invalid_source("<pvar>", "pvar header missing REF"))?,
         alt_allele: find("ALT")
-            .ok_or_else(|| MetadataError::parse("<pvar>", "pvar header missing ALT"))?,
+            .ok_or_else(|| GenoioError::invalid_source("<pvar>", "pvar header missing ALT"))?,
         qual: find("QUAL"),
     })
 }
@@ -4164,7 +4165,7 @@ fn infer_pvar_header(path: &Path, first_data_line: Option<&str>) -> Result<(Pvar
             },
             0,
         )),
-        _ => Err(MetadataError::parse(
+        _ => Err(GenoioError::invalid_source(
             path,
             "pvar without header must have at least five columns",
         )),
@@ -4186,13 +4187,13 @@ fn parse_pvar_line(
         .max(columns.alt_allele)
         .max(columns.qual.unwrap_or(0));
     if fields.len() <= required {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("pvar line {line_number} has too few fields"),
         ));
     }
     let pos = fields[columns.pos].parse::<u32>().map_err(|error| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             path,
             format!("pvar line {line_number} has invalid position: {error}"),
         )
@@ -4201,7 +4202,7 @@ fn parse_pvar_line(
     let alt_allele = fields[columns.alt_allele].to_string();
     let first_alt = alt_allele.split(',').next().unwrap_or("").to_string();
     if first_alt.is_empty() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("pvar line {line_number} has empty ALT allele"),
         ));
@@ -4237,7 +4238,7 @@ fn parse_optional_qual(path: &Path, line_number: usize, value: &str) -> Result<O
         return Ok(None);
     }
     let qual = value.parse::<f32>().map_err(|error| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             path,
             format!("pvar line {line_number} has invalid QUAL: {error}"),
         )

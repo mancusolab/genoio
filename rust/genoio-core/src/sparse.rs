@@ -1,6 +1,6 @@
 // pattern: Functional Core
 
-use crate::{DenseDiagnostics, MetadataError, SampleRecord, VariantRecord};
+use crate::{DenseDiagnostics, GenoioError, SampleRecord, VariantRecord};
 
 /// Sparse genotype matrix stored as CSC arrays.
 ///
@@ -33,10 +33,10 @@ impl SparseGenotypeMatrix {
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
         diagnostics: DenseDiagnostics,
-    ) -> Result<Self, MetadataError> {
+    ) -> Result<Self, GenoioError> {
         validate_csc_contract(n_rows, n_cols, &indptr, &indices, &data)?;
         if samples.len() != n_rows {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<sparse>",
                 format!(
                     "sample metadata length {} does not match n_rows {n_rows}",
@@ -45,7 +45,7 @@ impl SparseGenotypeMatrix {
             ));
         }
         if variants.len() != n_cols {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<sparse>",
                 format!(
                     "variant metadata length {} does not match n_cols {n_cols}",
@@ -68,10 +68,9 @@ impl SparseGenotypeMatrix {
 }
 
 /// Reject retained missing calls before constructing sparse matrices.
-pub fn reject_sparse_missing_values(missing: &[bool]) -> Result<(), MetadataError> {
+pub fn reject_sparse_missing_values(missing: &[bool]) -> Result<(), GenoioError> {
     if missing.iter().any(|value| *value) {
-        return Err(MetadataError::parse(
-            "<sparse>",
+        return Err(GenoioError::missing_data(
             "sparse missing values are not stored in this release",
         ));
     }
@@ -113,15 +112,15 @@ fn validate_csc_contract(
     indptr: &[usize],
     indices: &[usize],
     data: &[f32],
-) -> Result<(), MetadataError> {
+) -> Result<(), GenoioError> {
     if indptr.is_empty() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<sparse>",
             "sparse indptr must be nonempty",
         ));
     }
     if indptr.len() != n_cols + 1 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<sparse>",
             format!(
                 "sparse indptr length {} does not match n_cols + 1 ({})",
@@ -131,14 +130,14 @@ fn validate_csc_contract(
         ));
     }
     if indptr[0] != 0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<sparse>",
             "sparse first pointer must be zero",
         ));
     }
     for pair in indptr.windows(2) {
         if pair[0] > pair[1] {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<sparse>",
                 "sparse pointers must be nondecreasing",
             ));
@@ -146,7 +145,7 @@ fn validate_csc_contract(
     }
     let terminal_pointer = indptr[indptr.len() - 1];
     if terminal_pointer != indices.len() || terminal_pointer != data.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<sparse>",
             format!(
                 "sparse terminal pointer {terminal_pointer} must equal indices length {} and data length {}",
@@ -156,7 +155,7 @@ fn validate_csc_contract(
         ));
     }
     if let Some(row_index) = indices.iter().find(|row_index| **row_index >= n_rows) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<sparse>",
             format!("sparse row index {row_index} is outside n_rows {n_rows}"),
         ));

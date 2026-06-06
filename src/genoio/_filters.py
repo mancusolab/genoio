@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from ._errors import InvalidOptionError
 
@@ -15,6 +16,7 @@ _GENOTYPE_RATE_RANGE = (0.0, 1.0)
 JsonScalar = str | int | float | bool | None
 JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 ParamValue = JsonScalar | tuple[JsonScalar, ...]
+NumericParam = int | float
 
 
 class FilterExpr:
@@ -49,7 +51,7 @@ class FilterExpr:
         raise NotImplementedError
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PredicateExpr(FilterExpr):
     r"""Leaf filter predicate with validated parameter values.
 
@@ -71,7 +73,7 @@ class PredicateExpr(FilterExpr):
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AndExpr(FilterExpr):
     r"""Boolean conjunction of two filter expressions."""
 
@@ -83,7 +85,7 @@ class AndExpr(FilterExpr):
         return {"op": "and", "left": self.left.to_ir(), "right": self.right.to_ir()}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OrExpr(FilterExpr):
     r"""Boolean disjunction of two filter expressions."""
 
@@ -95,7 +97,7 @@ class OrExpr(FilterExpr):
         return {"op": "or", "left": self.left.to_ir(), "right": self.right.to_ir()}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NotExpr(FilterExpr):
     r"""Boolean negation of one filter expression."""
 
@@ -264,32 +266,30 @@ def _validate_region(value: str) -> None:
 
 
 def _validate_float_range(name: str, *, min: float | None, max: float | None) -> tuple[tuple[str, ParamValue], ...]:
-    if min is None and max is None:
-        raise InvalidOptionError(f"{name} requires at least one threshold")
-    min_value = None if min is None else _validate_rate(f"{name} min", min)
-    max_value = None if max is None else _validate_rate(f"{name} max", max)
-    if min_value is not None and max_value is not None and min_value > max_value:
-        raise InvalidOptionError(f"{name} min must be <= max")
-    return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)
+    return _range_params(name, min=min, max=max, validate=_validate_rate)
 
 
 def _validate_int_range(name: str, *, min: int | None, max: int | None) -> tuple[tuple[str, ParamValue], ...]:
-    if min is None and max is None:
-        raise InvalidOptionError(f"{name} requires at least one threshold")
-    min_value = None if min is None else _validate_nonnegative_int(f"{name} min", min)
-    max_value = None if max is None else _validate_nonnegative_int(f"{name} max", max)
-    if min_value is not None and max_value is not None and min_value > max_value:
-        raise InvalidOptionError(f"{name} min must be <= max")
-    return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)
+    return _range_params(name, min=min, max=max, validate=_validate_nonnegative_int)
 
 
 def _validate_nonnegative_float_range(
     name: str, *, min: float | None, max: float | None
 ) -> tuple[tuple[str, ParamValue], ...]:
+    return _range_params(name, min=min, max=max, validate=_validate_nonnegative_float)
+
+
+def _range_params(
+    name: str,
+    *,
+    min: Any,
+    max: Any,
+    validate: Callable[[str, Any], NumericParam],
+) -> tuple[tuple[str, ParamValue], ...]:
     if min is None and max is None:
         raise InvalidOptionError(f"{name} requires at least one threshold")
-    min_value = None if min is None else _validate_nonnegative_float(f"{name} min", min)
-    max_value = None if max is None else _validate_nonnegative_float(f"{name} max", max)
+    min_value = None if min is None else validate(f"{name} min", min)
+    max_value = None if max is None else validate(f"{name} max", max)
     if min_value is not None and max_value is not None and min_value > max_value:
         raise InvalidOptionError(f"{name} min must be <= max")
     return tuple((key, value) for key, value in (("min", min_value), ("max", max_value)) if value is not None)

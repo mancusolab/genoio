@@ -3,10 +3,18 @@
 use std::path::PathBuf;
 use std::slice;
 
+use genoio_core::GenoioError;
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
 };
+
+pyo3::create_exception!(genoio_py, RustInvalidSourceError, PyException);
+pyo3::create_exception!(genoio_py, RustUnsupportedRepresentationError, PyException);
+pyo3::create_exception!(genoio_py, RustInvalidOptionError, PyException);
+pyo3::create_exception!(genoio_py, RustMissingDataError, PyException);
+pyo3::create_exception!(genoio_py, RustSampleFilterError, PyException);
 
 const SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED: &str =
     "sparse dosage-backed genotype reads are intentionally unsupported";
@@ -55,7 +63,7 @@ fn read_metadata(
             )));
         }
     }
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    .map_err(genoio_error_to_py)?;
 
     metadata_to_py(py, output)
 }
@@ -90,7 +98,7 @@ fn read_dense(
         }
         "plink1" => {
             if read_options.dosage != DosageSource::Hardcall {
-                return Err(pyo3::exceptions::PyValueError::new_err(
+                return Err(RustUnsupportedRepresentationError::new_err(
                     "plink1 does not support dosage-backed genotype reads",
                 ));
             }
@@ -135,7 +143,7 @@ fn read_dense(
             let sample = optional_member_path(members, "sample")?;
             match read_options.dosage {
                 DosageSource::Hardcall => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
+                    return Err(RustUnsupportedRepresentationError::new_err(
                         "bgen hardcall genotype reads are not implemented",
                     ));
                 }
@@ -155,7 +163,7 @@ fn read_dense(
             )));
         }
     }
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    .map_err(genoio_error_to_py)?;
 
     dense_to_py(
         py,
@@ -175,7 +183,7 @@ fn read_sparse(
 ) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     if read_options.dosage != DosageSource::Hardcall {
-        return Err(pyo3::exceptions::PyValueError::new_err(
+        return Err(RustUnsupportedRepresentationError::new_err(
             SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED,
         ));
     }
@@ -217,7 +225,7 @@ fn read_sparse(
             )
         }
         "bgen" => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+            return Err(RustUnsupportedRepresentationError::new_err(
                 "bgen sparse genotype reads are not implemented",
             ));
         }
@@ -227,7 +235,7 @@ fn read_sparse(
             )));
         }
     }
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    .map_err(genoio_error_to_py)?;
 
     sparse_to_py(
         py,
@@ -258,7 +266,7 @@ fn read_haplotypes_dense(
                     read_options.variant_window,
                 ),
                 DosageSource::Dosage => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
+                    return Err(RustUnsupportedRepresentationError::new_err(
                         "VCF haplotype dosage reads are unsupported because VCF haplotype support is hardcall GT-based",
                     ));
                 }
@@ -294,7 +302,7 @@ fn read_haplotypes_dense(
             let sample = optional_member_path(members, "sample")?;
             match read_options.dosage {
                 DosageSource::Hardcall => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
+                    return Err(RustUnsupportedRepresentationError::new_err(
                         "bgen hardcall haplotype reads are not implemented; use dosage=\"dosage\" for source-encoded phased haplotype dosage",
                     ));
                 }
@@ -314,7 +322,7 @@ fn read_haplotypes_dense(
             )));
         }
     }
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    .map_err(genoio_error_to_py)?;
 
     dense_to_py(
         py,
@@ -345,7 +353,7 @@ fn read_haplotypes_sparse(
             )
         }
         "bgen" => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+            return Err(RustUnsupportedRepresentationError::new_err(
                 "bgen sparse haplotype reads are not implemented; use dense haplotype reads with sparse=False",
             ));
         }
@@ -363,7 +371,7 @@ fn read_haplotypes_sparse(
                     read_options.variant_window,
                 ),
                 DosageSource::Dosage => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
+                    return Err(RustUnsupportedRepresentationError::new_err(
                         PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED,
                     ));
                 }
@@ -375,7 +383,7 @@ fn read_haplotypes_sparse(
             )));
         }
     }
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    .map_err(genoio_error_to_py)?;
 
     sparse_to_py(
         py,
@@ -388,6 +396,26 @@ fn read_haplotypes_sparse(
 #[pymodule]
 /// PyO3 extension module used by the pure-Python public API.
 fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add(
+        "RustInvalidSourceError",
+        module.py().get_type::<RustInvalidSourceError>(),
+    )?;
+    module.add(
+        "RustUnsupportedRepresentationError",
+        module.py().get_type::<RustUnsupportedRepresentationError>(),
+    )?;
+    module.add(
+        "RustInvalidOptionError",
+        module.py().get_type::<RustInvalidOptionError>(),
+    )?;
+    module.add(
+        "RustMissingDataError",
+        module.py().get_type::<RustMissingDataError>(),
+    )?;
+    module.add(
+        "RustSampleFilterError",
+        module.py().get_type::<RustSampleFilterError>(),
+    )?;
     module.add_function(wrap_pyfunction!(backend_name, module)?)?;
     module.add_function(wrap_pyfunction!(read_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(read_dense, module)?)?;
@@ -462,7 +490,7 @@ fn variants_option(options: &Bound<'_, PyDict>) -> PyResult<Option<genoio_core::
     let json = py_to_json_value(&value)?;
     genoio_core::VariantFilter::from_json_value(json)
         .map(Some)
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+        .map_err(genoio_error_to_py)
 }
 
 fn variant_window_option(
@@ -797,4 +825,21 @@ fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     Err(pyo3::exceptions::PyValueError::new_err(
         "filter IR must contain only JSON-compatible values",
     ))
+}
+
+fn genoio_error_to_py(error: GenoioError) -> PyErr {
+    match error {
+        GenoioError::Io { .. } | GenoioError::InvalidSource { .. } => {
+            RustInvalidSourceError::new_err(error.to_string())
+        }
+        GenoioError::UnsupportedRepresentation { .. } => {
+            RustUnsupportedRepresentationError::new_err(error.to_string())
+        }
+        GenoioError::SampleFilter { .. } => RustSampleFilterError::new_err(error.to_string()),
+        GenoioError::MissingData { .. } => RustMissingDataError::new_err(error.to_string()),
+        GenoioError::InvalidFilter { .. } => RustInvalidOptionError::new_err(error.to_string()),
+        GenoioError::InternalContract { .. } => {
+            pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+        }
+    }
 }

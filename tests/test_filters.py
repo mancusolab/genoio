@@ -4,7 +4,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -571,4 +571,4 @@ def test_variants_rejects_python_callbacks(tmp_path):
     dataset = genoio.vcf(write_filter_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="serializable"):
-        dataset.read(variants=lambda variant: True)
+        cast(Any, dataset.read)(variants=lambda variant: True)

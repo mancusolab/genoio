@@ -4,16 +4,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeVar, cast, overload
 
 import numpy as np
+import polars as pl
 from numpy.typing import DTypeLike
 
 from . import _rust
 from ._assembly import (
+    MatrixResult,
+    ReadResult,
+    SparseMatrixResult,
     dense_array_from_rust,
     read_result_tuple,
     samples_frame,
@@ -33,6 +37,7 @@ from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile,
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_DOSAGE_SOURCES = {"hardcall", "dosage"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
+_Region = TypeVar("_Region")
 _SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED = "sparse dosage-backed genotype reads are intentionally unsupported"
 _SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
     "sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
@@ -42,36 +47,43 @@ _PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
     "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
     "use dense haplotype reads with sparse=False"
 )
-_BACKEND_UNSUPPORTED_REPRESENTATION_MESSAGES = frozenset(
-    {
-        _SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED,
-        _PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED,
-    }
+_RUST_ERROR_MAP = (
+    (_rust.RustSampleFilterError, SampleFilterError),
+    (_rust.RustMissingDataError, MissingDataError),
+    (_rust.RustUnsupportedRepresentationError, UnsupportedRepresentation),
+    (_rust.RustInvalidOptionError, InvalidOptionError),
+    (_rust.RustInvalidSourceError, InvalidSourceError),
 )
+_RUST_PUBLIC_ERROR_TYPES = tuple(error_type for error_type, _ in _RUST_ERROR_MAP)
 
 
-class _DefaultMissing:
-    def __repr__(self) -> str:
-        return "DEFAULT_MISSING"
+_READ_OPTION_DEFAULTS: dict[str, Any] = {
+    "kind": "geno",
+    "dosage": "hardcall",
+    "sparse": False,
+    "variants": None,
+    "samples": None,
+    "missing": None,
+    "dtype": "float32",
+    "return_samples": False,
+    "return_variants": False,
+}
 
 
-_DEFAULT_MISSING = _DefaultMissing()
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ReadOptions:
     kind: str
     dosage: str
-    sparse: bool | str
+    sparse: object
     variants: Any
     samples: list[str] | tuple[str, ...] | set[str] | None
-    missing: Any
+    missing: object
     dtype: DTypeLike
     return_samples: bool
     return_variants: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ValidatedReadOptions:
     dtype: np.dtype[Any]
     missing: str
@@ -79,7 +91,7 @@ class _ValidatedReadOptions:
     variant_filter_ir: dict[str, Any] | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Dataset:
     r"""Resolved genotype dataset with metadata, whole-read, and block-read methods.
 
@@ -95,8 +107,143 @@ class Dataset:
 
     source: ResolvedSource
     _metadata_cache: dict[str, Any] | None = field(default=None, init=False, compare=False, repr=False)
-    _samples_frame_cache: Any | None = field(default=None, init=False, compare=False, repr=False)
-    _variants_frame_cache: Any | None = field(default=None, init=False, compare=False, repr=False)
+    _samples_frame_cache: pl.DataFrame | None = field(default=None, init=False, compare=False, repr=False)
+    _variants_frame_cache: pl.DataFrame | None = field(default=None, init=False, compare=False, repr=False)
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[False] = False,
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[False] = False,
+        return_variants: Literal[False] = False,
+    ) -> np.ndarray: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[True, "csc", "csr"],
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[False] = False,
+        return_variants: Literal[False] = False,
+    ) -> SparseMatrixResult: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[False] = False,
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[True],
+        return_variants: Literal[False] = False,
+    ) -> tuple[np.ndarray, pl.DataFrame]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[False] = False,
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[False] = False,
+        return_variants: Literal[True],
+    ) -> tuple[np.ndarray, pl.DataFrame]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[False] = False,
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[True],
+        return_variants: Literal[True],
+    ) -> tuple[np.ndarray, pl.DataFrame, pl.DataFrame]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[True, "csc", "csr"],
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[True],
+        return_variants: Literal[False] = False,
+    ) -> tuple[SparseMatrixResult, pl.DataFrame]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[True, "csc", "csr"],
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[False] = False,
+        return_variants: Literal[True],
+    ) -> tuple[SparseMatrixResult, pl.DataFrame]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: Literal[True, "csc", "csr"],
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: Literal[True],
+        return_variants: Literal[True],
+    ) -> tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]: ...
+
+    @overload
+    def read(
+        self,
+        *,
+        kind: str = "geno",
+        dosage: str = "hardcall",
+        sparse: bool | str = False,
+        variants: FilterExpr | Iterable[str] | None = None,
+        samples: list[str] | tuple[str, ...] | set[str] | None = None,
+        missing: Literal["nan", "raise", "impute"] | None = None,
+        dtype: DTypeLike = "float32",
+        return_samples: bool = False,
+        return_variants: bool = False,
+    ) -> ReadResult: ...
 
     def read(
         self,
@@ -104,13 +251,13 @@ class Dataset:
         kind: str = "geno",
         dosage: str = "hardcall",
         sparse: bool | str = False,
-        variants: Any = None,
+        variants: FilterExpr | Iterable[str] | None = None,
         samples: list[str] | tuple[str, ...] | set[str] | None = None,
-        missing: Any = _DEFAULT_MISSING,
+        missing: Literal["nan", "raise", "impute"] | None = None,
         dtype: DTypeLike = "float32",
         return_samples: bool = False,
         return_variants: bool = False,
-    ) -> Any:
+    ) -> ReadResult:
         r"""Read a genotype or haplotype matrix from this dataset.
 
         Dense reads return a NumPy array with shape `(samples, variants)`.
@@ -120,41 +267,36 @@ class Dataset:
 
         **Arguments:**
 
-        - `kind`: `"geno"` for diploid sample-by-variant genotype values or
-          `"haplo"` for one row per source haplotype. VCF/BCF haplotype reads
-          use phased hardcall `FORMAT/GT` records. PLINK2 haplotype reads use
-          source-encoded explicit phased hardcall or phased full-dosage records.
-          BGEN haplotype reads use source-encoded phased BGEN v1.2+ Layout 2
-          biallelic diploid probabilities.
-        - `dosage`: `"hardcall"` reads allele counts from hard calls.
-          `"dosage"` reads dosage-backed genotype values when the source
-          supports them. Dense genotype dosage reads are supported for VCF
-          `FORMAT/DS`, PLINK2 unphased biallelic dosage records, and BGEN
-          v1.2+ Layout 2 biallelic diploid dosage records. Genotype reads of
-          phased BGEN records collapse source haplotype probabilities to
-          expected diploid A1 dosage. PLINK2 dense haplotype reads support
-          explicit phased hardcall records with `dosage="hardcall"` and
-          explicit phased full-dosage records with `dosage="dosage"`. BGEN
-          dense haplotype dosage reads return expected A1 dosage per haplotype
-          row. BGEN sample IDs must be
-          embedded in the `.bgen` file or supplied by a companion `.sample`
-          file. Concrete BGEN region filters use a same-path `.bgen.bgi` index
-          when present.
-          Sparse reads only support `"hardcall"`; VCF/BCF and PLINK2 explicit
-          phased hardcall haplotypes can also be read sparsely.
-          Hardcall-from-dosage conversion is never performed or implied by
-          defaults.
-        - `sparse`: `False` for dense NumPy, `True` or `"csc"` for CSC,
-          `"csr"` for CSR.
-        - `variants`: filter expression from `genoio` or iterable of variant
-          IDs. `None` keeps all variants.
-        - `samples`: optional sample ID keep list. Retained rows stay in source
-          order.
-        - `missing`: `"nan"`, `"raise"`, or `"impute"`. The default is `"nan"`
-          for dense reads and `"raise"` for sparse reads.
-        - `dtype`: NumPy dtype for the returned matrix.
-        - `return_samples`: include a sample metadata frame.
-        - `return_variants`: include a variant metadata frame.
+        - `kind`: Matrix row layout. `"geno"` returns one row per retained
+          sample, with diploid genotype values in each cell. `"haplo"` returns
+          one row per source haplotype, so diploid samples contribute two rows.
+          Haplotype reads require phased records in the source.
+        - `dosage`: Value source for each matrix cell. `"hardcall"` reads allele
+          counts from called genotypes. `"dosage"` reads expected allele counts
+          from dosage/probability fields when the source format supports them.
+          `genoio` does not convert dosages into hard calls.
+        - `sparse`: Output storage. `False` returns a dense NumPy array.
+          `True` and `"csc"` return a SciPy CSC matrix; `"csr"` returns a SciPy
+          CSR matrix. Sparse reads require `missing="raise"` because this
+          release does not store sparse missing-value masks.
+        - `variants`: Variants to keep. Pass a `genoio` filter expression to
+          filter by metadata or genotype predicates, or pass an iterable of
+          variant IDs to keep matching IDs. `None` keeps all variants. Retained
+          columns stay in source order, not request order.
+        - `samples`: Sample IDs to keep. Pass a list, tuple, or set of sample
+          IDs. `None` keeps all samples. Retained rows stay in source order;
+          duplicate requested IDs are rejected.
+        - `missing`: Missing-call policy. `None` uses `"nan"` for dense reads
+          and `"raise"` for sparse reads. `"nan"` stores missing calls as
+          `np.nan`, `"raise"` fails if retained calls are missing, and
+          `"impute"` fills missing calls with the retained variant mean.
+        - `dtype`: NumPy dtype for returned matrix values. Missing policies
+          that write `np.nan` or imputed means require a floating dtype.
+        - `return_samples`: When `True`, return a sample metadata frame with
+          the matrix. Haplotype reads include columns that map haplotype rows
+          back to source samples.
+        - `return_variants`: When `True`, return a variant metadata frame for
+          the retained matrix columns.
 
         **Returns:**
 
@@ -194,7 +336,7 @@ class Dataset:
             variant_window=None,
         )
 
-    def samples(self, **options: Any) -> Any:
+    def samples(self, **options: object) -> pl.DataFrame:
         r"""Return sample metadata as a Polars DataFrame.
 
         Columns are `fid`, `iid`, `father`, `mother`, `sex`, and `phenotype`.
@@ -209,9 +351,11 @@ class Dataset:
         _reject_options(options)
         if self._samples_frame_cache is None:
             object.__setattr__(self, "_samples_frame_cache", samples_frame(self._metadata()["samples"]))
-        return self._samples_frame_cache
+        samples = self._samples_frame_cache
+        assert samples is not None
+        return samples
 
-    def variants(self, *, stats: Any = None, **options: Any) -> Any:
+    def variants(self, *, stats: object = None, **options: object) -> pl.DataFrame:
         r"""Return variant metadata as a Polars DataFrame.
 
         Columns are `chrom`, `pos`, `id`, `a0`, and `a1`. Rows are ordered as
@@ -234,9 +378,88 @@ class Dataset:
         _reject_options(options)
         if self._variants_frame_cache is None:
             object.__setattr__(self, "_variants_frame_cache", variants_frame(self._metadata()["variants"]))
-        return self._variants_frame_cache
+        variants = self._variants_frame_cache
+        assert variants is not None
+        return variants
 
-    def iter_blocks(self, size: int, **read_options: Any) -> Any:
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[False] = False,
+        return_variants: Literal[False] = False,
+        **read_options: object,
+    ) -> Iterator[SparseMatrixResult]: ...
+
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[True],
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]]: ...
+
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[True],
+        return_variants: Literal[False] = False,
+        **read_options: object,
+    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
+
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[False] = False,
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
+
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        return_samples: Literal[True],
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame]]: ...
+
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        return_samples: Literal[True],
+        return_variants: Literal[False] = False,
+        **read_options: object,
+    ) -> Iterator[tuple[np.ndarray, pl.DataFrame]]: ...
+
+    @overload
+    def iter_blocks(
+        self,
+        size: int,
+        *,
+        return_samples: Literal[False] = False,
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[np.ndarray, pl.DataFrame]]: ...
+
+    @overload
+    def iter_blocks(self, size: int, **read_options: object) -> Iterator[np.ndarray]: ...
+
+    def iter_blocks(self, size: int, **read_options: object) -> Iterator[ReadResult]:
         r"""Yield consecutive variant blocks from this dataset.
 
         Each yielded block has at most `size` variants and follows the same
@@ -265,7 +488,92 @@ class Dataset:
         )
         return self._block_iterator(size, normalized_options, validated_options)
 
-    def iter_regions(self, regions: Iterable[Any], **read_options: Any) -> Any:
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[False] = False,
+        return_variants: Literal[False] = False,
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, SparseMatrixResult]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[True],
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[True],
+        return_variants: Literal[False] = False,
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, tuple[SparseMatrixResult, pl.DataFrame]]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        sparse: Literal[True, "csc", "csr"],
+        return_samples: Literal[False] = False,
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, tuple[SparseMatrixResult, pl.DataFrame]]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        return_samples: Literal[True],
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, tuple[np.ndarray, pl.DataFrame, pl.DataFrame]]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        return_samples: Literal[True],
+        return_variants: Literal[False] = False,
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, tuple[np.ndarray, pl.DataFrame]]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        *,
+        return_samples: Literal[False] = False,
+        return_variants: Literal[True],
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, tuple[np.ndarray, pl.DataFrame]]]: ...
+
+    @overload
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, np.ndarray]]: ...
+
+    def iter_regions(
+        self,
+        regions: Iterable[_Region],
+        **read_options: object,
+    ) -> Iterator[tuple[_Region, ReadResult]]:
         r"""Yield one read result per requested region filter.
 
         Each yielded item is `(region, result)`, where `region` is the original
@@ -289,16 +597,21 @@ class Dataset:
             raise InvalidOptionError("iter_regions supplies variants from the regions argument")
         return self._region_iterator(regions, read_options)
 
-    def _region_iterator(self, regions: Iterable[Any], read_options: dict[str, Any]) -> Any:
+    def _region_iterator(
+        self,
+        regions: Iterable[_Region],
+        read_options: Mapping[str, object],
+    ) -> Iterator[tuple[_Region, ReadResult]]:
+        read = cast(Any, self.read)
         for region in regions:
-            yield region, self.read(variants=region, **read_options)
+            yield region, cast(ReadResult, read(variants=region, **read_options))
 
     def _block_iterator(
         self,
         size: int,
         read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
-    ) -> Any:
+    ) -> Iterator[ReadResult]:
         start = 0
         while True:
             # Variant windows are expressed in retained-variant coordinates.
@@ -309,7 +622,7 @@ class Dataset:
                 validated_options=validated_options,
                 variant_window={"start": start, "len": size},
             )
-            genotype_matrix = block[0] if isinstance(block, tuple) else block
+            genotype_matrix = cast(MatrixResult, block[0] if isinstance(block, tuple) else block)
             if genotype_matrix.shape[1] == 0:
                 break
             yield block
@@ -323,7 +636,7 @@ class Dataset:
         read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
-    ) -> Any:
+    ) -> ReadResult:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
             "samples": None if read_options.samples is None else list(read_options.samples),
@@ -340,11 +653,7 @@ class Dataset:
             ),
         }
         if validated_options.sparse_format is None:
-            rust_result = (
-                self._read_dense_from_rust(members, options)
-                if read_options.kind == "geno"
-                else self._read_haplotypes_dense_from_rust(members, options)
-            )
+            rust_result = self._read_from_rust(read_options.kind, False, members, options)
             genotype_matrix = dense_array_from_rust(
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
@@ -353,11 +662,7 @@ class Dataset:
                 dtype=validated_options.dtype,
             )
         else:
-            rust_result = (
-                self._read_sparse_from_rust(members, options)
-                if read_options.kind == "geno"
-                else self._read_haplotypes_sparse_from_rust(members, options)
-            )
+            rust_result = self._read_from_rust(read_options.kind, True, members, options)
             genotype_matrix = sparse_matrix_from_rust(
                 indptr=rust_result["indptr"],
                 indices=rust_result["indices"],
@@ -385,35 +690,21 @@ class Dataset:
             return_variants=read_options.return_variants,
         )
 
-    def _read_dense_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return _rust.read_dense(self.source.format.value, members, options)
-        except ValueError as error:
-            raise _public_read_error(error) from error
-
-    def _read_haplotypes_dense_from_rust(
+    def _read_from_rust(
         self,
+        kind: str,
+        sparse: bool,
         members: dict[str, str],
         options: dict[str, Any],
     ) -> dict[str, Any]:
+        if kind == "haplo":
+            read = _rust.read_haplotypes_sparse if sparse else _rust.read_haplotypes_dense
+        else:
+            read = _rust.read_sparse if sparse else _rust.read_dense
         try:
-            return _rust.read_haplotypes_dense(self.source.format.value, members, options)
-        except ValueError as error:
-            raise _public_haplotype_read_error(error) from error
-
-    def _read_haplotypes_sparse_from_rust(
-        self,
-        members: dict[str, str],
-        options: dict[str, Any],
-    ) -> dict[str, Any]:
-        try:
-            return _rust.read_haplotypes_sparse(self.source.format.value, members, options)
-        except ValueError as error:
-            raise _public_haplotype_read_error(error) from error
-
-    def _read_sparse_from_rust(self, members: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return _rust.read_sparse(self.source.format.value, members, options)
+            return read(self.source.format.value, members, options)
+        except _RUST_PUBLIC_ERROR_TYPES as error:
+            raise _public_rust_error(error) from error
         except ValueError as error:
             raise _public_read_error(error) from error
 
@@ -422,10 +713,10 @@ class Dataset:
             members = {key: str(path) for key, path in self.source.members.items()}
             try:
                 metadata = _rust.read_metadata(self.source.format.value, members)
+            except _RUST_PUBLIC_ERROR_TYPES as error:
+                raise _public_rust_error(error) from error
             except ValueError as error:
-                if _is_unsupported_bgen_representation_error(str(error)):
-                    raise UnsupportedRepresentation(str(error)) from error
-                raise InvalidSourceError(str(error)) from error
+                raise _public_read_error(error) from error
             object.__setattr__(self, "_metadata_cache", metadata)
         assert self._metadata_cache is not None
         return self._metadata_cache
@@ -581,13 +872,13 @@ def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:
     )
 
 
-def _reject_options(options: dict[str, Any]) -> None:
+def _reject_options(options: Mapping[str, object]) -> None:
     if options:
         keys = ", ".join(sorted(options))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
 
 
-def _validate_variant_stats(stats: Any) -> None:
+def _validate_variant_stats(stats: object) -> None:
     if stats is not None:
         raise InvalidOptionError("variant stats are not implemented until a later phase")
 
@@ -623,7 +914,7 @@ def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentati
     return UnsupportedRepresentation(f"{source_format} does not support haplo reads")
 
 
-def _validate_sparse(sparse: bool | str) -> str | None:
+def _validate_sparse(sparse: object) -> str | None:
     if sparse is False:
         return None
     if sparse is True:
@@ -661,16 +952,16 @@ def _validate_sample_filter(samples: list[str] | tuple[str, ...] | set[str] | No
         raise InvalidOptionError("samples must not contain duplicate sample IDs")
 
 
-def _validate_missing(missing: str) -> None:
+def _validate_missing(missing: object) -> str:
     if not isinstance(missing, str) or missing not in _SUPPORTED_MISSING_POLICIES:
         raise InvalidOptionError(f"unsupported missing-data policy: {missing}")
-
-
-def _normalize_missing(missing: Any, *, sparse_format: str | None) -> str:
-    if missing is _DEFAULT_MISSING:
-        return "raise" if sparse_format is not None else "nan"
-    _validate_missing(missing)
     return missing
+
+
+def _normalize_missing(missing: object, *, sparse_format: str | None) -> str:
+    if missing is None:
+        return "raise" if sparse_format is not None else "nan"
+    return _validate_missing(missing)
 
 
 def _normalize_dtype(dtype: DTypeLike) -> np.dtype[Any]:
@@ -690,69 +981,15 @@ def _validate_sparse_missing_compatibility(sparse_format: str | None, missing: s
         raise InvalidOptionError("this release does not store sparse missing values; use missing='raise'")
 
 
+def _public_rust_error(error: Exception) -> Exception:
+    for rust_error_type, public_error_type in _RUST_ERROR_MAP:
+        if isinstance(error, rust_error_type):
+            return public_error_type(str(error))
+    return InvalidSourceError(str(error))
+
+
 def _public_read_error(error: ValueError) -> Exception:
-    message = str(error)
-    if "missing requested sample" in message:
-        return SampleFilterError(message)
-    if "sparse missing values" in message:
-        return MissingDataError(message)
-    if "bgen" in message and "not implemented" in message and "dosage reads" not in message:
-        return UnsupportedRepresentation(message)
-    if _is_backend_unsupported_representation_message(message):
-        return UnsupportedRepresentation(message)
-    if _is_unsupported_bgen_representation_error(message):
-        return UnsupportedRepresentation(message)
-    if (
-        "FORMAT/DS" in message
-        or "pgen does not contain dosage values" in message
-        or "pgen record does not contain dosage values" in message
-        or ("unsupported pgen" in message and "dosage" in message)
-    ):
-        return UnsupportedRepresentation(message)
-    return InvalidSourceError(message)
-
-
-def _public_haplotype_read_error(error: ValueError) -> Exception:
-    message = str(error)
-    if (
-        "unphased" in message
-        or "require variable-width explicit phased records" in message
-        or "requires explicit phased dosage records" in message
-        or "does not contain explicit phased dosage values" in message
-        or "does not accept dosage records" in message
-        or "unsupported haplotype format" in message
-        or _is_backend_unsupported_representation_message(message)
-        or ("bgen" in message and "not implemented" in message)
-        or ("plink2" in message and "haplotype" in message and "not implemented" in message)
-    ):
-        return UnsupportedRepresentation(message)
-    if "sparse missing values" in message:
-        return MissingDataError(message)
-    return _public_read_error(error)
-
-
-def _is_backend_unsupported_representation_message(message: str) -> bool:
-    return message in _BACKEND_UNSUPPORTED_REPRESENTATION_MESSAGES
-
-
-def _is_unsupported_bgen_representation_error(message: str) -> bool:
-    unsupported_markers = (
-        "unsupported bgen",
-        "bgen layout",
-        "bgen metadata parsing requires layout",
-        "bgen compression value is reserved",
-    )
-    representation_markers = (
-        "multiallelic",
-        "phased",
-        "variable-ploidy",
-        "bit depth",
-        "layout",
-        "compression",
-    )
-    return any(marker in message for marker in unsupported_markers) and any(
-        marker in message for marker in representation_markers
-    )
+    return InvalidSourceError(str(error))
 
 
 def _validate_bool_option(name: str, value: bool) -> None:
@@ -765,23 +1002,12 @@ def _validate_block_size(size: int) -> None:
         raise InvalidOptionError("block size must be a positive integer")
 
 
-def _read_options_with_defaults(read_options: dict[str, Any]) -> _ReadOptions:
-    defaults = {
-        "kind": "geno",
-        "dosage": "hardcall",
-        "sparse": False,
-        "variants": None,
-        "samples": None,
-        "missing": _DEFAULT_MISSING,
-        "dtype": "float32",
-        "return_samples": False,
-        "return_variants": False,
-    }
-    unknown = set(read_options) - set(defaults)
+def _read_options_with_defaults(read_options: Mapping[str, object]) -> _ReadOptions:
+    unknown = set(read_options) - set(_READ_OPTION_DEFAULTS)
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise InvalidOptionError(f"unsupported option(s): {keys}")
-    merged: dict[str, Any] = defaults | read_options
+    merged: dict[str, Any] = {**_READ_OPTION_DEFAULTS, **read_options}
     return _ReadOptions(
         kind=merged["kind"],
         dosage=merged["dosage"],

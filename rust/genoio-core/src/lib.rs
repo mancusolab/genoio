@@ -18,7 +18,7 @@ pub use dense::{
     select_samples_source_order, transpose_variant_major_to_sample_major, DenseDiagnostics,
     DenseGenotypeMatrix, DenseSampleSelection,
 };
-pub use error::MetadataError;
+pub use error::GenoioError;
 pub use filter::{
     attach_variant_stats, compute_dosage_variant_stats, compute_variant_stats,
     variant_stats_from_counts, PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats,

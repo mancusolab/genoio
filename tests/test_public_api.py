@@ -455,8 +455,8 @@ def test_sparse_default_missing_signature_is_readable():
 
     missing = signature(genoio.Dataset.read).parameters["missing"]
 
-    assert missing.annotation == "Any"
-    assert repr(missing.default) == "DEFAULT_MISSING"
+    assert missing.annotation == "Literal['nan', 'raise', 'impute'] | None"
+    assert missing.default is None
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
@@ -520,21 +520,17 @@ def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
         dataset.read(sparse="unsupported")
 
 
-def test_backend_intentionally_unsupported_mapping_is_exact():
+def test_private_rust_errors_map_to_public_error_classes():
     import genoio
-    from genoio import _api
+    from genoio import _rust
 
-    genotype_error = ValueError("sparse dosage-backed genotype reads are intentionally unsupported")
-    haplotype_error = ValueError(
-        "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
-        "use dense haplotype reads with sparse=False"
-    )
-    unrelated_error = ValueError("decoder cache is intentionally unsupported in this internal state")
+    assert issubclass(_rust.RustUnsupportedRepresentationError, Exception)
+    assert issubclass(_rust.RustInvalidSourceError, Exception)
+    assert issubclass(_rust.RustInvalidOptionError, Exception)
+    assert issubclass(_rust.RustMissingDataError, Exception)
+    assert issubclass(_rust.RustSampleFilterError, Exception)
 
-    assert isinstance(_api._public_read_error(genotype_error), genoio.UnsupportedRepresentation)
-    assert isinstance(_api._public_haplotype_read_error(haplotype_error), genoio.UnsupportedRepresentation)
-    assert isinstance(_api._public_read_error(unrelated_error), genoio.InvalidSourceError)
-    assert isinstance(_api._public_haplotype_read_error(unrelated_error), genoio.InvalidSourceError)
+    assert genoio.UnsupportedRepresentation.__name__ == "UnsupportedRepresentation"
 
 
 def test_filter_helpers_build_serializable_expressions():

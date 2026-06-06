@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{MetadataError, VariantRecord};
+use crate::{GenoioError, VariantRecord};
 
 /// Serializable variant filter evaluated by Rust readers.
 ///
@@ -120,9 +120,9 @@ impl VariantFilter {
     /// Simplification is semantic-preserving: contradictory expressions become
     /// `AlwaysFalse`, repeated thresholds are tightened, and concrete region
     /// intersections are reduced before any reader sees the filter.
-    pub fn from_json_value(value: Value) -> Result<Self, MetadataError> {
+    pub fn from_json_value(value: Value) -> Result<Self, GenoioError> {
         let raw: RawExpr = serde_json::from_value(value).map_err(|error| {
-            MetadataError::parse("<filter>", format!("invalid filter IR: {error}"))
+            GenoioError::invalid_source("<filter>", format!("invalid filter IR: {error}"))
         })?;
         Ok(Self {
             expr: Expr::from_raw(raw)?.simplify(),
@@ -179,7 +179,7 @@ impl VariantFilter {
 }
 
 impl Expr {
-    fn from_raw(raw: RawExpr) -> Result<Self, MetadataError> {
+    fn from_raw(raw: RawExpr) -> Result<Self, GenoioError> {
         match raw {
             RawExpr::Predicate { name, params } => {
                 Ok(Self::Predicate(Predicate::from_raw(&name, params)?))
@@ -444,7 +444,7 @@ enum PredicateCombine {
 }
 
 impl Predicate {
-    fn from_raw(name: &str, params: Value) -> Result<Self, MetadataError> {
+    fn from_raw(name: &str, params: Value) -> Result<Self, GenoioError> {
         match name {
             "chrom" => Ok(Self::Chrom(required_string(&params, "value")?)),
             "region" => {
@@ -486,7 +486,7 @@ impl Predicate {
                 expect_no_params(&params)?;
                 Ok(Self::Polymorphic)
             }
-            other => Err(MetadataError::parse(
+            other => Err(GenoioError::invalid_source(
                 "<filter>",
                 format!("unknown predicate name: {other}"),
             )),
@@ -737,9 +737,9 @@ fn min_option<T: Ord + Copy>(left: Option<T>, right: Option<T>) -> Option<T> {
 pub fn compute_variant_stats(
     values: &[f32],
     missing_mask: &[bool],
-) -> Result<VariantStats, MetadataError> {
+) -> Result<VariantStats, GenoioError> {
     if values.len() != missing_mask.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "variant values and missing mask lengths differ",
         ));
@@ -772,9 +772,9 @@ pub fn compute_variant_stats(
 pub fn compute_dosage_variant_stats(
     values: &[f32],
     missing_mask: &[bool],
-) -> Result<VariantStats, MetadataError> {
+) -> Result<VariantStats, GenoioError> {
     if values.len() != missing_mask.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "variant values and missing mask lengths differ",
         ));
@@ -789,7 +789,7 @@ pub fn compute_dosage_variant_stats(
             continue;
         }
         if !(0.0..=2.0).contains(value) {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<filter>",
                 format!("dosage statistics require values in [0, 2]; observed {value}"),
             ));
@@ -810,24 +810,24 @@ pub fn variant_stats_from_counts(
     het_count: u64,
     hom_alt_count: u64,
     missing_count: u64,
-) -> Result<VariantStats, MetadataError> {
+) -> Result<VariantStats, GenoioError> {
     let called_count = hom_ref_count
         .checked_add(het_count)
         .and_then(|count| count.checked_add(hom_alt_count))
         .ok_or_else(|| {
-            MetadataError::parse(
+            GenoioError::invalid_source(
                 "<filter>",
                 "called genotype count exceeds supported metadata range",
             )
         })?;
     let total = called_count.checked_add(missing_count).ok_or_else(|| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             "genotype count exceeds supported metadata range",
         )
     })?;
     let n_called = u32::try_from(called_count).map_err(|_| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             "called genotype count exceeds supported metadata range",
         )
@@ -851,17 +851,17 @@ pub fn variant_stats_from_counts(
 
     let allele_count = het_count
         .checked_add(hom_alt_count.checked_mul(2).ok_or_else(|| {
-            MetadataError::parse("<filter>", "allele count exceeds supported metadata range")
+            GenoioError::invalid_source("<filter>", "allele count exceeds supported metadata range")
         })?)
         .ok_or_else(|| {
-            MetadataError::parse("<filter>", "allele count exceeds supported metadata range")
+            GenoioError::invalid_source("<filter>", "allele count exceeds supported metadata range")
         })?;
     let called_alleles = 2_u64 * u64::from(n_called);
     let af = allele_count as f64 / called_alleles as f64;
     let maf = af.min(1.0 - af);
     let mac = allele_count.min(called_alleles - allele_count);
     let mac = u32::try_from(mac).map_err(|_| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             "minor allele count exceeds supported metadata range",
         )
@@ -880,21 +880,21 @@ fn variant_stats_from_dosage_count(
     allele_count: f64,
     called_count: u64,
     missing_count: u64,
-) -> Result<VariantStats, MetadataError> {
+) -> Result<VariantStats, GenoioError> {
     if !allele_count.is_finite() || allele_count < 0.0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "allele dosage count is outside the supported range",
         ));
     }
     let total = called_count.checked_add(missing_count).ok_or_else(|| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             "genotype count exceeds supported metadata range",
         )
     })?;
     let n_called = u32::try_from(called_count).map_err(|_| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             "called genotype count exceeds supported metadata range",
         )
@@ -918,7 +918,7 @@ fn variant_stats_from_dosage_count(
 
     let called_alleles = 2.0 * f64::from(n_called);
     if allele_count > called_alleles {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "allele dosage count exceeds called allele count",
         ));
@@ -955,12 +955,12 @@ fn exact_u32_from_f64(value: f64) -> Option<u32> {
     }
 }
 
-fn discrete_allele_count(value: f32) -> Result<u64, MetadataError> {
+fn discrete_allele_count(value: f32) -> Result<u64, GenoioError> {
     match value {
         0.0 => Ok(0),
         1.0 => Ok(1),
         2.0 => Ok(2),
-        other => Err(MetadataError::parse(
+        other => Err(GenoioError::invalid_source(
             "<filter>",
             format!("genotype statistics require discrete 0/1/2 values; observed {other}"),
         )),
@@ -978,51 +978,51 @@ fn is_biallelic(variant: &VariantRecord) -> bool {
         .is_none_or(|alt_allele| !alt_allele.contains(','))
 }
 
-fn params_object(params: &Value) -> Result<&serde_json::Map<String, Value>, MetadataError> {
+fn params_object(params: &Value) -> Result<&serde_json::Map<String, Value>, GenoioError> {
     match params {
         Value::Object(object) => Ok(object),
-        _ => Err(MetadataError::parse(
+        _ => Err(GenoioError::invalid_source(
             "<filter>",
             "predicate params must be a JSON object",
         )),
     }
 }
 
-fn expect_no_params(params: &Value) -> Result<(), MetadataError> {
+fn expect_no_params(params: &Value) -> Result<(), GenoioError> {
     let object = params_object(params)?;
     if object.is_empty() {
         Ok(())
     } else {
-        Err(MetadataError::parse(
+        Err(GenoioError::invalid_source(
             "<filter>",
             "predicate does not accept parameters",
         ))
     }
 }
 
-fn required_string(params: &Value, key: &str) -> Result<String, MetadataError> {
+fn required_string(params: &Value, key: &str) -> Result<String, GenoioError> {
     match params_object(params)?.get(key) {
         Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
-        _ => Err(MetadataError::parse(
+        _ => Err(GenoioError::invalid_source(
             "<filter>",
             format!("predicate parameter {key:?} must be a non-empty string"),
         )),
     }
 }
 
-fn required_string_set(params: &Value, key: &str) -> Result<BTreeSet<String>, MetadataError> {
+fn required_string_set(params: &Value, key: &str) -> Result<BTreeSet<String>, GenoioError> {
     match params_object(params)?.get(key) {
         Some(Value::Array(values)) => {
             let mut set = BTreeSet::new();
             for value in values {
                 let Value::String(text) = value else {
-                    return Err(MetadataError::parse(
+                    return Err(GenoioError::invalid_source(
                         "<filter>",
                         format!("predicate parameter {key:?} must contain only strings"),
                     ));
                 };
                 if !set.insert(text.clone()) {
-                    return Err(MetadataError::parse(
+                    return Err(GenoioError::invalid_source(
                         "<filter>",
                         format!("predicate parameter {key:?} must not contain duplicates"),
                     ));
@@ -1030,39 +1030,39 @@ fn required_string_set(params: &Value, key: &str) -> Result<BTreeSet<String>, Me
             }
             Ok(set)
         }
-        _ => Err(MetadataError::parse(
+        _ => Err(GenoioError::invalid_source(
             "<filter>",
             format!("predicate parameter {key:?} must be a string array"),
         )),
     }
 }
 
-fn optional_rate(params: &Value, key: &str) -> Result<Option<f32>, MetadataError> {
+fn optional_rate(params: &Value, key: &str) -> Result<Option<f32>, GenoioError> {
     match params_object(params)?.get(key) {
         Some(value) => Ok(Some(value_to_rate(key, value)?)),
         None => Ok(None),
     }
 }
 
-fn required_rate(params: &Value, key: &str) -> Result<f32, MetadataError> {
+fn required_rate(params: &Value, key: &str) -> Result<f32, GenoioError> {
     match optional_rate(params, key)? {
         Some(value) => Ok(value),
-        None => Err(MetadataError::parse(
+        None => Err(GenoioError::invalid_source(
             "<filter>",
             format!("predicate parameter {key:?} is required"),
         )),
     }
 }
 
-fn value_to_rate(key: &str, value: &Value) -> Result<f32, MetadataError> {
+fn value_to_rate(key: &str, value: &Value) -> Result<f32, GenoioError> {
     let Some(number) = value.as_f64() else {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             format!("predicate parameter {key:?} must be numeric"),
         ));
     };
     if !(0.0..=1.0).contains(&number) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             format!("predicate parameter {key:?} must be between 0 and 1"),
         ));
@@ -1070,18 +1070,18 @@ fn value_to_rate(key: &str, value: &Value) -> Result<f32, MetadataError> {
     Ok(number as f32)
 }
 
-fn optional_nonnegative_f32(params: &Value, key: &str) -> Result<Option<f32>, MetadataError> {
+fn optional_nonnegative_f32(params: &Value, key: &str) -> Result<Option<f32>, GenoioError> {
     let Some(value) = params.get(key) else {
         return Ok(None);
     };
     let number = value.as_f64().ok_or_else(|| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             format!("{key} must be a non-negative finite number"),
         )
     })?;
     if !number.is_finite() || number < 0.0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             format!("{key} must be a non-negative finite number"),
         ));
@@ -1089,17 +1089,17 @@ fn optional_nonnegative_f32(params: &Value, key: &str) -> Result<Option<f32>, Me
     Ok(Some(number as f32))
 }
 
-fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, MetadataError> {
+fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, GenoioError> {
     match params_object(params)?.get(key) {
         Some(value) => {
             let Some(number) = value.as_u64() else {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     "<filter>",
                     format!("predicate parameter {key:?} must be a non-negative integer"),
                 ));
             };
             Ok(Some(u32::try_from(number).map_err(|_| {
-                MetadataError::parse(
+                GenoioError::invalid_source(
                     "<filter>",
                     format!("predicate parameter {key:?} is out of range"),
                 )
@@ -1113,15 +1113,15 @@ fn validate_range<T: PartialOrd>(
     name: &str,
     min: Option<T>,
     max: Option<T>,
-) -> Result<(), MetadataError> {
+) -> Result<(), GenoioError> {
     if min.is_none() && max.is_none() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             format!("{name} predicate requires at least one threshold"),
         ));
     }
     if min.zip(max).is_some_and(|(min, max)| min > max) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             format!("{name} predicate min must be <= max"),
         ));
@@ -1129,33 +1129,33 @@ fn validate_range<T: PartialOrd>(
     Ok(())
 }
 
-fn parse_region(value: &str) -> Result<(String, u32, u32), MetadataError> {
+fn parse_region(value: &str) -> Result<(String, u32, u32), GenoioError> {
     let Some((chrom, coordinates)) = value.split_once(':') else {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "invalid region syntax; expected chrom:start-end",
         ));
     };
     let Some((start_text, end_text)) = coordinates.split_once('-') else {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "invalid region syntax; expected chrom:start-end",
         ));
     };
     let start = start_text.parse::<u32>().map_err(|error| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             format!("invalid region start coordinate: {error}"),
         )
     })?;
     let end = end_text.parse::<u32>().map_err(|error| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             "<filter>",
             format!("invalid region end coordinate: {error}"),
         )
     })?;
     if chrom.is_empty() || start == 0 || end < start {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             "<filter>",
             "invalid region coordinates; expected 1-based start <= end",
         ));

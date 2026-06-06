@@ -171,7 +171,7 @@ def test_blocks_apply_filters_and_sample_keep_lists_like_full_reads(tmp_path):
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
     read_options = {"variants": genoio.chrom("1"), "samples": ["S3", "S1"]}
 
-    full, full_variants = dataset.read(**read_options, return_variants=True)  # ty: ignore[invalid-argument-type]
+    full, full_variants = dataset.read(variants=genoio.chrom("1"), samples=["S3", "S1"], return_variants=True)
     blocks = list(dataset.iter_blocks(size=2, **read_options, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "rs2"], ["rs5"]]
@@ -219,7 +219,7 @@ def test_bgen_dosage_filtered_blocks_match_filtered_full_read(tmp_path):
     dataset = genoio.bgen(write_bgen_dosage(tmp_path))
     read_options = {"dosage": "dosage", "variants": genoio.chrom("2")}
 
-    full, full_variants = dataset.read(**read_options, return_variants=True)  # ty: ignore[invalid-argument-type]
+    full, full_variants = dataset.read(dosage="dosage", variants=genoio.chrom("2"), return_variants=True)
     blocks = list(dataset.iter_blocks(1, **read_options, return_variants=True))
 
     assert [variants["id"].to_list() for _, variants in blocks] == [["rs2"]]
@@ -281,11 +281,13 @@ def test_plink2_matrix_only_blocks_pass_private_matrix_only_option(tmp_path, mon
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
     calls = []
 
-    def fake_read_dense_from_rust(self, members, options):
+    def fake_read_from_rust(self, kind, sparse, members, options):
+        assert kind == "geno"
+        assert sparse is False
         calls.append(dict(options))
         return empty_dense_rust_result()
 
-    monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
+    monkeypatch.setattr(genoio.Dataset, "_read_from_rust", fake_read_from_rust)
 
     list(dataset.iter_blocks(size=2))
 
@@ -308,11 +310,13 @@ def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(t
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
     calls = []
 
-    def fake_read_dense_from_rust(self, members, options):
+    def fake_read_from_rust(self, kind, sparse, members, options):
+        assert kind == "geno"
+        assert sparse is False
         calls.append(dict(options))
         return empty_dense_rust_result()
 
-    monkeypatch.setattr(genoio.Dataset, "_read_dense_from_rust", fake_read_dense_from_rust)
+    monkeypatch.setattr(genoio.Dataset, "_read_from_rust", fake_read_from_rust)
 
     list(dataset.iter_blocks(size=2, **read_options))
 

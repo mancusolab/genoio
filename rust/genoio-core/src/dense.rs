@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::{MetadataError, SampleRecord, VariantRecord};
+use crate::{GenoioError, SampleRecord, VariantRecord};
 
 /// Counts describing source selection and variant filtering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,12 +42,12 @@ impl DenseGenotypeMatrix {
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
         diagnostics: DenseDiagnostics,
-    ) -> Result<Self, MetadataError> {
-        let expected_len = n_samples
-            .checked_mul(n_variants)
-            .ok_or_else(|| MetadataError::parse("<dense>", "dense matrix shape is out of range"))?;
+    ) -> Result<Self, GenoioError> {
+        let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
+            GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
+        })?;
         if values.len() != expected_len {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<dense>",
                 format!(
                     "dense values length {} does not match shape {n_samples} x {n_variants}",
@@ -56,7 +56,7 @@ impl DenseGenotypeMatrix {
             ));
         }
         if missing_mask.len() != values.len() {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<dense>",
                 format!(
                     "dense missing mask length {} does not match values length {}",
@@ -66,7 +66,7 @@ impl DenseGenotypeMatrix {
             ));
         }
         if samples.len() != n_samples {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<dense>",
                 format!(
                     "sample metadata length {} does not match n_samples {n_samples}",
@@ -75,7 +75,7 @@ impl DenseGenotypeMatrix {
             ));
         }
         if variants.len() != n_variants {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<dense>",
                 format!(
                     "variant metadata length {} does not match n_variants {n_variants}",
@@ -102,12 +102,12 @@ impl DenseGenotypeMatrix {
         values: Vec<f32>,
         missing_mask: Vec<bool>,
         diagnostics: DenseDiagnostics,
-    ) -> Result<Self, MetadataError> {
-        let expected_len = n_samples
-            .checked_mul(n_variants)
-            .ok_or_else(|| MetadataError::parse("<dense>", "dense matrix shape is out of range"))?;
+    ) -> Result<Self, GenoioError> {
+        let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
+            GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
+        })?;
         if values.len() != expected_len {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<dense>",
                 format!(
                     "dense values length {} does not match shape {n_samples} x {n_variants}",
@@ -116,7 +116,7 @@ impl DenseGenotypeMatrix {
             ));
         }
         if missing_mask.len() != values.len() {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 "<dense>",
                 format!(
                     "dense missing mask length {} does not match values length {}",
@@ -151,7 +151,7 @@ pub fn select_samples_source_order(
     source_samples: &[SampleRecord],
     requested: Option<&[String]>,
     error_path: &Path,
-) -> Result<DenseSampleSelection, MetadataError> {
+) -> Result<DenseSampleSelection, GenoioError> {
     let Some(requested) = requested else {
         return Ok(DenseSampleSelection {
             source_indices: (0..source_samples.len()).collect(),
@@ -167,7 +167,7 @@ pub fn select_samples_source_order(
 
     let requested_ids = requested.iter().collect::<HashSet<_>>();
     if requested_ids.len() != requested.len() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             error_path,
             "sample keep list must not contain duplicate sample IDs",
         ));
@@ -186,13 +186,10 @@ pub fn select_samples_source_order(
 
     let missing_samples = requested.len() - samples.len();
     if missing_samples > 0 {
-        return Err(MetadataError::parse(
-            error_path,
-            format!(
-                "missing requested sample(s): requested={} retained={} missing={missing_samples}",
-                requested.len(),
-                samples.len()
-            ),
+        return Err(GenoioError::sample_filter(
+            requested.len(),
+            samples.len(),
+            missing_samples,
         ));
     }
 

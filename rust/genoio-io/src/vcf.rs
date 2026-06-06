@@ -6,7 +6,7 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     compute_variant_stats, flip_values_to_minor_allele, reject_sparse_missing_values,
     select_samples_source_order, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
-    MetadataError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
+    GenoioError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
     SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 use rust_htslib::bcf::{
@@ -19,15 +19,16 @@ use crate::error::Result;
 /// Read VCF/BCF sample and variant metadata without returning genotypes.
 pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     let mut reader = Reader::from_path(path)
-        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     let header = reader.header().clone();
     let samples = sample_records_from_header(&header);
 
     let mut variants = Vec::new();
     let mut has_phased_genotype_evidence = false;
     for record_result in reader.records() {
-        let record = record_result
-            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let record = record_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+        })?;
         if !has_phased_genotype_evidence && record_has_phased_genotype(&record, samples.len())? {
             has_phased_genotype_evidence = true;
         }
@@ -64,8 +65,9 @@ pub fn read_vcf_dense_windowed(
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        let reader = Reader::from_path(path)
-            .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        let reader = Reader::from_path(path).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf reader error: {error}"))
+        })?;
         return empty_vcf_dense(path, reader.header(), requested_samples);
     }
 
@@ -85,7 +87,7 @@ pub fn read_vcf_dense_windowed(
 
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
-        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     read_vcf_dense_records(
         path,
         requested_samples,
@@ -103,8 +105,9 @@ pub fn read_vcf_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        let reader = Reader::from_path(path)
-            .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        let reader = Reader::from_path(path).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf reader error: {error}"))
+        })?;
         return empty_vcf_dense(path, reader.header(), requested_samples);
     }
 
@@ -122,7 +125,7 @@ pub fn read_vcf_dosage_dense_windowed(
 
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
-        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     read_vcf_dosage_dense_records(
         path,
         requested_samples,
@@ -149,8 +152,9 @@ pub fn read_vcf_sparse_windowed(
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        let reader = Reader::from_path(path)
-            .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        let reader = Reader::from_path(path).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf reader error: {error}"))
+        })?;
         return empty_vcf_sparse(path, reader.header(), requested_samples);
     }
 
@@ -170,7 +174,7 @@ pub fn read_vcf_sparse_windowed(
 
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
-        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     read_vcf_sparse_records(
         path,
         requested_samples,
@@ -198,7 +202,7 @@ pub fn read_vcf_haplotypes_dense_windowed(
 ) -> Result<DenseGenotypeMatrix> {
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
-        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     read_vcf_haplotypes_dense_records(
         path,
         requested_samples,
@@ -226,7 +230,7 @@ pub fn read_vcf_haplotypes_sparse_windowed(
 ) -> Result<SparseGenotypeMatrix> {
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
-        .map_err(|error| MetadataError::parse(path, format!("vcf reader error: {error}")))?;
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     read_vcf_haplotypes_sparse_records(
         path,
         requested_samples,
@@ -244,7 +248,7 @@ fn read_indexed_vcf_dense(
     region: &RegionPredicate,
 ) -> Result<DenseGenotypeMatrix> {
     let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        MetadataError::parse(path, format!("indexed vcf reader error: {error}"))
+        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
     })?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
@@ -257,7 +261,9 @@ fn read_indexed_vcf_dense(
             u64::from(region.start - 1),
             Some(u64::from(region.end - 1)),
         )
-        .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf region fetch error: {error}"))
+        })?;
 
     read_vcf_dense_records(
         path,
@@ -276,7 +282,7 @@ fn read_indexed_vcf_dosage_dense(
     region: &RegionPredicate,
 ) -> Result<DenseGenotypeMatrix> {
     let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        MetadataError::parse(path, format!("indexed vcf reader error: {error}"))
+        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
     })?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
@@ -289,7 +295,9 @@ fn read_indexed_vcf_dosage_dense(
             u64::from(region.start - 1),
             Some(u64::from(region.end - 1)),
         )
-        .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf region fetch error: {error}"))
+        })?;
 
     read_vcf_dosage_dense_records(
         path,
@@ -308,7 +316,7 @@ fn read_indexed_vcf_sparse(
     region: &RegionPredicate,
 ) -> Result<SparseGenotypeMatrix> {
     let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        MetadataError::parse(path, format!("indexed vcf reader error: {error}"))
+        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
     })?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
@@ -321,7 +329,9 @@ fn read_indexed_vcf_sparse(
             u64::from(region.start - 1),
             Some(u64::from(region.end - 1)),
         )
-        .map_err(|error| MetadataError::parse(path, format!("vcf region fetch error: {error}")))?;
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf region fetch error: {error}"))
+        })?;
 
     read_vcf_sparse_records(
         path,
@@ -354,8 +364,9 @@ fn read_vcf_dense_records<R: Read>(
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
-        let record = record_result
-            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let record = record_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+        })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
@@ -384,10 +395,9 @@ fn read_vcf_dense_records<R: Read>(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
-        let genotypes = record
-            .format(b"GT")
-            .integer()
-            .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+        let genotypes = record.format(b"GT").integer().map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
+        })?;
         let mut current_values = Vec::with_capacity(selection.source_indices.len());
         let mut current_missing = Vec::with_capacity(selection.source_indices.len());
         for source_index in &selection.source_indices {
@@ -466,8 +476,9 @@ fn read_vcf_dosage_dense_records<R: Read>(
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
-        let record = record_result
-            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let record = record_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+        })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
@@ -553,8 +564,9 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
-        let record = record_result
-            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let record = record_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+        })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
@@ -660,8 +672,9 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
-        let record = record_result
-            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let record = record_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+        })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
@@ -759,8 +772,9 @@ fn read_vcf_sparse_records<R: Read>(
         if variant_window.is_some_and(|window| window.is_past(retained_index)) {
             break;
         }
-        let record = record_result
-            .map_err(|error| MetadataError::parse(path, format!("vcf record error: {error}")))?;
+        let record = record_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+        })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
         diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
@@ -786,10 +800,9 @@ fn read_vcf_sparse_records<R: Read>(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
-        let genotypes = record
-            .format(b"GT")
-            .integer()
-            .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+        let genotypes = record.format(b"GT").integer().map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
+        })?;
         let mut current_values = Vec::with_capacity(selection.source_indices.len());
         let mut current_missing = Vec::with_capacity(selection.source_indices.len());
         for source_index in &selection.source_indices {
@@ -894,7 +907,7 @@ fn validate_dense_biallelic_record(path: &Path, record: &rust_htslib::bcf::Recor
     } else {
         "records with fewer than two alleles are not supported"
     };
-    Err(MetadataError::parse(
+    Err(GenoioError::invalid_source(
         path,
         format!(
             "vcf dense reads require biallelic records; record {id} has {allele_count} alleles: {reason}"
@@ -924,21 +937,20 @@ fn variant_record_from_record(
     header: &rust_htslib::bcf::header::HeaderView,
     record: &rust_htslib::bcf::Record,
 ) -> Result<VariantRecord> {
-    let rid = record
-        .rid()
-        .ok_or_else(|| MetadataError::parse(path, "vcf record is missing a chromosome id"))?;
-    let chrom = String::from_utf8_lossy(
-        header
-            .rid2name(rid)
-            .map_err(|error| MetadataError::parse(path, format!("vcf rid error: {error}")))?,
-    )
-    .into_owned();
+    let rid = record.rid().ok_or_else(|| {
+        GenoioError::invalid_source(path, "vcf record is missing a chromosome id")
+    })?;
+    let chrom =
+        String::from_utf8_lossy(header.rid2name(rid).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf rid error: {error}"))
+        })?)
+        .into_owned();
     let pos = u32::try_from(record.pos() + 1)
-        .map_err(|_| MetadataError::parse(path, "vcf record position is out of range"))?;
+        .map_err(|_| GenoioError::invalid_source(path, "vcf record position is out of range"))?;
     let id = String::from_utf8_lossy(&record.id()).into_owned();
     let alleles = record.alleles();
     if alleles.len() < 2 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("vcf record {chrom}:{pos} has fewer than two alleles"),
         ));
@@ -989,7 +1001,7 @@ fn reject_unindexed_compressed_region(
     if has_vcf_index(path) {
         return Ok(());
     }
-    Err(MetadataError::parse(
+    Err(GenoioError::invalid_source(
         path,
         "region filter on compressed VCF requires an index",
     ))
@@ -1015,7 +1027,7 @@ fn decode_raw_diploid_gt(
     genotype: &[i32],
 ) -> Result<(f32, bool)> {
     if genotype.len() != 2 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "vcf record {} has non-diploid GT with {} alleles",
@@ -1032,7 +1044,7 @@ fn decode_raw_diploid_gt(
             RawGtAllele::Reference => {}
             RawGtAllele::Alternate => dosage += 1.0,
             RawGtAllele::Unsupported(other) => {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     format!(
                         "vcf record {} has multiallelic GT allele index {other}",
@@ -1076,10 +1088,9 @@ fn decode_diploid_genotype_record(
     record: &rust_htslib::bcf::Record,
     source_indices: &[usize],
 ) -> Result<DecodedDiploidGenotypeRecord> {
-    let genotypes = record
-        .format(b"GT")
-        .integer()
-        .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+    let genotypes = record.format(b"GT").integer().map_err(|error| {
+        GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
+    })?;
     let mut values = Vec::with_capacity(source_indices.len());
     let mut missing = Vec::with_capacity(source_indices.len());
 
@@ -1098,10 +1109,9 @@ fn decode_ds_dosage_record(
     source_indices: &[usize],
 ) -> Result<DecodedDiploidGenotypeRecord> {
     let dosages = record.format(b"DS").float().map_err(|error| {
-        MetadataError::parse(
-            path,
-            format!("vcf dosage reads require FORMAT/DS values: {error}"),
-        )
+        GenoioError::unsupported(format!(
+            "vcf dosage reads require FORMAT/DS values: {error}"
+        ))
     })?;
     let mut values = Vec::with_capacity(source_indices.len());
     let mut missing = Vec::with_capacity(source_indices.len());
@@ -1109,7 +1119,7 @@ fn decode_ds_dosage_record(
     for source_index in source_indices {
         let dosage = dosages[*source_index];
         if dosage.len() != 1 {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!(
                     "vcf record {} has FORMAT/DS with {} values for a sample; expected one",
@@ -1125,7 +1135,7 @@ fn decode_ds_dosage_record(
             continue;
         }
         if !value.is_finite() || !(0.0..=2.0).contains(&value) {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!(
                     "vcf record {} has invalid FORMAT/DS value {value}; expected finite value in [0, 2]",
@@ -1150,9 +1160,9 @@ fn decode_phased_haplotype_record(
     record: &rust_htslib::bcf::Record,
     source_indices: &[usize],
 ) -> Result<PhasedHaplotypeRecord> {
-    let genotypes = record
-        .genotypes()
-        .map_err(|error| MetadataError::parse(path, format!("vcf genotype error: {error}")))?;
+    let genotypes = record.genotypes().map_err(|error| {
+        GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
+    })?;
     let mut haplotype_values = Vec::with_capacity(source_indices.len() * 2);
     let mut haplotype_missing = Vec::with_capacity(source_indices.len() * 2);
 
@@ -1175,7 +1185,7 @@ fn decode_phased_diploid_gt(
     genotype: &rust_htslib::bcf::record::Genotype,
 ) -> Result<([f32; 2], [bool; 2])> {
     if genotype.len() != 2 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "vcf record {} has non-diploid GT with {} alleles",
@@ -1194,13 +1204,10 @@ fn decode_phased_diploid_gt(
                 GenotypeAllele::UnphasedMissing | GenotypeAllele::Unphased(_)
             )
         {
-            return Err(MetadataError::parse(
-                path,
-                format!(
-                    "vcf record {} contains an unphased GT separator in a retained haplotype variant",
-                    String::from_utf8_lossy(&record.id())
-                ),
-            ));
+            return Err(GenoioError::unsupported(format!(
+                "vcf record {} contains an unphased GT separator in a retained haplotype variant",
+                String::from_utf8_lossy(&record.id())
+            )));
         }
         match allele {
             GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing => {
@@ -1210,7 +1217,7 @@ fn decode_phased_diploid_gt(
                 0 => {}
                 1 => values[allele_index] = 1.0,
                 other => {
-                    return Err(MetadataError::parse(
+                    return Err(GenoioError::invalid_source(
                         path,
                         format!(
                             "vcf record {} has multiallelic GT allele index {other}",

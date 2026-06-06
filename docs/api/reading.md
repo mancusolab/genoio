@@ -122,25 +122,6 @@ for X, variants in ds.iter_blocks(
 Each block keeps the dataset sample order. Variant metadata returned with a
 block describes that block's columns only.
 
-## BGEN region reads
-
-BGEN dosage reads use a same-path bgenix SQLite index for concrete region
-filters when one is present. For `cohort.bgen`, `genoio` looks for
-`cohort.bgen.bgi`. Without that index, BGEN region filters fall back to the
-normal sequential scan.
-
-```python
-ds = genoio.bgen("cohort.bgen")
-X, variants = ds.read(
-    dosage="dosage",
-    variants=genoio.region("22:20000000-21000000"),
-    return_variants=True,
-)
-```
-
-If a read only needs the matrix, leave `return_samples=False` and
-`return_variants=False`. BGEN matrix-only reads avoid returning metadata frames.
-
 ## Region iteration
 
 Use [`Dataset.iter_regions(...)`](#genoio.Dataset.iter_regions) when each

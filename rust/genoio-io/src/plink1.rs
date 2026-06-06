@@ -7,7 +7,7 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, MetadataError, MetadataOutput,
+    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, GenoioError, MetadataOutput,
     PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
     VariantRecord, VariantWindow,
 };
@@ -17,7 +17,7 @@ use crate::hardcall::{HardcallBatch, PackedHardcalls};
 
 /// Read PLINK1 sample and variant metadata without decoding BED genotypes.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
-    fs::metadata(bed).map_err(|source| MetadataError::Io {
+    fs::metadata(bed).map_err(|source| GenoioError::Io {
         path: bed.to_path_buf(),
         source,
     })?;
@@ -407,11 +407,11 @@ fn empty_plink1_dense(
     fam: &Path,
     requested_samples: Option<&[String]>,
 ) -> Result<DenseGenotypeMatrix> {
-    fs::metadata(bed).map_err(|source| MetadataError::Io {
+    fs::metadata(bed).map_err(|source| GenoioError::Io {
         path: bed.to_path_buf(),
         source,
     })?;
-    fs::metadata(bim).map_err(|source| MetadataError::Io {
+    fs::metadata(bim).map_err(|source| GenoioError::Io {
         path: bim.to_path_buf(),
         source,
     })?;
@@ -436,11 +436,11 @@ fn empty_plink1_sparse(
     fam: &Path,
     requested_samples: Option<&[String]>,
 ) -> Result<SparseGenotypeMatrix> {
-    fs::metadata(bed).map_err(|source| MetadataError::Io {
+    fs::metadata(bed).map_err(|source| GenoioError::Io {
         path: bed.to_path_buf(),
         source,
     })?;
-    fs::metadata(bim).map_err(|source| MetadataError::Io {
+    fs::metadata(bim).map_err(|source| GenoioError::Io {
         path: bim.to_path_buf(),
         source,
     })?;
@@ -461,13 +461,13 @@ fn empty_plink1_sparse(
 }
 
 fn open_bed_file(path: &Path) -> Result<File> {
-    let mut file = File::open(path).map_err(|source| MetadataError::Io {
+    let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     let mut header = [0_u8; 3];
     file.read_exact(&mut header)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -477,16 +477,16 @@ fn open_bed_file(path: &Path) -> Result<File> {
 
 fn validate_bed_header(path: &Path, header: &[u8; 3]) -> Result<()> {
     if header[0] != 0x6c || header[1] != 0x1b {
-        return Err(MetadataError::parse(path, "invalid bed magic bytes"));
+        return Err(GenoioError::invalid_source(path, "invalid bed magic bytes"));
     }
     if header[2] == 0x00 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "sample-major bed mode is not supported",
         ));
     }
     if header[2] != 0x01 {
-        return Err(MetadataError::parse(path, "invalid bed mode byte"));
+        return Err(GenoioError::invalid_source(path, "invalid bed mode byte"));
     }
     Ok(())
 }
@@ -501,15 +501,15 @@ fn validate_bed_payload_len(
     let expected_len = 3 + n_source_variants * bytes_per_variant;
     let actual_len = file
         .metadata()
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?
         .len();
     let expected_len_u64 = u64::try_from(expected_len)
-        .map_err(|_| MetadataError::parse(path, "bed payload length is out of range"))?;
+        .map_err(|_| GenoioError::invalid_source(path, "bed payload length is out of range"))?;
     if actual_len != expected_len_u64 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "bed payload length {actual_len} does not match {n_source_samples} samples and {n_source_variants} variants"
@@ -527,28 +527,28 @@ fn infer_bed_variant_count(
 ) -> Result<usize> {
     let actual_len = file
         .metadata()
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?
         .len();
     if actual_len < 3 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bed payload length is out of range",
         ));
     }
     let payload_len = actual_len - 3;
     let bytes_per_variant_u64 = u64::try_from(bytes_per_variant)
-        .map_err(|_| MetadataError::parse(path, "bed payload length is out of range"))?;
+        .map_err(|_| GenoioError::invalid_source(path, "bed payload length is out of range"))?;
     if bytes_per_variant_u64 == 0 || payload_len % bytes_per_variant_u64 != 0 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("bed payload length {actual_len} does not match {n_source_samples} samples"),
         ));
     }
     usize::try_from(payload_len / bytes_per_variant_u64)
-        .map_err(|_| MetadataError::parse(path, "bed payload length is out of range"))
+        .map_err(|_| GenoioError::invalid_source(path, "bed payload length is out of range"))
 }
 
 #[derive(Debug, Clone)]
@@ -594,9 +594,9 @@ fn seek_plink1_variant(
 ) -> Result<()> {
     let offset = 3 + variant_index * bytes_per_variant;
     file.seek(SeekFrom::Start(u64::try_from(offset).map_err(|_| {
-        MetadataError::parse(path, "bed variant offset is out of range")
+        GenoioError::invalid_source(path, "bed variant offset is out of range")
     })?))
-    .map_err(|source| MetadataError::Io {
+    .map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -612,7 +612,7 @@ fn read_plink1_variant_packed_sequential(
 ) -> Result<()> {
     decoder_state.payload.resize(bytes_per_variant, 0);
     file.read_exact(&mut decoder_state.payload)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -623,7 +623,7 @@ fn read_plink1_variant_packed_sequential(
 }
 
 fn parse_fam(path: &Path) -> Result<Vec<SampleRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -638,7 +638,7 @@ fn parse_fam(path: &Path) -> Result<Vec<SampleRecord>> {
 fn parse_fam_line(path: &Path, line_number: usize, line: &str) -> Result<SampleRecord> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     if fields.len() < 6 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("fam line {line_number} has fewer than six fields"),
         ));
@@ -657,7 +657,7 @@ fn parse_fam_line(path: &Path, line_number: usize, line: &str) -> Result<SampleR
 }
 
 fn parse_bim(path: &Path) -> Result<Vec<VariantRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -674,7 +674,7 @@ fn parse_bim_source_window(
     window: VariantWindow,
     expected_records: usize,
 ) -> Result<Vec<VariantRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -694,7 +694,7 @@ fn parse_bim_source_window(
         source_index += 1;
     }
     if records.len() != expected_records {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "bim source window contains {} variants but expected {expected_records}",
@@ -708,13 +708,13 @@ fn parse_bim_source_window(
 fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<VariantRecord> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     if fields.len() < 6 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!("bim line {line_number} has fewer than six fields"),
         ));
     }
     let pos = fields[3].parse::<u32>().map_err(|error| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             path,
             format!("bim line {line_number} has invalid position: {error}"),
         )

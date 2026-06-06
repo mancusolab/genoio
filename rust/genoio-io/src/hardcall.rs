@@ -1,6 +1,6 @@
 // pattern: Functional Core
 
-use genoio_core::{variant_stats_from_counts, MetadataError, VariantStats};
+use genoio_core::{variant_stats_from_counts, GenoioError, VariantStats};
 
 use crate::error::Result;
 
@@ -114,7 +114,7 @@ impl PackedHardcalls {
         let mut missing_count = 0_u64;
         for source_index in source_indices {
             if *source_index >= self.sample_ct {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     "<hardcall>",
                     "selected sample index is outside hard-call sample count",
                 ));

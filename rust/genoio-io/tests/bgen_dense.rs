@@ -853,7 +853,7 @@ fn write_sample_file(path: &Path, rows: &[&str]) {
     fs::write(path, contents).expect("sample fixture should be written");
 }
 
-fn assert_metadata_error_contains(error: genoio_core::MetadataError, expected: &str) {
+fn assert_genoio_error_contains(error: genoio_core::GenoioError, expected: &str) {
     let message = error.to_string();
     assert!(
         message.contains(expected),
@@ -2136,7 +2136,7 @@ fn bgen_metadata_rejects_companion_sample_count_mismatch() {
     let error = genoio_io::read_bgen_metadata(&bgen, Some(&sample))
         .expect_err("sample count mismatch should fail");
 
-    assert_metadata_error_contains(error, "sample count");
+    assert_genoio_error_contains(error, "sample count");
 }
 
 #[test]
@@ -2150,7 +2150,7 @@ fn bgen_metadata_rejects_duplicate_companion_sample_ids() {
     let error = genoio_io::read_bgen_metadata(&bgen, Some(&sample))
         .expect_err("duplicate sample ids should fail");
 
-    assert_metadata_error_contains(error, "duplicate sample identifier");
+    assert_genoio_error_contains(error, "duplicate sample identifier");
 }
 
 #[test]
@@ -2162,7 +2162,7 @@ fn bgen_metadata_rejects_missing_companion_path_when_sample_ids_not_embedded() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("missing sample IDs should fail");
 
-    assert_metadata_error_contains(error, "companion sample path");
+    assert_genoio_error_contains(error, "companion sample path");
 }
 
 #[test]
@@ -2180,7 +2180,7 @@ fn bgen_metadata_rejects_wrong_magic_bytes() {
 
     let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("wrong magic should fail");
 
-    assert_metadata_error_contains(error, "magic");
+    assert_genoio_error_contains(error, "magic");
 }
 
 #[test]
@@ -2200,7 +2200,7 @@ fn bgen_metadata_rejects_header_length_greater_than_offset() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("header length greater than offset should fail");
 
-    assert_metadata_error_contains(error, "header length exceeds variant data offset");
+    assert_genoio_error_contains(error, "header length exceeds variant data offset");
 }
 
 #[test]
@@ -2217,7 +2217,7 @@ fn bgen_metadata_rejects_truncated_sample_identifier_block() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("truncated sample identifier block should fail");
 
-    assert_metadata_error_contains(error, "failed to fill whole buffer");
+    assert_genoio_error_contains(error, "failed to fill whole buffer");
 }
 
 #[test]
@@ -2236,7 +2236,7 @@ fn bgen_metadata_rejects_sample_identifier_block_declared_shorter_than_content()
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("short declared sample block length should fail");
 
-    assert_metadata_error_contains(error, "failed to fill whole buffer");
+    assert_genoio_error_contains(error, "failed to fill whole buffer");
 }
 
 #[test]
@@ -2261,7 +2261,7 @@ fn bgen_metadata_rejects_sample_identifier_block_declared_longer_than_content() 
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("long declared sample block length should fail");
 
-    assert_metadata_error_contains(error, "sample identifiers block length");
+    assert_genoio_error_contains(error, "sample identifiers block length");
 }
 
 #[test]
@@ -2280,7 +2280,7 @@ fn bgen_metadata_rejects_truncated_variant_identifying_data() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("truncated variant identifying data should fail");
 
-    assert_metadata_error_contains(error, "failed to fill whole buffer");
+    assert_genoio_error_contains(error, "failed to fill whole buffer");
 }
 
 #[test]
@@ -2341,7 +2341,7 @@ fn bgen_metadata_rejects_multiallelic_variants() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("multiallelic BGEN should fail");
 
-    assert_metadata_error_contains(error, "multiallelic");
+    assert_genoio_error_contains(error, "multiallelic");
 }
 
 #[test]
@@ -2369,7 +2369,7 @@ fn bgen_metadata_rejects_invalid_phase_value_probability_blocks() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("invalid-phase BGEN should fail");
 
-    assert_metadata_error_contains(error, "phased probability value");
+    assert_genoio_error_contains(error, "phased probability value");
 }
 
 #[test]
@@ -2397,7 +2397,7 @@ fn bgen_metadata_rejects_variable_ploidy_layout2_probability_blocks() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("variable-ploidy BGEN should fail");
 
-    assert_metadata_error_contains(error, "variable-ploidy");
+    assert_genoio_error_contains(error, "variable-ploidy");
 }
 
 #[test]
@@ -2425,7 +2425,7 @@ fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("non-diploid BGEN should fail");
 
-    assert_metadata_error_contains(error, "variable-ploidy");
+    assert_genoio_error_contains(error, "variable-ploidy");
 }
 
 #[test]
@@ -2468,7 +2468,7 @@ fn bgen_metadata_rejects_zero_bit_depth_probability_blocks() {
 
     let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("zero bit depth should fail");
 
-    assert_metadata_error_contains(error, "bit depth");
+    assert_genoio_error_contains(error, "bit depth");
 }
 
 #[test]
@@ -2496,7 +2496,7 @@ fn bgen_metadata_rejects_too_large_bit_depth_probability_blocks() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("large bit depth should fail");
 
-    assert_metadata_error_contains(error, "bit depth");
+    assert_genoio_error_contains(error, "bit depth");
 }
 
 #[test]
@@ -2524,7 +2524,7 @@ fn bgen_metadata_rejects_truncated_packed_probability_bytes() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("truncated packed probabilities should fail");
 
-    assert_metadata_error_contains(error, "truncated");
+    assert_genoio_error_contains(error, "truncated");
 }
 
 #[test]
@@ -2541,7 +2541,7 @@ fn bgen_metadata_rejects_zlib_decompressed_length_mismatch() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("decompressed length mismatch should fail");
 
-    assert_metadata_error_contains(error, "decompressed probability block length");
+    assert_genoio_error_contains(error, "decompressed probability block length");
 }
 
 #[test]
@@ -2570,7 +2570,7 @@ fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("probability block sample count mismatch should fail");
 
-    assert_metadata_error_contains(error, "sample count does not match");
+    assert_genoio_error_contains(error, "sample count does not match");
 }
 
 #[test]
@@ -2600,7 +2600,7 @@ fn bgen_metadata_rejects_zlib_compressed_invalid_phase_value_probability_blocks(
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("zlib-compressed invalid-phase BGEN should fail");
 
-    assert_metadata_error_contains(error, "phased probability value");
+    assert_genoio_error_contains(error, "phased probability value");
 }
 
 #[test]
@@ -2630,7 +2630,7 @@ fn bgen_metadata_rejects_zlib_compressed_variable_ploidy_probability_blocks() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("zlib-compressed variable-ploidy BGEN should fail");
 
-    assert_metadata_error_contains(error, "variable-ploidy");
+    assert_genoio_error_contains(error, "variable-ploidy");
 }
 
 #[test]
@@ -2660,7 +2660,7 @@ fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("zlib-compressed non-diploid BGEN should fail");
 
-    assert_metadata_error_contains(error, "variable-ploidy");
+    assert_genoio_error_contains(error, "variable-ploidy");
 }
 
 #[test]
@@ -2690,7 +2690,7 @@ fn bgen_metadata_rejects_zstd_compressed_invalid_phase_value_probability_blocks(
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("zstd-compressed invalid-phase BGEN should fail");
 
-    assert_metadata_error_contains(error, "phased probability value");
+    assert_genoio_error_contains(error, "phased probability value");
 }
 
 #[test]
@@ -2720,7 +2720,7 @@ fn bgen_metadata_rejects_zstd_compressed_variable_ploidy_probability_blocks() {
     let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("zstd-compressed variable-ploidy BGEN should fail");
 
-    assert_metadata_error_contains(error, "variable-ploidy");
+    assert_genoio_error_contains(error, "variable-ploidy");
 }
 
 #[test]
@@ -2738,7 +2738,7 @@ fn bgen_metadata_rejects_compressed_probability_block_shorter_than_length_prefix
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("short compressed block should fail");
 
-    assert_metadata_error_contains(error, "probability block");
+    assert_genoio_error_contains(error, "probability block");
 }
 
 #[test]
@@ -2750,5 +2750,5 @@ fn bgen_metadata_rejects_unsupported_compression_flag() {
     let error =
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("reserved compression should fail");
 
-    assert_metadata_error_contains(error, "compression");
+    assert_genoio_error_contains(error, "compression");
 }

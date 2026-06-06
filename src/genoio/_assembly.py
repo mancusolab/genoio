@@ -12,8 +12,9 @@ from scipy import sparse as scipy_sparse
 
 from ._errors import MissingDataError
 
-SparseMatrixResult = scipy_sparse.spmatrix | scipy_sparse.sparray
+SparseMatrixResult = scipy_sparse.csc_matrix | scipy_sparse.csr_matrix
 MatrixResult = NDArray[Any] | SparseMatrixResult
+ReadResult = MatrixResult | tuple[MatrixResult, pl.DataFrame] | tuple[MatrixResult, pl.DataFrame, pl.DataFrame]
 
 _SAMPLE_COLUMNS = ["fid", "iid", "father", "mother", "sex", "phenotype"]
 _VARIANT_COLUMNS = [
@@ -166,7 +167,7 @@ def read_result_tuple(
     *,
     return_samples: bool,
     return_variants: bool,
-) -> MatrixResult | tuple[MatrixResult, pl.DataFrame] | tuple[MatrixResult, pl.DataFrame, pl.DataFrame]:
+) -> ReadResult:
     r"""Attach optional metadata frames to a matrix result.
 
     `samples` and `variants` are optional at this assembly boundary because

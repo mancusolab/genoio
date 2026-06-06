@@ -11,7 +11,7 @@ use flate2::read::ZlibDecoder;
 use genoio_core::{
     attach_variant_stats, compute_dosage_variant_stats, select_samples_source_order,
     transpose_variant_major_to_sample_major, DenseGenotypeMatrix, DenseSampleSelection,
-    MetadataError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
+    GenoioError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
     SourceCapabilities, VariantFilter, VariantRecord, VariantWindow,
 };
 use rusqlite::{params, Connection};
@@ -25,7 +25,7 @@ const SAMPLE_IDENTIFIER_FLAG: u32 = 1 << 31;
 const DOSAGE_TOLERANCE: f32 = 1.0e-6;
 
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
-    let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
+    let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
         path: bgen.to_path_buf(),
         source,
     })?;
@@ -36,7 +36,7 @@ pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<Metadata
 
     reader
         .seek(SeekFrom::Start(u64::from(header.offset) + 4))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: bgen.to_path_buf(),
             source,
         })?;
@@ -74,7 +74,7 @@ pub fn read_bgen_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
+    let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
         path: bgen.to_path_buf(),
         source,
     })?;
@@ -114,13 +114,13 @@ pub fn read_bgen_dosage_dense_windowed(
 
     reader
         .seek(SeekFrom::Start(u64::from(header.offset) + 4))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: bgen.to_path_buf(),
             source,
         })?;
 
     let header_variant_count = usize::try_from(header.variant_count)
-        .map_err(|_| MetadataError::parse(bgen, "bgen variant count is out of range"))?;
+        .map_err(|_| GenoioError::invalid_source(bgen, "bgen variant count is out of range"))?;
     let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
         window.len.min(header_variant_count)
     });
@@ -249,7 +249,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = File::open(bgen).map_err(|source| MetadataError::Io {
+    let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
         path: bgen.to_path_buf(),
         source,
     })?;
@@ -290,13 +290,13 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
 
     reader
         .seek(SeekFrom::Start(u64::from(header.offset) + 4))
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: bgen.to_path_buf(),
             source,
         })?;
 
     let header_variant_count = usize::try_from(header.variant_count)
-        .map_err(|_| MetadataError::parse(bgen, "bgen variant count is out of range"))?;
+        .map_err(|_| GenoioError::invalid_source(bgen, "bgen variant count is out of range"))?;
     let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
         window.len.min(header_variant_count)
     });
@@ -502,7 +502,7 @@ fn read_bgen_dosage_dense_indexed(
         }
         reader
             .seek(SeekFrom::Start(index_record.file_start_position))
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: bgen.to_path_buf(),
                 source,
             })?;
@@ -640,7 +640,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         }
         reader
             .seek(SeekFrom::Start(index_record.file_start_position))
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: bgen.to_path_buf(),
                 source,
             })?;
@@ -764,7 +764,7 @@ fn indexed_region_records(
         return Ok(None);
     }
     if !index_path.is_file() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             &index_path,
             "bgen index path is not a file",
         ));
@@ -780,7 +780,7 @@ fn bgen_index_path(bgen: &Path) -> PathBuf {
 
 fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<BgenIndexRecord>> {
     let connection = Connection::open(index_path).map_err(|error| {
-        MetadataError::parse(index_path, format!("bgen index open error: {error}"))
+        GenoioError::invalid_source(index_path, format!("bgen index open error: {error}"))
     })?;
     let mut statement = connection
         .prepare(
@@ -792,7 +792,7 @@ fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<B
              ORDER BY file_start_position",
         )
         .map_err(|error| {
-            MetadataError::parse(
+            GenoioError::invalid_source(
                 index_path,
                 format!("bgen index query prepare error: {error}"),
             )
@@ -807,20 +807,23 @@ fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<B
             },
         )
         .map_err(|error| {
-            MetadataError::parse(index_path, format!("bgen index query error: {error}"))
+            GenoioError::invalid_source(index_path, format!("bgen index query error: {error}"))
         })?;
 
     let mut records = Vec::new();
     for row in rows {
         let (file_start_position, size_in_bytes) = row.map_err(|error| {
-            MetadataError::parse(index_path, format!("bgen index row error: {error}"))
+            GenoioError::invalid_source(index_path, format!("bgen index row error: {error}"))
         })?;
         records.push(BgenIndexRecord {
             file_start_position: u64::try_from(file_start_position).map_err(|_| {
-                MetadataError::parse(index_path, "bgen index file_start_position is negative")
+                GenoioError::invalid_source(
+                    index_path,
+                    "bgen index file_start_position is negative",
+                )
             })?,
             size_in_bytes: u64::try_from(size_in_bytes).map_err(|_| {
-                MetadataError::parse(index_path, "bgen index size_in_bytes is negative")
+                GenoioError::invalid_source(index_path, "bgen index size_in_bytes is negative")
             })?,
         });
     }
@@ -832,18 +835,18 @@ fn validate_index_record_consumed(
     bgen: &Path,
     index_record: &BgenIndexRecord,
 ) -> Result<()> {
-    let consumed_end = reader
-        .stream_position()
-        .map_err(|source| MetadataError::Io {
-            path: bgen.to_path_buf(),
-            source,
-        })?;
+    let consumed_end = reader.stream_position().map_err(|source| GenoioError::Io {
+        path: bgen.to_path_buf(),
+        source,
+    })?;
     let expected_end = index_record
         .file_start_position
         .checked_add(index_record.size_in_bytes)
-        .ok_or_else(|| MetadataError::parse(bgen, "bgen index byte range is out of range"))?;
+        .ok_or_else(|| {
+            GenoioError::invalid_source(bgen, "bgen index byte range is out of range")
+        })?;
     if consumed_end != expected_end {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             bgen,
             "bgen index byte range does not match decoded variant record",
         ));
@@ -943,7 +946,7 @@ fn read_bgen_samples(
     } else if let Some(sample) = sample {
         read_companion_sample_file(sample, header.sample_count)
     } else {
-        Err(MetadataError::parse(
+        Err(GenoioError::invalid_source(
             bgen,
             "bgen sample identifiers require embedded identifiers or a companion sample path",
         ))
@@ -968,18 +971,21 @@ impl BgenHeader {
         let mut magic = [0_u8; 4];
         reader
             .read_exact(&mut magic)
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
         if &magic != BGEN_MAGIC && &magic != ZERO_MAGIC {
-            return Err(MetadataError::parse(path, "invalid bgen magic bytes"));
+            return Err(GenoioError::invalid_source(
+                path,
+                "invalid bgen magic bytes",
+            ));
         }
 
         let free_data_length = header_length
             .checked_sub(MIN_HEADER_LENGTH)
             .ok_or_else(|| {
-                MetadataError::parse(path, "bgen header length is smaller than 20 bytes")
+                GenoioError::invalid_source(path, "bgen header length is smaller than 20 bytes")
             })?;
         skip_exact(reader, path, u64::from(free_data_length))?;
         let flags = BgenFlags::from_raw(read_u32_le(reader, path)?);
@@ -994,26 +1000,24 @@ impl BgenHeader {
 
     fn validate(&self, path: &Path) -> Result<()> {
         if self.header_length < MIN_HEADER_LENGTH {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen header length is smaller than 20 bytes",
             ));
         }
         if self.header_length > self.offset {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen header length exceeds variant data offset",
             ));
         }
         if self.flags.layout != BgenLayout::Layout2 {
-            return Err(MetadataError::parse(
-                path,
+            return Err(GenoioError::unsupported(
                 "bgen metadata parsing requires layout 2",
             ));
         }
         if self.flags.compression == BgenCompression::Reserved {
-            return Err(MetadataError::parse(
-                path,
+            return Err(GenoioError::unsupported(
                 "bgen compression value is reserved",
             ));
         }
@@ -1080,12 +1084,11 @@ enum BgenPhase {
 }
 
 impl BgenPhase {
-    fn from_raw(path: &Path, raw: u8) -> Result<Self> {
+    fn from_raw(_path: &Path, raw: u8) -> Result<Self> {
         match raw {
             0 => Ok(Self::Unphased),
             1 => Ok(Self::Phased),
-            _ => Err(MetadataError::parse(
-                path,
+            _ => Err(GenoioError::unsupported(
                 "unsupported bgen phased probability value; expected 0 or 1",
             )),
         }
@@ -1099,7 +1102,7 @@ fn read_sample_identifier_block(
 ) -> Result<Vec<SampleRecord>> {
     let block_length = read_u32_le(reader, path)?;
     if block_length < 8 {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bgen sample identifiers block is too short",
         ));
@@ -1107,31 +1110,31 @@ fn read_sample_identifier_block(
 
     let sample_count = read_u32_le(reader, path)?;
     if sample_count != expected_sample_count {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bgen sample identifiers count does not match header sample count",
         ));
     }
     let body_len = usize::try_from(block_length - 8).map_err(|_| {
-        MetadataError::parse(path, "bgen sample identifiers block length is out of range")
+        GenoioError::invalid_source(path, "bgen sample identifiers block length is out of range")
     })?;
     let body = read_exact_vec(reader, path, body_len)?;
     let mut body_reader = body.as_slice();
 
     let mut records = Vec::with_capacity(usize::try_from(sample_count).map_err(|_| {
-        MetadataError::parse(path, "bgen sample identifiers count is out of range")
+        GenoioError::invalid_source(path, "bgen sample identifiers count is out of range")
     })?);
     let mut seen = HashSet::with_capacity(records.capacity());
     for _ in 0..sample_count {
         let sample_id = read_len_prefixed_string_u16(&mut body_reader, path, "sample identifier")?;
         if sample_id.is_empty() {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen sample identifier is empty",
             ));
         }
         if !seen.insert(sample_id.clone()) {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("bgen duplicate sample identifier: {sample_id}"),
             ));
@@ -1140,7 +1143,7 @@ fn read_sample_identifier_block(
     }
 
     if !body_reader.is_empty() {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bgen sample identifiers block length does not match decoded sample identifiers",
         ));
@@ -1153,12 +1156,12 @@ fn read_companion_sample_file(
     path: &Path,
     expected_sample_count: u32,
 ) -> Result<Vec<SampleRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| MetadataError::Io {
+    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     let capacity = usize::try_from(expected_sample_count)
-        .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+        .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
     let mut records = Vec::with_capacity(capacity);
     let mut seen = HashSet::with_capacity(capacity);
 
@@ -1168,16 +1171,16 @@ fn read_companion_sample_file(
             continue;
         }
         let sample_id = line.split_whitespace().next().ok_or_else(|| {
-            MetadataError::parse(path, "bgen companion sample identifier is empty")
+            GenoioError::invalid_source(path, "bgen companion sample identifier is empty")
         })?;
         if sample_id.is_empty() {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen companion sample identifier is empty",
             ));
         }
         if !seen.insert(sample_id.to_owned()) {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 format!("bgen duplicate sample identifier: {sample_id}"),
             ));
@@ -1186,7 +1189,7 @@ fn read_companion_sample_file(
     }
 
     if records.len() != capacity {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             format!(
                 "bgen companion sample count does not match header sample count: expected {capacity}, found {}",
@@ -1218,10 +1221,10 @@ fn read_layout2_variant_metadata(
     sample_count: u32,
     compression: BgenCompression,
 ) -> Result<Vec<VariantRecord>> {
-    let mut variants = Vec::with_capacity(
-        usize::try_from(variant_count)
-            .map_err(|_| MetadataError::parse(path, "bgen variant count is out of range"))?,
-    );
+    let mut variants =
+        Vec::with_capacity(usize::try_from(variant_count).map_err(|_| {
+            GenoioError::invalid_source(path, "bgen variant count is out of range")
+        })?);
 
     for _ in 0..variant_count {
         let variant = read_layout2_variant_identifying_data(reader, path)?;
@@ -1230,7 +1233,7 @@ fn read_layout2_variant_metadata(
     }
 
     if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bgen parsed variant count does not match header variant count",
         ));
@@ -1249,8 +1252,7 @@ fn read_layout2_variant_identifying_data(
     let pos = read_u32_le(reader, path)?;
     let allele_count = read_u16_le(reader, path)?;
     if allele_count != 2 {
-        return Err(MetadataError::parse(
-            path,
+        return Err(GenoioError::unsupported(
             "unsupported bgen multiallelic variant metadata; only biallelic records are supported",
         ));
     }
@@ -1332,13 +1334,16 @@ fn read_layout2_probability_payload_into(
     match compression {
         BgenCompression::None => {
             let payload_length = usize::try_from(block_length).map_err(|_| {
-                MetadataError::parse(path, "bgen uncompressed probability block is out of range")
+                GenoioError::invalid_source(
+                    path,
+                    "bgen uncompressed probability block is out of range",
+                )
             })?;
             payload.clear();
             payload.resize(payload_length, 0);
             reader
                 .read_exact(payload)
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
@@ -1346,20 +1351,23 @@ fn read_layout2_probability_payload_into(
         }
         BgenCompression::Zlib | BgenCompression::Zstd => {
             if block_length < 4 {
-                return Err(MetadataError::parse(
+                return Err(GenoioError::invalid_source(
                     path,
                     "bgen compressed probability block length is smaller than decompressed length prefix",
                 ));
             }
             let decompressed_block_length = read_u32_le(reader, path)?;
             let compressed_payload_length = usize::try_from(block_length - 4).map_err(|_| {
-                MetadataError::parse(path, "bgen compressed probability block is out of range")
+                GenoioError::invalid_source(
+                    path,
+                    "bgen compressed probability block is out of range",
+                )
             })?;
             compressed_payload.clear();
             compressed_payload.resize(compressed_payload_length, 0);
             reader
                 .read_exact(compressed_payload)
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
@@ -1371,7 +1379,7 @@ fn read_layout2_probability_payload_into(
                 payload,
             )
         }
-        BgenCompression::Reserved => Err(MetadataError::parse(
+        BgenCompression::Reserved => Err(GenoioError::invalid_source(
             path,
             "bgen compression value is reserved",
         )),
@@ -1388,7 +1396,7 @@ fn skip_layout2_probability_payload(
         BgenCompression::None | BgenCompression::Zlib | BgenCompression::Zstd => {
             skip_exact(reader, path, u64::from(block_length))
         }
-        BgenCompression::Reserved => Err(MetadataError::parse(
+        BgenCompression::Reserved => Err(GenoioError::invalid_source(
             path,
             "bgen compression value is reserved",
         )),
@@ -1417,7 +1425,7 @@ impl Layout2ProbabilityHeader {
     ) -> Result<Self> {
         let fixed_header_length = Self::fixed_header_length(path, expected_sample_count)?;
         if payload.len() < fixed_header_length {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen uncompressed probability block is shorter than the layout 2 header",
             ));
@@ -1426,7 +1434,7 @@ impl Layout2ProbabilityHeader {
         let reader = &mut &payload[..fixed_header_length];
         let sample_count = read_u32_le(reader, path)?;
         if sample_count != expected_sample_count {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen probability block sample count does not match header sample count",
             ));
@@ -1434,14 +1442,13 @@ impl Layout2ProbabilityHeader {
 
         let allele_count = read_u16_le(reader, path)?;
         if allele_count != variant_allele_count {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen probability block allele count does not match variant allele count",
             ));
         }
         if allele_count != 2 {
-            return Err(MetadataError::parse(
-                path,
+            return Err(GenoioError::unsupported(
                 "unsupported bgen multiallelic probability block; only biallelic records are supported",
             ));
         }
@@ -1449,14 +1456,13 @@ impl Layout2ProbabilityHeader {
         let min_ploidy = read_u8(reader, path)?;
         let max_ploidy = read_u8(reader, path)?;
         if min_ploidy != 2 || max_ploidy != 2 {
-            return Err(MetadataError::parse(
-                path,
+            return Err(GenoioError::unsupported(
                 "unsupported bgen variable-ploidy probability block; only diploid records are supported",
             ));
         }
 
         let sample_count_usize = usize::try_from(expected_sample_count)
-            .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+            .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
         let mut sample_ploidies = Vec::with_capacity(sample_count_usize);
         let mut non_missing_sample_count = 0_u32;
         for _ in 0..expected_sample_count {
@@ -1465,14 +1471,16 @@ impl Layout2ProbabilityHeader {
             let ploidy = ploidy_byte & 0b0011_1111;
             if !is_missing {
                 if ploidy != 2 {
-                    return Err(MetadataError::parse(
-                        path,
+                    return Err(GenoioError::unsupported(
                         "unsupported bgen variable-ploidy probability block; only diploid records are supported",
                     ));
                 }
                 non_missing_sample_count =
                     non_missing_sample_count.checked_add(1).ok_or_else(|| {
-                        MetadataError::parse(path, "bgen non-missing sample count is out of range")
+                        GenoioError::invalid_source(
+                            path,
+                            "bgen non-missing sample count is out of range",
+                        )
                     })?;
             }
             sample_ploidies.push(ploidy_byte);
@@ -1482,8 +1490,7 @@ impl Layout2ProbabilityHeader {
 
         let bit_depth = read_u8(reader, path)?;
         if !(1..=32).contains(&bit_depth) {
-            return Err(MetadataError::parse(
-                path,
+            return Err(GenoioError::unsupported(
                 "unsupported bgen probability bit depth; expected 1..=32",
             ));
         }
@@ -1503,10 +1510,10 @@ impl Layout2ProbabilityHeader {
 
     fn fixed_header_length(path: &Path, sample_count: u32) -> Result<usize> {
         let sample_count = usize::try_from(sample_count)
-            .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
-        10_usize
-            .checked_add(sample_count)
-            .ok_or_else(|| MetadataError::parse(path, "bgen probability header is out of range"))
+            .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
+        10_usize.checked_add(sample_count).ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen probability header is out of range")
+        })
     }
 
     fn required_packed_probability_bytes(&self, path: &Path) -> Result<usize> {
@@ -1522,11 +1529,14 @@ impl Layout2ProbabilityHeader {
             .checked_mul(stored_probability_count)
             .and_then(|value| value.checked_mul(u64::from(self.bit_depth)))
             .ok_or_else(|| {
-                MetadataError::parse(path, "bgen packed probability bit count is out of range")
+                GenoioError::invalid_source(
+                    path,
+                    "bgen packed probability bit count is out of range",
+                )
             })?;
         let bytes = bits.div_ceil(8);
         usize::try_from(bytes).map_err(|_| {
-            MetadataError::parse(path, "bgen packed probability bytes are out of range")
+            GenoioError::invalid_source(path, "bgen packed probability bytes are out of range")
         })
     }
 }
@@ -1553,13 +1563,13 @@ impl<'a> DecodedDosageVariant<'a> {
         let packed_probabilities = &payload[header.byte_len..];
         let required_packed_len = header.required_packed_probability_bytes(path)?;
         if packed_probabilities.len() < required_packed_len {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen probability block is truncated; packed probabilities are shorter than declared non-missing samples",
             ));
         }
         if packed_probabilities.len() > required_packed_len {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen probability block has trailing packed probability bytes",
             ));
@@ -1592,7 +1602,7 @@ impl<'a> DecodedDosageVariant<'a> {
         missing: &mut Vec<bool>,
     ) -> Result<()> {
         let sample_count = usize::try_from(self.header.sample_count)
-            .map_err(|_| MetadataError::parse(path, "bgen sample count is out of range"))?;
+            .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
         values.clear();
         missing.clear();
         values.reserve(sample_count);
@@ -1686,8 +1696,7 @@ impl<'a> DecodedDosageVariant<'a> {
         collapsed_missing: &mut Vec<bool>,
     ) -> Result<()> {
         if self.header.phase != BgenPhase::Phased {
-            return Err(MetadataError::parse(
-                path,
+            return Err(GenoioError::unsupported(
                 "unsupported bgen unphased probability block in retained haplotype dosage variant",
             ));
         }
@@ -1752,16 +1761,19 @@ impl<'a> LittleEndianBitReader<'a> {
     fn read_u32(&mut self, path: &Path, bit_count: u8) -> Result<u32> {
         debug_assert!((1..=32).contains(&bit_count));
         let available_bits = self.bytes.len().checked_mul(8).ok_or_else(|| {
-            MetadataError::parse(path, "bgen packed probability bit count is out of range")
+            GenoioError::invalid_source(path, "bgen packed probability bit count is out of range")
         })?;
         let end_bit = self
             .bit_offset
             .checked_add(usize::from(bit_count))
             .ok_or_else(|| {
-                MetadataError::parse(path, "bgen packed probability bit count is out of range")
+                GenoioError::invalid_source(
+                    path,
+                    "bgen packed probability bit count is out of range",
+                )
             })?;
         if end_bit > available_bits {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen packed probability bits are truncated",
             ));
@@ -1822,7 +1834,7 @@ fn decode_unphased_a1_dosage(
     let dosage = p_ab + 2.0 * p_bb;
 
     if p_bb < -DOSAGE_TOLERANCE || !(-DOSAGE_TOLERANCE..=2.0 + DOSAGE_TOLERANCE).contains(&dosage) {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bgen malformed probability values produce invalid a1 dosage",
         ));
@@ -1860,7 +1872,7 @@ fn decompress_probability_block_into(
     decompressed: &mut Vec<u8>,
 ) -> Result<()> {
     let capacity = usize::try_from(expected_decompressed_len).map_err(|_| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             path,
             "bgen decompressed probability block length is out of range",
         )
@@ -1872,22 +1884,21 @@ fn decompress_probability_block_into(
             let mut decoder = ZlibDecoder::new(compressed_payload);
             decoder
                 .read_to_end(decompressed)
-                .map_err(|source| MetadataError::Io {
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
         }
         BgenCompression::Zstd => {
-            let decoded = zstd::stream::decode_all(compressed_payload).map_err(|source| {
-                MetadataError::Io {
+            let decoded =
+                zstd::stream::decode_all(compressed_payload).map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
-                }
-            })?;
+                })?;
             decompressed.extend_from_slice(&decoded);
         }
         BgenCompression::None | BgenCompression::Reserved => {
-            return Err(MetadataError::parse(
+            return Err(GenoioError::invalid_source(
                 path,
                 "bgen compression value is not a compressed probability block",
             ));
@@ -1908,13 +1919,13 @@ fn validate_decompressed_probability_block_len(
     expected_decompressed_len: u32,
 ) -> Result<()> {
     let expected_decompressed_len = usize::try_from(expected_decompressed_len).map_err(|_| {
-        MetadataError::parse(
+        GenoioError::invalid_source(
             path,
             "bgen decompressed probability block length is out of range",
         )
     })?;
     if actual_len != expected_decompressed_len {
-        return Err(MetadataError::parse(
+        return Err(GenoioError::invalid_source(
             path,
             "bgen decompressed probability block length does not match length prefix",
         ));
@@ -1930,7 +1941,7 @@ fn skip_exact(reader: &mut impl Read, path: &Path, mut len: u64) -> Result<()> {
             .min(usize::try_from(len).unwrap_or(buffer.len()));
         reader
             .read_exact(&mut buffer[..chunk_len])
-            .map_err(|source| MetadataError::Io {
+            .map_err(|source| GenoioError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -1943,7 +1954,7 @@ fn read_exact_vec(reader: &mut impl Read, path: &Path, len: usize) -> Result<Vec
     let mut bytes = vec![0_u8; len];
     reader
         .read_exact(&mut bytes)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -1964,8 +1975,9 @@ fn read_len_prefixed_string_u32(
     path: &Path,
     label: &str,
 ) -> Result<String> {
-    let len = usize::try_from(read_u32_le(reader, path)?)
-        .map_err(|_| MetadataError::parse(path, format!("bgen {label} length is out of range")))?;
+    let len = usize::try_from(read_u32_le(reader, path)?).map_err(|_| {
+        GenoioError::invalid_source(path, format!("bgen {label} length is out of range"))
+    })?;
     read_utf8_string(reader, path, label, len)
 }
 
@@ -1978,19 +1990,20 @@ fn read_utf8_string(
     let mut bytes = vec![0_u8; len];
     reader
         .read_exact(&mut bytes)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    String::from_utf8(bytes)
-        .map_err(|error| MetadataError::parse(path, format!("bgen {label} is not UTF-8: {error}")))
+    String::from_utf8(bytes).map_err(|error| {
+        GenoioError::invalid_source(path, format!("bgen {label} is not UTF-8: {error}"))
+    })
 }
 
 fn read_u16_le(reader: &mut impl Read, path: &Path) -> Result<u16> {
     let mut bytes = [0_u8; 2];
     reader
         .read_exact(&mut bytes)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2001,7 +2014,7 @@ fn read_u32_le(reader: &mut impl Read, path: &Path) -> Result<u32> {
     let mut bytes = [0_u8; 4];
     reader
         .read_exact(&mut bytes)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -2012,7 +2025,7 @@ fn read_u8(reader: &mut impl Read, path: &Path) -> Result<u8> {
     let mut byte = [0_u8; 1];
     reader
         .read_exact(&mut byte)
-        .map_err(|source| MetadataError::Io {
+        .map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
         })?;

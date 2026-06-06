@@ -16,7 +16,19 @@ from ._errors import (
     UnsupportedFormatError,
     UnsupportedRepresentation,
 )
-from ._filters import FilterExpr, biallelic, chrom, id_in, mac, maf, missing_rate, polymorphic, qual, region, snp
+from ._filters import (
+    FilterExpr,
+    biallelic,
+    chrom,
+    id_in,
+    mac,
+    maf,
+    missing_rate,
+    polymorphic,
+    qual,
+    region,
+    snp,
+)
 
 try:
     __version__ = version("genoio")
