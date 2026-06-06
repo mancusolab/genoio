@@ -738,6 +738,65 @@ fn plink2_haplotype_dosage_missing_values_set_missing_mask() {
     );
 }
 
+fn invalid_phased_dosage_record(dosage_raw: u16, phase_raw: i16) -> Vec<u8> {
+    let mut record = vec![0x25];
+    record.extend(dosage_raw.to_le_bytes());
+    record.extend(scaled_dosage(0.0));
+    record.extend(scaled_dosage(0.0));
+    record.extend(phase_raw.to_le_bytes());
+    record.extend(scaled_phase_delta(0.0, 0.0));
+    record.extend(scaled_phase_delta(0.0, 0.0));
+    record
+}
+
+fn assert_invalid_phased_dosage_record(record: &[u8], expected: &str) {
+    let dir = unique_dir("plink2-haplo-dosage-invalid");
+    let pgen_bytes = explicit_phased_dosage_pgen(&[record], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+",
+    );
+
+    let error = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        &pgen, &pvar, &psam, None, None, None, false,
+    )
+    .expect_err("invalid phased dosage pgen should fail");
+
+    assert!(
+        error.to_string().contains(expected),
+        "expected error containing {expected:?}, got {error}"
+    );
+}
+
+#[test]
+fn plink2_haplotype_dosage_rejects_out_of_range_total_dosage_raw_values() {
+    for dosage_raw in [32_769, 65_534] {
+        let record = invalid_phased_dosage_record(dosage_raw, 0);
+
+        assert_invalid_phased_dosage_record(&record, "dosage");
+    }
+}
+
+#[test]
+fn plink2_haplotype_dosage_rejects_out_of_range_phase_raw_values() {
+    for phase_raw in [16_385, -16_385] {
+        let record = invalid_phased_dosage_record(16_384, phase_raw);
+
+        assert_invalid_phased_dosage_record(&record, "phase");
+    }
+}
+
+#[test]
+fn plink2_haplotype_dosage_rejects_out_of_range_haplotype_components() {
+    let record = invalid_phased_dosage_record(0, 16_384);
+
+    assert_invalid_phased_dosage_record(&record, "haplotype");
+}
+
 #[test]
 fn plink2_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() {
     let dir = unique_dir("plink2-haplo-dosage-filter");

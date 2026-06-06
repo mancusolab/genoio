@@ -24,6 +24,11 @@ const PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE: u8 = 0x04;
 const PGEN_MODE_VARIABLE_WIDTH: u8 = 0x10;
 const PGEN_HEADER_LEN: u64 = 12;
 const PGEN_VARIANT_BLOCK_SIZE: usize = 65_536;
+const PGEN_DOSAGE_SCALE: f32 = 2.0 / 32768.0;
+const PGEN_PHASE_SCALE: f32 = 1.0 / 16384.0;
+const PGEN_MAX_DOSAGE_RAW: u16 = 32_768;
+const PGEN_MIN_PHASE_RAW: i16 = -16_384;
+const PGEN_MAX_PHASE_RAW: i16 = 16_384;
 #[cfg(test)]
 const PGEN_PACKED_TRANSPOSE_BATCH: usize = HARDCALL_BATCH_SIZE;
 
@@ -2807,20 +2812,25 @@ fn decode_full_phased_dosage_tracks(
     for source_index in source_indices {
         let dosage_offset = cursor + source_index * 2;
         let phase_offset = phase_cursor + source_index * 2;
-        let dosage_raw = u16::from_le_bytes([record[dosage_offset], record[dosage_offset + 1]]);
-        let phase_raw = i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]);
-        if dosage_raw == u16::MAX || phase_raw == i16::MIN {
+        let dosage = decode_phased_dosage_total(
+            path,
+            u16::from_le_bytes([record[dosage_offset], record[dosage_offset + 1]]),
+        )?;
+        let phase_delta = decode_phased_dosage_delta(
+            path,
+            i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]),
+        )?;
+        let (Some(total), Some(delta)) = (dosage, phase_delta) else {
             haplotype_state.selected_haplotype_values.extend([0.0, 0.0]);
             haplotype_state
                 .selected_haplotype_missing
                 .extend([true, true]);
             push_collapsed_dosage(haplotype_state, 0.0, true);
             continue;
-        }
-        let total = f32::from(dosage_raw) * (2.0 / 32768.0);
-        let delta = f32::from(phase_raw) / 16384.0;
+        };
         let left = (total + delta) * 0.5;
         let right = (total - delta) * 0.5;
+        validate_phased_dosage_haplotype_components(path, left, right)?;
         haplotype_state
             .selected_haplotype_values
             .extend([left, right]);
@@ -2830,6 +2840,44 @@ fn decode_full_phased_dosage_tracks(
         push_collapsed_dosage(haplotype_state, total, false);
     }
     Ok(())
+}
+
+fn decode_phased_dosage_total(path: &Path, raw: u16) -> Result<Option<f32>> {
+    if raw == u16::MAX {
+        return Ok(None);
+    }
+    if raw > PGEN_MAX_DOSAGE_RAW {
+        return Err(MetadataError::parse(
+            path,
+            format!("pgen phased dosage total raw value {raw} exceeds 32768"),
+        ));
+    }
+    Ok(Some(f32::from(raw) * PGEN_DOSAGE_SCALE))
+}
+
+fn decode_phased_dosage_delta(path: &Path, raw: i16) -> Result<Option<f32>> {
+    if raw == i16::MIN {
+        return Ok(None);
+    }
+    if !(PGEN_MIN_PHASE_RAW..=PGEN_MAX_PHASE_RAW).contains(&raw) {
+        return Err(MetadataError::parse(
+            path,
+            format!("pgen phased dosage phase raw value {raw} is outside [-16384, 16384]"),
+        ));
+    }
+    Ok(Some(f32::from(raw) * PGEN_PHASE_SCALE))
+}
+
+fn validate_phased_dosage_haplotype_components(path: &Path, left: f32, right: f32) -> Result<()> {
+    if (0.0..=1.0).contains(&left) && (0.0..=1.0).contains(&right) {
+        return Ok(());
+    }
+    Err(MetadataError::parse(
+        path,
+        format!(
+            "pgen phased dosage haplotype components are outside [0, 1]: left={left}, right={right}"
+        ),
+    ))
 }
 
 fn set_selected_haplotype_pair(

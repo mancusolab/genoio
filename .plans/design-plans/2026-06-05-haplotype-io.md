@@ -135,7 +135,7 @@ Confirmed codebase patterns:
 ### Source Pin
 | Source ID | Source Type (`local-directory` or `github-url`) | Path/URL | Commit/Tag | Notes |
 | --- | --- | --- | --- | --- |
-| PORT-SRC-1 | local-directory | `/Users/nicholas/Projects/genoio` | current `main` branch at design time | Existing Python/Rust package. |
+| PORT-SRC-1 | local-directory | /Users/nicholas/Projects/genoio | 00d23bcd973b878aa5c27846c7fe18ffed27e7d9 | Existing Python/Rust package. |
 
 ### Behavior Inventory And Parity Targets
 | Behavior ID | Surface (`cli`/`api`/`numerics`/`io`) | Current Behavior | Target Behavior | Evidence Plan (tests/golden outputs) |
@@ -149,7 +149,7 @@ Confirmed codebase patterns:
 ## Codebase Investigation Findings (Required When `existing-codebase-port`)
 - Investigation mode: `local-directory`
 - Investigation completion: yes
-- Investigator: direct Codex investigation using `rg`, source reads, and test reads.
+- Investigator: `scientific-codebase-investigation-pass`
 
 | Finding ID | Source Scope | Summary | Evidence (file:line or commit:path:line) | Status (`confirmed`/`discrepancy`/`addition`/`missing`) |
 | --- | --- | --- | --- | --- |
