@@ -13,21 +13,23 @@ shape, and `return_variants=True` returns an empty variant frame with the normal
 schema. Block reads yield no blocks when no variant passes the filter.
 
 By default, `kind="geno"` returns diploid hardcall allele counts: `0`, `1`, or
-`2` copies of `a1`, with missing calls handled by the selected missing-data
-policy. The `dosage` option controls this genotype value source:
+`2` copies of the A1 allele, with missing calls handled by the selected
+missing-data policy. The `dosage` option controls this genotype value source:
 `dosage="hardcall"` uses source hard calls, while `dosage="dosage"` requires
-dosage-backed values. This release supports dense VCF `FORMAT/DS`, PLINK2
-unphased biallelic dosage reads, and BGEN Layout 2 biallelic diploid dosage
-reads. Genotype reads of phased BGEN records sum source haplotype probabilities
-to expected diploid A1 dosage. PLINK2 dense haplotype reads support explicit
-phased hardcall records with
-`kind="haplo", dosage="hardcall"` and explicit phased full dosage records with
-`kind="haplo", dosage="dosage"`. BGEN dense haplotype dosage reads support
-source-encoded phased Layout 2 biallelic diploid probabilities and return
-expected A1 dosage per haplotype row. Dosage values are expected copies of
-`a1`. Sparse dosage, sparse PLINK2/BGEN haplotype reads, and PLINK1 dosage are
-not implemented yet and raise
+dosage-backed values. Dense genotype dosage reads are supported for VCF
+`FORMAT/DS`, PLINK2 unphased biallelic dosage records, and BGEN Layout 2
+biallelic diploid dosage records. Genotype reads of phased BGEN records collapse
+the two source haplotype probabilities to expected diploid A1 dosage.
+
+Use `kind="haplo"` for one row per source haplotype. VCF/BCF haplotype reads
+use phased hardcall `FORMAT/GT`. PLINK2 haplotype reads support source-encoded
+explicit phased hardcalls with `dosage="hardcall"` and explicit phased full
+dosages with `dosage="dosage"`. BGEN haplotype reads support source-encoded
+phased Layout 2 biallelic diploid probabilities with `dosage="dosage"` and
+return expected A1 dosage per haplotype row. Sparse dosage, sparse PLINK2/BGEN
+haplotype reads, and PLINK1 dosage are not implemented yet and raise
 `genoio.UnsupportedRepresentation`.
+
 Genotype-stat filters such as `maf`, `mac`, and `missing_rate` use the selected
 value source, so dosage reads compute those statistics from expected allele
 dosages rather than hardcall counts. For haplotype reads, those filters are

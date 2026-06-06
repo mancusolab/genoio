@@ -43,10 +43,10 @@ X = genoio.bgen("cohort.bgen").read(dosage="dosage")
 
 BGEN reads require real sample IDs, either embedded in the `.bgen` file or
 provided by the same-prefix `.sample` file. Layout 2 biallelic diploid dosage
-records are returned as expected copies of `a1`. Genotype reads of phased BGEN
-records sum the two source haplotype probabilities to expected diploid A1
-dosage; haplotype reads return expected A1 dosage per haplotype row. Matrix-only
-BGEN reads avoid returning sample and variant metadata unless
+records are returned as expected A1 allele dosages. Genotype reads of phased
+BGEN records collapse the two source haplotype probabilities to expected
+diploid A1 dosage; haplotype reads return expected A1 dosage per haplotype row.
+Matrix-only BGEN reads avoid returning sample and variant metadata unless
 `return_samples=True` or `return_variants=True` is requested.
 
 For concrete region filters such as
