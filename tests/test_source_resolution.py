@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 
@@ -42,6 +44,20 @@ def test_bgen_member_path_resolves_bgen_source(tmp_path):
     assert dataset.source.path == source_path
     assert dataset.source.members == {"bgen": source_path}
     assert dataset.source.prefix == tmp_path / "cohort"
+
+
+def test_source_members_are_read_only_after_resolution(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.bgen"
+    source_path.touch()
+
+    dataset = genoio.bgen(source_path)
+
+    assert dataset.source.members == {"bgen": source_path}
+    with pytest.raises(TypeError):
+        cast(Any, dataset.source.members)["bgen"] = tmp_path / "other.bgen"
+    assert dataset.source.members["bgen"] == source_path
 
 
 def test_bgen_prefix_path_resolves_bgen_member(tmp_path):

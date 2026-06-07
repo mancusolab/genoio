@@ -2,7 +2,9 @@
 
 import struct
 from pathlib import Path
+from typing import Any, cast
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -175,6 +177,41 @@ def test_metadata_is_cached_after_first_load(monkeypatch):
     dataset.samples()
 
     assert calls == 1
+
+
+def test_cached_metadata_source_members_remain_read_only(tmp_path):
+    import genoio
+
+    path = tmp_path / "source.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1
+"""
+    )
+    replacement = tmp_path / "replacement.vcf"
+    replacement.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t1/1
+"""
+    )
+    dataset = genoio.vcf(path)
+
+    variants = dataset.variants()
+    with pytest.raises(TypeError):
+        cast(Any, dataset.source.members)["vcf"] = replacement
+
+    assert dataset.variants() is variants
+    matrix, read_variants = dataset.read(return_variants=True)
+    assert read_variants["id"].to_list() == ["rs1"]
+    np.testing.assert_array_equal(matrix, np.array([[1.0]], dtype=np.float32))
 
 
 def test_metadata_frames_are_cached_after_first_assembly(monkeypatch):

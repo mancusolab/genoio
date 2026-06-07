@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 
 from ._errors import InvalidSourceError, MissingCompanionFileError, UnsupportedFormatError
 
@@ -40,6 +41,9 @@ class ResolvedSource:
     path: Path
     members: Mapping[str, Path]
     prefix: Path | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "members", MappingProxyType(dict(self.members)))
 
 
 _PLINK1_SUFFIXES = {"bed": ".bed", "bim": ".bim", "fam": ".fam"}
