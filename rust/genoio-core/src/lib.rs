@@ -1,5 +1,10 @@
 // pattern: Functional Core
 
+#![cfg_attr(
+    not(test),
+    deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
+)]
+
 //! Shared genotype metadata, filter, and matrix contracts.
 //!
 //! This crate is intentionally free of file IO and Python bindings. Reader

@@ -1,5 +1,10 @@
 // pattern: Imperative Shell
 
+#![cfg_attr(
+    not(test),
+    deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
+)]
+
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;

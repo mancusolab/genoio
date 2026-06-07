@@ -1,5 +1,10 @@
 // pattern: Imperative Shell
 
+#![cfg_attr(
+    not(test),
+    deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
+)]
+
 //! File-format readers for `genoio-core` matrix and metadata contracts.
 //!
 //! Public functions in this crate perform filesystem IO and format parsing,
