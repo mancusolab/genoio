@@ -14,8 +14,11 @@
 mod bgen;
 mod error;
 mod hardcall;
+mod matrix;
 mod plink1;
 mod plink2;
+mod plink_common;
+mod retention;
 mod vcf;
 
 pub use bgen::{

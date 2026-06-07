@@ -7,15 +7,21 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_values_to_minor_allele, reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, DenseSampleSelection,
-    GenoioError, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantWindow,
 };
 
 use crate::error::Result;
 #[cfg(test)]
 use crate::hardcall::HARDCALL_BATCH_SIZE;
 use crate::hardcall::{HardcallBatch as PackedVariantBatch, PackedHardcalls as PackedGenotypes};
+use crate::matrix::{
+    finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
+    VariantMajorDenseParts,
+};
+use crate::plink_common::{optional_plink_value, PLINK2_MISSING_VALUES};
+use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 const PGEN_MAGIC: [u8; 2] = [0x6c, 0x1b];
 const PGEN_MODE_FIXED_WIDTH_HARDCALLS: u8 = 0x02;
@@ -56,16 +62,6 @@ struct DosageOverlayTarget<'a> {
     source_indices: &'a [usize],
     values: &'a mut [f32],
     missing: &'a mut [bool],
-}
-
-struct Plink2DenseParts {
-    n_samples: usize,
-    n_variants: usize,
-    values: Vec<f32>,
-    missing_mask: Vec<bool>,
-    samples: Vec<SampleRecord>,
-    variants: Vec<VariantRecord>,
-    diagnostics: genoio_core::DenseDiagnostics,
 }
 
 #[derive(Default)]
@@ -161,40 +157,6 @@ fn flush_packed_variant_batch(
     );
     *batch_start += batch.len();
     batch.clear();
-}
-
-fn finish_plink2_dense_matrix(
-    parts: Plink2DenseParts,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    let Plink2DenseParts {
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        samples,
-        variants,
-        diagnostics,
-    } = parts;
-    if matrix_only {
-        DenseGenotypeMatrix::new_matrix_only(
-            n_samples,
-            n_variants,
-            values,
-            missing_mask,
-            diagnostics,
-        )
-    } else {
-        DenseGenotypeMatrix::new(
-            n_samples,
-            n_variants,
-            values,
-            missing_mask,
-            samples,
-            variants,
-            diagnostics,
-        )
-    }
 }
 
 fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Vec<SampleRecord> {
@@ -305,11 +267,10 @@ pub fn read_plink2_dense_windowed(
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut variant_major_missing =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
-        diagnostics.candidate_variants += 1;
         let mut decoded_packed = false;
         if requires_sequential_decode {
             read_plink2_variant_packed(
@@ -324,24 +285,13 @@ pub fn read_plink2_dense_windowed(
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => {
+                stopped_after_window = true;
+                break;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        stopped_after_window = true;
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
         }
 
         let needs_genotype_decision =
@@ -365,26 +315,21 @@ pub fn read_plink2_dense_windowed(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
-        }
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
-        }
         if needs_genotype_decision {
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => {
                     stopped_after_window = true;
                     break;
                 }
-                continue;
             }
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
         }
         decoder_state.packed.expand_selected(
             &selection.source_indices,
@@ -394,7 +339,7 @@ pub fn read_plink2_dense_windowed(
         variants.push(variant);
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
         }
@@ -406,19 +351,17 @@ pub fn read_plink2_dense_windowed(
     let n_samples = selection.samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    DenseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        selection.samples,
-        variants,
-        diagnostics,
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        false,
     )
 }
 
@@ -464,32 +407,20 @@ pub fn read_plink2_dosage_dense_windowed(
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut variant_major_missing =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => {
+                stopped_after_window = true;
+                break;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        stopped_after_window = true;
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
         }
 
         read_plink2_variant_dosage(
@@ -503,26 +434,23 @@ pub fn read_plink2_dosage_dense_windowed(
         if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
             let stats =
                 compute_dosage_variant_stats(&decoder_state.values, &decoder_state.missing)?;
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            attach_variant_stats(&mut variant, stats);
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => {
                     stopped_after_window = true;
                     break;
                 }
-                continue;
             }
+            attach_variant_stats(&mut variant, stats);
         }
         variants.push(variant);
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
         }
@@ -534,19 +462,17 @@ pub fn read_plink2_dosage_dense_windowed(
     let n_samples = selection.samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    DenseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        selection.samples,
-        variants,
-        diagnostics,
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        false,
     )
 }
 
@@ -572,8 +498,8 @@ pub fn read_plink2_haplotypes_dense_windowed(
             source,
         })?;
         diagnostics.retained_variants = 0;
-        return finish_plink2_dense_matrix(
-            Plink2DenseParts {
+        return finish_dense_matrix(
+            DenseMatrixParts {
                 n_samples: haplotype_samples.len(),
                 n_variants: 0,
                 values: Vec::new(),
@@ -597,12 +523,11 @@ pub fn read_plink2_haplotypes_dense_windowed(
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
-        diagnostics.candidate_variants += 1;
         let main_track_cursor = read_plink2_variant_haplotype_main_track(
             pgen,
             &mut file,
@@ -613,24 +538,13 @@ pub fn read_plink2_haplotypes_dense_windowed(
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => {
+                stopped_after_window = true;
+                break;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        stopped_after_window = true;
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
         }
 
         let needs_genotype_decision =
@@ -639,21 +553,18 @@ pub fn read_plink2_haplotypes_dense_windowed(
             let stats = decoder_state
                 .packed
                 .stats_for_selected(&selection.source_indices)?;
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            attach_variant_stats(&mut variant, stats);
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => {
                     stopped_after_window = true;
                     break;
                 }
-                continue;
             }
+            attach_variant_stats(&mut variant, stats);
         }
         decode_plink2_haplotype_hardcall_aux(
             pgen,
@@ -670,7 +581,7 @@ pub fn read_plink2_haplotypes_dense_windowed(
         variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
         variant_major_missing.extend_from_slice(&haplotype_state.selected_haplotype_missing);
         output_variant_count += 1;
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
         }
@@ -682,17 +593,12 @@ pub fn read_plink2_haplotypes_dense_windowed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    finish_plink2_dense_matrix(
-        Plink2DenseParts {
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,
@@ -723,8 +629,8 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
             source,
         })?;
         diagnostics.retained_variants = 0;
-        return finish_plink2_dense_matrix(
-            Plink2DenseParts {
+        return finish_dense_matrix(
+            DenseMatrixParts {
                 n_samples: haplotype_samples.len(),
                 n_variants: 0,
                 values: Vec::new(),
@@ -748,12 +654,11 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
-        diagnostics.candidate_variants += 1;
         let main_track_cursor = read_plink2_variant_haplotype_dosage_track(
             pgen,
             &mut file,
@@ -764,24 +669,13 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => {
+                stopped_after_window = true;
+                break;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        stopped_after_window = true;
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
         }
 
         let needs_genotype_decision =
@@ -800,21 +694,18 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
                 &haplotype_state.selected_collapsed_values,
                 &haplotype_state.selected_collapsed_missing,
             )?;
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
-            }
-            attach_variant_stats(&mut variant, stats);
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => {
                     stopped_after_window = true;
                     break;
                 }
-                continue;
             }
+            attach_variant_stats(&mut variant, stats);
         } else {
             decode_plink2_haplotype_dosage_aux(
                 pgen,
@@ -832,7 +723,7 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
         variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
         variant_major_missing.extend_from_slice(&haplotype_state.selected_haplotype_missing);
         output_variant_count += 1;
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
         }
@@ -844,17 +735,12 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    finish_plink2_dense_matrix(
-        Plink2DenseParts {
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,
@@ -993,11 +879,10 @@ pub fn read_plink2_sparse_windowed(
     let mut indices = Vec::new();
     let mut data = Vec::new();
     let mut variants = Vec::with_capacity(output_variant_capacity);
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
-        diagnostics.candidate_variants += 1;
         let mut decoded_packed = false;
         if requires_sequential_decode {
             read_plink2_variant_packed(
@@ -1012,24 +897,13 @@ pub fn read_plink2_sparse_windowed(
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => {
+                stopped_after_window = true;
+                break;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        stopped_after_window = true;
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
         }
 
         let needs_genotype_decision =
@@ -1053,26 +927,21 @@ pub fn read_plink2_sparse_windowed(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
-        }
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
-        }
         if needs_genotype_decision {
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => {
                     stopped_after_window = true;
                     break;
                 }
-                continue;
             }
+        }
+        if let Some(stats) = stats {
+            attach_variant_stats(&mut variant, stats);
         }
         decoder_state.packed.expand_selected(
             &selection.source_indices,
@@ -1083,7 +952,7 @@ pub fn read_plink2_sparse_windowed(
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
         }
@@ -3898,14 +3767,14 @@ fn parse_psam_line(
     Ok(SampleRecord {
         fid: columns
             .fid
-            .and_then(|index| optional_plink_value(fields[index])),
+            .and_then(|index| optional_plink_value(fields[index], PLINK2_MISSING_VALUES)),
         iid: fields[columns.iid].to_string(),
         father: columns
             .father
-            .and_then(|index| optional_plink_value(fields[index])),
+            .and_then(|index| optional_plink_value(fields[index], PLINK2_MISSING_VALUES)),
         mother: columns
             .mother
-            .and_then(|index| optional_plink_value(fields[index])),
+            .and_then(|index| optional_plink_value(fields[index], PLINK2_MISSING_VALUES)),
         sex: columns.sex.map(|index| fields[index].to_string()),
         phenotype: columns.phenotype.map(|index| fields[index].to_string()),
         source_sample_index: None,
@@ -4248,13 +4117,5 @@ fn parse_optional_qual(path: &Path, line_number: usize, value: &str) -> Result<O
         Ok(Some(qual))
     } else {
         Ok(None)
-    }
-}
-
-fn optional_plink_value(value: &str) -> Option<String> {
-    if value == "0" || value == "." || value == "NA" {
-        None
-    } else {
-        Some(value.to_string())
     }
 }

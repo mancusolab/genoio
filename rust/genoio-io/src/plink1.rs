@@ -6,14 +6,19 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, GenoioError, MetadataOutput,
-    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
-    VariantRecord, VariantWindow,
+    reject_sparse_missing_values, select_samples_source_order, DenseGenotypeMatrix, GenoioError,
+    MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
 use crate::hardcall::{HardcallBatch, PackedHardcalls};
+use crate::matrix::{
+    empty_dense_matrix, empty_sparse_matrix, finish_variant_major_dense_matrix,
+    VariantMajorDenseParts,
+};
+use crate::plink_common::{optional_plink_value, PLINK1_MISSING_VALUES};
+use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 /// Read PLINK1 sample and variant metadata without decoding BED genotypes.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
@@ -86,29 +91,15 @@ pub fn read_plink1_dense_windowed(
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut decoder_state =
         Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -132,25 +123,18 @@ pub fn read_plink1_dense_windowed(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
+        if needs_genotype_decision {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
-        }
-        if needs_genotype_decision {
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                    break;
-                }
-                continue;
-            }
         }
         decoder_state.packed.expand_selected(
             &selection.source_indices,
@@ -160,7 +144,7 @@ pub fn read_plink1_dense_windowed(
         variants.push(variant);
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
     }
@@ -168,19 +152,17 @@ pub fn read_plink1_dense_windowed(
     let n_samples = selection.samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    DenseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        selection.samples,
-        variants,
-        diagnostics,
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        false,
     )
 }
 
@@ -308,29 +290,15 @@ pub fn read_plink1_sparse_windowed(
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut decoder_state =
         Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        break;
-                    }
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -353,25 +321,18 @@ pub fn read_plink1_sparse_windowed(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
+        if needs_genotype_decision {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
-        }
-        if needs_genotype_decision {
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                    break;
-                }
-                continue;
-            }
         }
         decoder_state.packed.expand_selected(
             &selection.source_indices,
@@ -382,7 +343,7 @@ pub fn read_plink1_sparse_windowed(
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
     }
@@ -417,17 +378,7 @@ fn empty_plink1_dense(
     })?;
     let all_samples = parse_fam(fam)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
-    let mut diagnostics = selection.diagnostics;
-    diagnostics.retained_variants = 0;
-    DenseGenotypeMatrix::new(
-        selection.samples.len(),
-        0,
-        Vec::new(),
-        Vec::new(),
-        selection.samples,
-        Vec::new(),
-        diagnostics,
-    )
+    empty_dense_matrix(selection.samples, selection.diagnostics)
 }
 
 fn empty_plink1_sparse(
@@ -446,18 +397,7 @@ fn empty_plink1_sparse(
     })?;
     let all_samples = parse_fam(fam)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
-    let mut diagnostics = selection.diagnostics;
-    diagnostics.retained_variants = 0;
-    SparseGenotypeMatrix::new(
-        selection.samples.len(),
-        0,
-        vec![0],
-        Vec::new(),
-        Vec::new(),
-        selection.samples,
-        Vec::new(),
-        diagnostics,
-    )
+    empty_sparse_matrix(selection.samples, selection.diagnostics)
 }
 
 fn open_bed_file(path: &Path) -> Result<File> {
@@ -647,8 +587,8 @@ fn parse_fam_line(path: &Path, line_number: usize, line: &str) -> Result<SampleR
     Ok(SampleRecord {
         fid: Some(fields[0].to_string()),
         iid: fields[1].to_string(),
-        father: optional_plink_value(fields[2]),
-        mother: optional_plink_value(fields[3]),
+        father: optional_plink_value(fields[2], PLINK1_MISSING_VALUES),
+        mother: optional_plink_value(fields[3], PLINK1_MISSING_VALUES),
         sex: Some(fields[4].to_string()),
         phenotype: Some(fields[5].to_string()),
         source_sample_index: None,
@@ -740,12 +680,4 @@ fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<Variant
         missing_rate: None,
         n_called: None,
     })
-}
-
-fn optional_plink_value(value: &str) -> Option<String> {
-    if value == "0" {
-        None
-    } else {
-        Some(value.to_string())
-    }
 }

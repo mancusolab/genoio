@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     compute_variant_stats, flip_values_to_minor_allele, reject_sparse_missing_values,
-    select_samples_source_order, transpose_variant_major_to_sample_major, DenseGenotypeMatrix,
-    GenoioError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
-    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, GenoioError, MetadataOutput,
+    PartialFilterDecision, RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantRecord, VariantWindow,
 };
 use rust_htslib::bcf::{
     record::{GenotypeAllele, Numeric},
@@ -15,6 +15,11 @@ use rust_htslib::bcf::{
 };
 
 use crate::error::Result;
+use crate::matrix::{
+    empty_dense_matrix, empty_sparse_matrix, finish_variant_major_dense_matrix,
+    VariantMajorDenseParts,
+};
+use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 /// Read VCF/BCF sample and variant metadata without returning genotypes.
 pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
@@ -449,38 +454,24 @@ fn read_vcf_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         // Check before pulling another record; otherwise block reads still pay
         // to scan one extra variant after the requested retained window.
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                    break;
-                }
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -504,25 +495,18 @@ fn read_vcf_dense_records<R: Read>(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
+        if needs_genotype_decision {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
-        }
-        if needs_genotype_decision {
-            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                break;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
         }
         variants.push(variant);
         variant_major_values.extend(current_values);
@@ -532,19 +516,17 @@ fn read_vcf_dense_records<R: Read>(
     let n_samples = selection.samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    DenseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        selection.samples,
-        variants,
-        diagnostics,
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        false,
     )
 }
 
@@ -563,33 +545,22 @@ fn read_vcf_dosage_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -598,17 +569,15 @@ fn read_vcf_dosage_dense_records<R: Read>(
         let decoded = decode_ds_dosage_record(path, &record, &selection.source_indices)?;
         if needs_genotype_decision {
             let stats = compute_dosage_variant_stats(&decoded.values, &decoded.missing)?;
-            if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                diagnostics.dropped_genotype_variants += 1;
-                continue;
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
             }
             attach_variant_stats(&mut variant, stats);
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
         }
         variants.push(variant);
         variant_major_values.extend(decoded.values);
@@ -618,19 +587,17 @@ fn read_vcf_dosage_dense_records<R: Read>(
     let n_samples = selection.samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    DenseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        selection.samples,
-        variants,
-        diagnostics,
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        false,
     )
 }
 
@@ -649,38 +616,24 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         // Haplotype reads use the same retained-window semantics as genotype
         // reads, but each retained sample contributes two output rows.
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                    break;
-                }
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -693,25 +646,18 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
+        if needs_genotype_decision {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
-        }
-        if needs_genotype_decision {
-            if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                break;
-            }
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
         }
         let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         variants.push(variant);
@@ -723,19 +669,17 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     let n_samples = samples.len();
     let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    DenseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        samples,
-        variants,
-        diagnostics,
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples,
+            variants,
+            diagnostics,
+        },
+        false,
     )
 }
 
@@ -757,35 +701,24 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
     let mut indices = Vec::new();
     let mut data = Vec::new();
     let mut variants = Vec::new();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         // Stop before reading the next record so sparse blocks do not scan the
         // remainder of large VCF/BCF files after the block is filled.
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -798,22 +731,18 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
+        if needs_genotype_decision {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
-        }
-        if needs_genotype_decision {
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
         }
         let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         reject_sparse_missing_values(&decoded.haplotype_missing)?;
@@ -857,35 +786,24 @@ fn read_vcf_sparse_records<R: Read>(
     let mut indices = Vec::new();
     let mut data = Vec::new();
     let mut variants = Vec::new();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         // Stop before reading the next record so sparse blocks do not scan the
         // remainder of large VCF/BCF files after the block is filled.
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
         let mut variant = variant_record_from_record(path, &header, &record)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
-                diagnostics.dropped_metadata_variants += 1;
-                continue;
-            }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    continue;
-                }
-            }
-            PartialFilterDecision::NeedGenotypes => {}
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
         }
 
         let needs_genotype_decision =
@@ -909,22 +827,18 @@ fn read_vcf_sparse_records<R: Read>(
         } else {
             None
         };
-        if needs_genotype_decision
-            && variant_filter.is_some_and(|filter| !filter.evaluate(&variant, stats.as_ref()))
-        {
-            diagnostics.dropped_genotype_variants += 1;
-            continue;
+        if needs_genotype_decision {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
         }
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
-        }
-        if needs_genotype_decision {
-            let include_in_window =
-                variant_window.is_none_or(|window| window.contains(retained_index));
-            retained_index += 1;
-            if !include_in_window {
-                continue;
-            }
         }
         reject_sparse_missing_values(&current_missing)?;
         flip_values_to_minor_allele(&mut current_values, &mut variant);
@@ -953,17 +867,7 @@ fn empty_vcf_dense(
 ) -> Result<DenseGenotypeMatrix> {
     let all_samples = sample_records_from_header(header);
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
-    let mut diagnostics = selection.diagnostics;
-    diagnostics.retained_variants = 0;
-    DenseGenotypeMatrix::new(
-        selection.samples.len(),
-        0,
-        Vec::new(),
-        Vec::new(),
-        selection.samples,
-        Vec::new(),
-        diagnostics,
-    )
+    empty_dense_matrix(selection.samples, selection.diagnostics)
 }
 
 fn empty_vcf_sparse(
@@ -973,18 +877,7 @@ fn empty_vcf_sparse(
 ) -> Result<SparseGenotypeMatrix> {
     let all_samples = sample_records_from_header(header);
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
-    let mut diagnostics = selection.diagnostics;
-    diagnostics.retained_variants = 0;
-    SparseGenotypeMatrix::new(
-        selection.samples.len(),
-        0,
-        vec![0],
-        Vec::new(),
-        Vec::new(),
-        selection.samples,
-        Vec::new(),
-        diagnostics,
-    )
+    empty_sparse_matrix(selection.samples, selection.diagnostics)
 }
 
 fn empty_vcf_haplotypes_dense(
@@ -995,17 +888,7 @@ fn empty_vcf_haplotypes_dense(
     let all_samples = sample_records_from_header(header);
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
     let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
-    let mut diagnostics = selection.diagnostics;
-    diagnostics.retained_variants = 0;
-    DenseGenotypeMatrix::new(
-        samples.len(),
-        0,
-        Vec::new(),
-        Vec::new(),
-        samples,
-        Vec::new(),
-        diagnostics,
-    )
+    empty_dense_matrix(samples, selection.diagnostics)
 }
 
 fn empty_vcf_haplotypes_sparse(
@@ -1016,18 +899,7 @@ fn empty_vcf_haplotypes_sparse(
     let all_samples = sample_records_from_header(header);
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
     let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
-    let mut diagnostics = selection.diagnostics;
-    diagnostics.retained_variants = 0;
-    SparseGenotypeMatrix::new(
-        samples.len(),
-        0,
-        vec![0],
-        Vec::new(),
-        Vec::new(),
-        samples,
-        Vec::new(),
-        diagnostics,
-    )
+    empty_sparse_matrix(samples, selection.diagnostics)
 }
 
 fn validate_dense_biallelic_record(path: &Path, record: &rust_htslib::bcf::Record) -> Result<()> {

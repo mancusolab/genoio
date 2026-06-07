@@ -10,12 +10,16 @@ use std::path::{Path, PathBuf};
 use flate2::read::ZlibDecoder;
 use genoio_core::{
     attach_variant_stats, compute_dosage_variant_stats, select_samples_source_order,
-    transpose_variant_major_to_sample_major, DenseGenotypeMatrix, DenseSampleSelection,
-    GenoioError, MetadataOutput, PartialFilterDecision, RegionPredicate, SampleRecord,
-    SourceCapabilities, VariantFilter, VariantRecord, VariantWindow,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    RegionPredicate, SampleRecord, SourceCapabilities, VariantFilter, VariantRecord, VariantWindow,
 };
 use rusqlite::{params, Connection};
 
+use crate::matrix::{
+    finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
+    VariantMajorDenseParts,
+};
+use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 use crate::Result;
 
 const BGEN_MAGIC: &[u8; 4] = b"bgen";
@@ -85,8 +89,8 @@ pub fn read_bgen_dosage_dense_windowed(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         diagnostics.retained_variants = 0;
-        return finish_bgen_dense_matrix(
-            BgenDenseParts {
+        return finish_dense_matrix(
+            DenseMatrixParts {
                 n_samples: selection.samples.len(),
                 n_variants: 0,
                 values: Vec::new(),
@@ -130,32 +134,21 @@ pub fn read_bgen_dosage_dense_windowed(
     let mut variant_major_missing =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut decode_buffers = DosageDecodeBuffers::default();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
     for _ in 0..header.variant_count {
         let mut variant = read_layout2_variant_identifying_data(&mut reader, bgen)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Skip => {
                 skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
-                diagnostics.dropped_metadata_variants += 1;
                 continue;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        break;
-                    }
-                    skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
-                    continue;
-                }
+            MetadataRetentionAction::Stop => break,
+            MetadataRetentionAction::Include => {
                 read_layout2_probability_payload_into(
                     &mut reader,
                     bgen,
@@ -164,7 +157,7 @@ pub fn read_bgen_dosage_dense_windowed(
                     &mut decode_buffers.compressed_payload,
                 )?;
             }
-            PartialFilterDecision::NeedGenotypes => {
+            MetadataRetentionAction::DecodeGenotypes => {
                 read_layout2_probability_payload_into(
                     &mut reader,
                     bgen,
@@ -182,20 +175,17 @@ pub fn read_bgen_dosage_dense_windowed(
                     &decode_buffers.selected_values,
                     &decode_buffers.selected_missing,
                 )?;
-                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                    diagnostics.dropped_genotype_variants += 1;
-                    continue;
-                }
-                attach_variant_stats(&mut variant, stats);
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                match retention.genotype_decision(
+                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                    &mut diagnostics,
+                ) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => {
                         break;
                     }
-                    continue;
                 }
+                attach_variant_stats(&mut variant, stats);
             }
         }
 
@@ -213,7 +203,7 @@ pub fn read_bgen_dosage_dense_windowed(
         variant_major_values.extend_from_slice(&decode_buffers.selected_values);
         variant_major_missing.extend_from_slice(&decode_buffers.selected_missing);
         output_variant_count += 1;
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
     }
@@ -221,17 +211,12 @@ pub fn read_bgen_dosage_dense_windowed(
     let n_samples = selection.samples.len();
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    finish_bgen_dense_matrix(
-        BgenDenseParts {
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
             samples: selection.samples,
             variants,
             diagnostics,
@@ -261,8 +246,8 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         diagnostics.retained_variants = 0;
-        return finish_bgen_dense_matrix(
-            BgenDenseParts {
+        return finish_dense_matrix(
+            DenseMatrixParts {
                 n_samples: haplotype_samples.len(),
                 n_variants: 0,
                 values: Vec::new(),
@@ -305,32 +290,21 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
     for _ in 0..header.variant_count {
         let mut variant = read_layout2_variant_identifying_data(&mut reader, bgen)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Skip => {
                 skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
-                diagnostics.dropped_metadata_variants += 1;
                 continue;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
-                        break;
-                    }
-                    skip_layout2_probability_payload(&mut reader, bgen, header.flags.compression)?;
-                    continue;
-                }
+            MetadataRetentionAction::Stop => break,
+            MetadataRetentionAction::Include => {
                 read_layout2_probability_payload_into(
                     &mut reader,
                     bgen,
@@ -339,7 +313,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
                     &mut decode_buffers.compressed_payload,
                 )?;
             }
-            PartialFilterDecision::NeedGenotypes => {
+            MetadataRetentionAction::DecodeGenotypes => {
                 read_layout2_probability_payload_into(
                     &mut reader,
                     bgen,
@@ -357,20 +331,17 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
                     &decode_buffers.selected_collapsed_values,
                     &decode_buffers.selected_collapsed_missing,
                 )?;
-                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                    diagnostics.dropped_genotype_variants += 1;
-                    continue;
-                }
-                attach_variant_stats(&mut variant, stats);
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+                match retention.genotype_decision(
+                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                    &mut diagnostics,
+                ) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => {
                         break;
                     }
-                    continue;
                 }
+                attach_variant_stats(&mut variant, stats);
             }
         }
 
@@ -388,7 +359,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
         variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
         variant_major_missing.extend_from_slice(&decode_buffers.selected_haplotype_missing);
         output_variant_count += 1;
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
     }
@@ -396,67 +367,18 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    finish_bgen_dense_matrix(
-        BgenDenseParts {
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,
         },
         matrix_only,
     )
-}
-
-struct BgenDenseParts {
-    n_samples: usize,
-    n_variants: usize,
-    values: Vec<f32>,
-    missing_mask: Vec<bool>,
-    samples: Vec<SampleRecord>,
-    variants: Vec<VariantRecord>,
-    diagnostics: genoio_core::DenseDiagnostics,
-}
-
-fn finish_bgen_dense_matrix(
-    parts: BgenDenseParts,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    let BgenDenseParts {
-        n_samples,
-        n_variants,
-        values,
-        missing_mask,
-        samples,
-        variants,
-        diagnostics,
-    } = parts;
-    if matrix_only {
-        DenseGenotypeMatrix::new_matrix_only(
-            n_samples,
-            n_variants,
-            values,
-            missing_mask,
-            diagnostics,
-        )
-    } else {
-        DenseGenotypeMatrix::new(
-            n_samples,
-            n_variants,
-            values,
-            missing_mask,
-            samples,
-            variants,
-            diagnostics,
-        )
-    }
 }
 
 struct BgenIndexedReadContext<'a> {
@@ -493,11 +415,11 @@ fn read_bgen_dosage_dense_indexed(
     let mut variant_major_missing =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut decode_buffers = DosageDecodeBuffers::default();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
     for index_record in index_records {
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         reader
@@ -507,26 +429,21 @@ fn read_bgen_dosage_dense_indexed(
                 source,
             })?;
         let mut variant = read_layout2_variant_identifying_data(reader, bgen)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Skip => {
                 skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
                 validate_index_record_consumed(reader, bgen, index_record)?;
-                diagnostics.dropped_metadata_variants += 1;
                 continue;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
-                    validate_index_record_consumed(reader, bgen, index_record)?;
-                    continue;
-                }
+            MetadataRetentionAction::Stop => {
+                skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                validate_index_record_consumed(reader, bgen, index_record)?;
+                break;
+            }
+            MetadataRetentionAction::Include => {
                 read_layout2_probability_payload_into(
                     reader,
                     bgen,
@@ -535,7 +452,7 @@ fn read_bgen_dosage_dense_indexed(
                     &mut decode_buffers.compressed_payload,
                 )?;
             }
-            PartialFilterDecision::NeedGenotypes => {
+            MetadataRetentionAction::DecodeGenotypes => {
                 read_layout2_probability_payload_into(
                     reader,
                     bgen,
@@ -553,19 +470,21 @@ fn read_bgen_dosage_dense_indexed(
                     &decode_buffers.selected_values,
                     &decode_buffers.selected_missing,
                 )?;
-                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                    validate_index_record_consumed(reader, bgen, index_record)?;
-                    diagnostics.dropped_genotype_variants += 1;
-                    continue;
+                match retention.genotype_decision(
+                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                    &mut diagnostics,
+                ) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => {
+                        validate_index_record_consumed(reader, bgen, index_record)?;
+                        continue;
+                    }
+                    RetentionAction::Stop => {
+                        validate_index_record_consumed(reader, bgen, index_record)?;
+                        break;
+                    }
                 }
                 attach_variant_stats(&mut variant, stats);
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    validate_index_record_consumed(reader, bgen, index_record)?;
-                    continue;
-                }
             }
         }
 
@@ -589,17 +508,12 @@ fn read_bgen_dosage_dense_indexed(
     let n_samples = selection.samples.len();
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    finish_bgen_dense_matrix(
-        BgenDenseParts {
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
             samples: selection.samples,
             variants,
             diagnostics,
@@ -631,11 +545,11 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
-    let mut retained_index = 0_usize;
+    let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
     for index_record in index_records {
-        if variant_window.is_some_and(|window| window.is_past(retained_index)) {
+        if retention.window_is_satisfied() {
             break;
         }
         reader
@@ -645,26 +559,21 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                 source,
             })?;
         let mut variant = read_layout2_variant_identifying_data(reader, bgen)?;
-        diagnostics.candidate_variants += 1;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
-        match partial_decision {
-            PartialFilterDecision::Reject => {
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Skip => {
                 skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
                 validate_index_record_consumed(reader, bgen, index_record)?;
-                diagnostics.dropped_metadata_variants += 1;
                 continue;
             }
-            PartialFilterDecision::Accept => {
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
-                    validate_index_record_consumed(reader, bgen, index_record)?;
-                    continue;
-                }
+            MetadataRetentionAction::Stop => {
+                skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+                validate_index_record_consumed(reader, bgen, index_record)?;
+                break;
+            }
+            MetadataRetentionAction::Include => {
                 read_layout2_probability_payload_into(
                     reader,
                     bgen,
@@ -673,7 +582,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                     &mut decode_buffers.compressed_payload,
                 )?;
             }
-            PartialFilterDecision::NeedGenotypes => {
+            MetadataRetentionAction::DecodeGenotypes => {
                 read_layout2_probability_payload_into(
                     reader,
                     bgen,
@@ -691,19 +600,21 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                     &decode_buffers.selected_collapsed_values,
                     &decode_buffers.selected_collapsed_missing,
                 )?;
-                if variant_filter.is_some_and(|filter| !filter.evaluate(&variant, Some(&stats))) {
-                    validate_index_record_consumed(reader, bgen, index_record)?;
-                    diagnostics.dropped_genotype_variants += 1;
-                    continue;
+                match retention.genotype_decision(
+                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                    &mut diagnostics,
+                ) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => {
+                        validate_index_record_consumed(reader, bgen, index_record)?;
+                        continue;
+                    }
+                    RetentionAction::Stop => {
+                        validate_index_record_consumed(reader, bgen, index_record)?;
+                        break;
+                    }
                 }
                 attach_variant_stats(&mut variant, stats);
-                let include_in_window =
-                    variant_window.is_none_or(|window| window.contains(retained_index));
-                retained_index += 1;
-                if !include_in_window {
-                    validate_index_record_consumed(reader, bgen, index_record)?;
-                    continue;
-                }
             }
         }
 
@@ -727,17 +638,12 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
-
-    finish_bgen_dense_matrix(
-        BgenDenseParts {
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,
