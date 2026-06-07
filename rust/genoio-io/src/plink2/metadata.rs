@@ -180,14 +180,16 @@ pub(super) fn parse_pvar_source_window(
             records.push((source_index, variant));
         }
         source_index += 1;
+        if source_index >= window_end {
+            break;
+        }
     }
 
-    if source_index != expected_variant_ct {
+    let required_rows = window_end.min(expected_variant_ct);
+    if source_index < required_rows {
         return Err(GenoioError::invalid_source(
             path,
-            format!(
-                "pvar variant count {source_index} does not match pgen variant count {expected_variant_ct}",
-            ),
+            format!("pvar variant count {source_index} is shorter than requested source window"),
         ));
     }
 

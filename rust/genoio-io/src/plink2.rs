@@ -29,7 +29,8 @@ use pgen::{
     read_plink2_variant_haplotype_dosage_track, read_plink2_variant_haplotype_main_track,
     read_plink2_variant_packed, read_plink2_variant_values, read_supported_pgen_header,
     read_supported_pgen_header_prefix, seek_fixed_width_variant_record, validate_plink2_dimensions,
-    validate_plink2_sample_count, PgenDecoderState, PgenHaplotypeDecodeState, PgenLayout,
+    validate_plink2_sample_count, PgenDecoderState, PgenHaplotypeDecodeState, PgenHeader,
+    PgenLayout,
 };
 
 #[cfg(test)]
@@ -139,8 +140,13 @@ pub fn read_plink2_dense_windowed(
     // header validation. Filtered reads use the slower complete path because
     // retained-window membership depends on evaluating earlier variants.
     if let (None, Some(window)) = (variant_filter, variant_window) {
-        if requested_samples.is_none() && matrix_only {
-            return read_plink2_dense_matrix_only_source_window(pgen, window);
+        if matrix_only {
+            return read_plink2_dense_matrix_only_source_window(
+                pgen,
+                psam,
+                requested_samples,
+                window,
+            );
         }
         return read_plink2_dense_source_window(pgen, pvar, psam, requested_samples, window);
     }
@@ -156,14 +162,17 @@ pub fn read_plink2_dense_windowed(
             source,
         })?;
         diagnostics.retained_variants = 0;
-        return DenseGenotypeMatrix::new(
-            selection.samples.len(),
-            0,
-            Vec::new(),
-            Vec::new(),
-            selection.samples,
-            Vec::new(),
-            diagnostics,
+        return finish_dense_matrix(
+            DenseMatrixParts {
+                n_samples: selection.samples.len(),
+                n_variants: 0,
+                values: Vec::new(),
+                missing_mask: Vec::new(),
+                samples: selection.samples,
+                variants: Vec::new(),
+                diagnostics,
+            },
+            matrix_only,
         );
     }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
@@ -180,6 +189,7 @@ pub fn read_plink2_dense_windowed(
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
+    let mut output_variant_count = 0_usize;
     let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         let mut decoded_packed = false;
@@ -247,9 +257,12 @@ pub fn read_plink2_dense_windowed(
             &mut decoder_state.values,
             &mut decoder_state.missing,
         );
-        variants.push(variant);
+        if !matrix_only {
+            variants.push(variant);
+        }
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
+        output_variant_count += 1;
         if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
@@ -260,7 +273,7 @@ pub fn read_plink2_dense_windowed(
     }
 
     let n_samples = selection.samples.len();
-    let n_variants = variants.len();
+    let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
     finish_variant_major_dense_matrix(
         VariantMajorDenseParts {
@@ -272,7 +285,7 @@ pub fn read_plink2_dense_windowed(
             variants,
             diagnostics,
         },
-        false,
+        matrix_only,
     )
 }
 
@@ -284,6 +297,7 @@ pub fn read_plink2_dosage_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let header = read_supported_pgen_header(pgen)?;
     let all_samples = parse_psam(psam)?;
@@ -296,14 +310,17 @@ pub fn read_plink2_dosage_dense_windowed(
             source,
         })?;
         diagnostics.retained_variants = 0;
-        return DenseGenotypeMatrix::new(
-            selection.samples.len(),
-            0,
-            Vec::new(),
-            Vec::new(),
-            selection.samples,
-            Vec::new(),
-            diagnostics,
+        return finish_dense_matrix(
+            DenseMatrixParts {
+                n_samples: selection.samples.len(),
+                n_variants: 0,
+                values: Vec::new(),
+                missing_mask: Vec::new(),
+                samples: selection.samples,
+                variants: Vec::new(),
+                diagnostics,
+            },
+            matrix_only,
         );
     }
 
@@ -320,6 +337,7 @@ pub fn read_plink2_dosage_dense_windowed(
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
+    let mut output_variant_count = 0_usize;
 
     while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
@@ -358,9 +376,12 @@ pub fn read_plink2_dosage_dense_windowed(
             }
             attach_variant_stats(&mut variant, stats);
         }
-        variants.push(variant);
+        if !matrix_only {
+            variants.push(variant);
+        }
         variant_major_values.extend_from_slice(&decoder_state.values);
         variant_major_missing.extend_from_slice(&decoder_state.missing);
+        output_variant_count += 1;
         if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
@@ -371,7 +392,7 @@ pub fn read_plink2_dosage_dense_windowed(
     }
 
     let n_samples = selection.samples.len();
-    let n_variants = variants.len();
+    let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
     finish_variant_major_dense_matrix(
         VariantMajorDenseParts {
@@ -383,7 +404,7 @@ pub fn read_plink2_dosage_dense_windowed(
             variants,
             diagnostics,
         },
-        false,
+        matrix_only,
     )
 }
 
@@ -888,6 +909,8 @@ pub fn read_plink2_sparse_windowed(
 
 fn read_plink2_dense_matrix_only_source_window(
     pgen: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
     window: VariantWindow,
 ) -> Result<DenseGenotypeMatrix> {
     let decode_variant_ct = window
@@ -905,8 +928,51 @@ fn read_plink2_dense_matrix_only_source_window(
         ));
     }
     let n_variants = window.len.min(header.variant_ct - window.start);
+    if let Some(requested_samples) = requested_samples {
+        let all_samples = parse_psam(psam)?;
+        validate_plink2_sample_count(pgen, &header, all_samples.len())?;
+        let selection = select_samples_source_order(&all_samples, Some(requested_samples), pgen)?;
+        return decode_plink2_dense_matrix_only_source_window(
+            pgen,
+            &header,
+            window,
+            n_variants,
+            &selection.source_indices,
+            selection.samples.len(),
+            selection.diagnostics,
+        );
+    }
+
     let n_samples = header.sample_ct;
     let source_indices = (0..n_samples).collect::<Vec<_>>();
+    let diagnostics = genoio_core::DenseDiagnostics {
+        requested_samples: n_samples,
+        retained_samples: n_samples,
+        candidate_variants: n_variants,
+        retained_variants: n_variants,
+        ..genoio_core::DenseDiagnostics::default()
+    };
+
+    decode_plink2_dense_matrix_only_source_window(
+        pgen,
+        &header,
+        window,
+        n_variants,
+        &source_indices,
+        n_samples,
+        diagnostics,
+    )
+}
+
+fn decode_plink2_dense_matrix_only_source_window(
+    pgen: &Path,
+    header: &PgenHeader,
+    window: VariantWindow,
+    n_variants: usize,
+    source_indices: &[usize],
+    n_samples: usize,
+    mut diagnostics: genoio_core::DenseDiagnostics,
+) -> Result<DenseGenotypeMatrix> {
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, n_samples);
     let mut values = vec![0.0; n_samples * n_variants];
@@ -921,20 +987,20 @@ fn read_plink2_dense_matrix_only_source_window(
         | PgenLayout::FixedWidthDosage
         | PgenLayout::FixedWidthPhasedDosage => {
             if n_variants > 0 {
-                seek_fixed_width_variant_record(pgen, &mut file, &header, window.start)?;
+                seek_fixed_width_variant_record(pgen, &mut file, header, window.start)?;
             }
             for _ in 0..n_variants {
                 read_fixed_width_variant_packed_sequential(
                     pgen,
                     &mut file,
-                    &header,
+                    header,
                     &mut decoder_state,
                 )?;
                 packed_batch.push(&decoder_state.packed);
                 if packed_batch.is_full() {
                     flush_packed_variant_batch(
                         &mut packed_batch,
-                        &source_indices,
+                        source_indices,
                         &mut batch_start,
                         n_variants,
                         &mut values,
@@ -944,7 +1010,7 @@ fn read_plink2_dense_matrix_only_source_window(
             }
             flush_packed_variant_batch(
                 &mut packed_batch,
-                &source_indices,
+                source_indices,
                 &mut batch_start,
                 n_variants,
                 &mut values,
@@ -957,7 +1023,7 @@ fn read_plink2_dense_matrix_only_source_window(
                 read_plink2_variant_packed(
                     pgen,
                     &mut file,
-                    &header,
+                    header,
                     source_variant_index,
                     &mut decoder_state,
                 )?;
@@ -966,7 +1032,7 @@ fn read_plink2_dense_matrix_only_source_window(
                     if packed_batch.is_full() {
                         flush_packed_variant_batch(
                             &mut packed_batch,
-                            &source_indices,
+                            source_indices,
                             &mut batch_start,
                             n_variants,
                             &mut values,
@@ -977,7 +1043,7 @@ fn read_plink2_dense_matrix_only_source_window(
             }
             flush_packed_variant_batch(
                 &mut packed_batch,
-                &source_indices,
+                source_indices,
                 &mut batch_start,
                 n_variants,
                 &mut values,
@@ -986,13 +1052,8 @@ fn read_plink2_dense_matrix_only_source_window(
         }
     }
 
-    let diagnostics = genoio_core::DenseDiagnostics {
-        requested_samples: n_samples,
-        retained_samples: n_samples,
-        candidate_variants: n_variants,
-        retained_variants: n_variants,
-        ..genoio_core::DenseDiagnostics::default()
-    };
+    diagnostics.candidate_variants = n_variants;
+    diagnostics.retained_variants = n_variants;
 
     DenseGenotypeMatrix::new_matrix_only(n_samples, n_variants, values, missing_mask, diagnostics)
 }

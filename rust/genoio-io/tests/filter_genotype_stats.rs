@@ -213,6 +213,7 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
         None,
         Some(&filter),
         None,
+        false,
     )
     .expect("plink2 dosage should filter");
 

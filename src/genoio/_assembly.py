@@ -46,10 +46,12 @@ def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool =
         {column: columns[column] for column in _SAMPLE_COLUMNS},
         schema=_SAMPLE_COLUMNS,
     )
-    haplotype_indices = columns["haplotype_index"]
+    haplotype_indices = columns.get("haplotype_index")
     if include_haplotype_columns or (haplotype_indices and all(index is not None for index in haplotype_indices)):
+        source_sample_indices = columns.get("source_sample_index", [None] * frame.height)
+        haplotype_indices = haplotype_indices or [None] * frame.height
         return frame.with_columns(
-            pl.Series("source_sample_index", columns["source_sample_index"]),
+            pl.Series("source_sample_index", source_sample_indices),
             pl.Series("haplotype_index", haplotype_indices),
         )
     return frame

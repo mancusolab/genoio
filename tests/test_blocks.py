@@ -281,8 +281,8 @@ def test_plink2_blocks_return_samples_keeps_source_order_for_each_block(tmp_path
         pytest.param({}, True, id="matrix-only-fast-path"),
         pytest.param({"return_samples": True}, False, id="sample-metadata"),
         pytest.param({"return_variants": True}, False, id="variant-metadata"),
-        pytest.param({"samples": ["S1"]}, False, id="sample-filter"),
-        pytest.param({"variants": ["rs1"]}, False, id="variant-filter"),
+        pytest.param({"samples": ["S1"]}, True, id="sample-filter"),
+        pytest.param({"variants": ["rs1"]}, True, id="variant-filter"),
     ],
 )
 def test_plink2_blocks_set_matrix_only_by_metadata_needs(tmp_path, monkeypatch, read_options, expected_matrix_only):
@@ -334,35 +334,56 @@ def test_plink2_blocks_metadata_required_paths_reject_malformed_companion_files(
 
 
 @pytest.mark.parametrize(
-    ("pvar_text", "match"),
+    "pvar_text",
     [
-        (
+        pytest.param(
             """\
 #CHROM POS ID REF ALT
 1 10 rs1 A G
 1 bad rs2 C T
 2 30 rs3 G A
 """,
-            "invalid position",
+            id="malformed-later-row",
         ),
-        (
+        pytest.param(
             """\
 #CHROM POS ID REF ALT
 1 10 rs1 A G
 """,
-            "pvar variant count 1",
+            id="missing-later-row",
         ),
     ],
 )
-def test_plink2_metadata_blocks_validate_full_pvar_before_first_block_return(tmp_path, pvar_text, match):
+def test_plink2_metadata_blocks_skip_later_pvar_records_before_first_block_return(tmp_path, pvar_text):
     import genoio
 
     prefix = write_fixed_width_plink2(tmp_path)
     prefix.with_suffix(".pvar").write_text(pvar_text)
     dataset = genoio.pfile(prefix)
 
-    with pytest.raises(genoio.InvalidSourceError, match=match):
-        next(dataset.iter_blocks(size=1, return_variants=True))
+    _, variants = next(dataset.iter_blocks(size=1, return_variants=True))
+
+    assert variants["id"].to_list() == ["rs1"]
+
+
+def test_plink2_metadata_blocks_validate_requested_pvar_window(tmp_path):
+    import genoio
+
+    prefix = write_fixed_width_plink2(tmp_path)
+    prefix.with_suffix(".pvar").write_text(
+        """\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+1 bad rs2 C T
+2 30 rs3 G A
+"""
+    )
+    dataset = genoio.pfile(prefix)
+
+    iterator = dataset.iter_blocks(size=1, return_variants=True)
+    next(iterator)
+    with pytest.raises(genoio.InvalidSourceError, match="invalid position"):
+        next(iterator)
 
 
 @pytest.mark.parametrize(

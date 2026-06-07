@@ -649,14 +649,7 @@ class Dataset:
             "dosage": read_options.dosage,
             "return_samples": read_options.return_samples,
             "return_variants": read_options.return_variants,
-            "matrix_only": (
-                # The Rust readers can skip metadata work only when Python will
-                # not need metadata for filtering or for the returned result.
-                not read_options.return_samples
-                and not read_options.return_variants
-                and read_options.samples is None
-                and validated_options.variant_filter_ir is None
-            ),
+            "matrix_only": not read_options.return_samples and not read_options.return_variants,
         }
         if validated_options.sparse_format is None:
             rust_result = self._read_from_rust(read_options.kind, False, members, options)
