@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
+from script_loader import load_benchmark_script
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-sys.path.insert(0, str(SCRIPTS_DIR))
-
-import benchmark_plink2  # noqa: E402
+benchmark_plink2 = cast(Any, load_benchmark_script("benchmark_plink2"))
 
 
 def _matrix(value: float = 1.0) -> np.ndarray:
