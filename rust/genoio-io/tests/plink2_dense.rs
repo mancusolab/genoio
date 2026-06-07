@@ -2,26 +2,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use genoio_core::VariantWindow;
 
-static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+mod common;
 
-fn unique_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after unix epoch")
-        .as_nanos();
-    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "genoio-{name}-{}-{nanos}-{counter}",
-        std::process::id()
-    ));
-    fs::create_dir(&dir).expect("test temp dir should be created");
-    dir
-}
+use common::{unique_dir, TestDir};
 
 fn write_text(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -202,7 +188,9 @@ fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
     dense
 }
 
-fn write_bad_variable_width_block_offset_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+fn write_bad_variable_width_block_offset_fixture(
+    name: &str,
+) -> (TestDir, PathBuf, PathBuf, PathBuf) {
     let dir = unique_dir(name);
     let mut pgen_bytes = variable_width_pgen(&[0], &[&[0x00]], 4);
     pgen_bytes[12] = pgen_bytes[12].saturating_sub(1);
@@ -227,7 +215,7 @@ S3
 S4
 ",
     );
-    (pgen, pvar, psam)
+    (dir, pgen, pvar, psam)
 }
 
 fn variable_width_two_block_pgen_with_bad_second_offset() -> Vec<u8> {
@@ -1868,7 +1856,7 @@ S4
 
 #[test]
 fn plink2_dense_matrix_only_source_window_rejects_variable_width_block_offset_mismatch() {
-    let (pgen, pvar, psam) = write_bad_variable_width_block_offset_fixture(
+    let (_dir, pgen, pvar, psam) = write_bad_variable_width_block_offset_fixture(
         "plink2-dense-window-bad-block-offset-matrix-only",
     );
     let window = VariantWindow { start: 0, len: 1 };
@@ -1882,7 +1870,7 @@ fn plink2_dense_matrix_only_source_window_rejects_variable_width_block_offset_mi
 
 #[test]
 fn plink2_dense_metadata_source_window_rejects_variable_width_block_offset_mismatch() {
-    let (pgen, pvar, psam) = write_bad_variable_width_block_offset_fixture(
+    let (_dir, pgen, pvar, psam) = write_bad_variable_width_block_offset_fixture(
         "plink2-dense-window-bad-block-offset-metadata",
     );
     let window = VariantWindow { start: 0, len: 1 };

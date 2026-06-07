@@ -1,25 +1,10 @@
 // pattern: Imperative Shell
 
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+mod common;
 
-fn unique_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after unix epoch")
-        .as_nanos();
-    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "genoio-{name}-{}-{nanos}-{counter}",
-        std::process::id()
-    ));
-    fs::create_dir(&dir).expect("test temp dir should be created");
-    dir
-}
+use common::unique_dir;
 
 fn phased_vcf() -> String {
     "\
