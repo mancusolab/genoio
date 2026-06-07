@@ -1,4 +1,5 @@
 // pattern: Imperative Shell
+//! Shared binary read helpers for BGEN submodules.
 
 use std::io::Read;
 use std::path::Path;

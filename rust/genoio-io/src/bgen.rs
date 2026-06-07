@@ -1,6 +1,5 @@
-// pattern: Mixed (unavoidable)
-// Reason: Format-local binary parsing is kept beside the filesystem entrypoint to match the
-// existing reader module pattern in this crate.
+// pattern: Imperative Shell
+//! BGEN reader orchestration and matrix assembly.
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
@@ -34,6 +33,7 @@ use header::{
 };
 use index::{indexed_region_records, validate_index_record_consumed, BgenIndexRecord};
 
+/// Read BGEN sample and variant metadata without returning dosages.
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
     let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
         path: bgen.to_path_buf(),

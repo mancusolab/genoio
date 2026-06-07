@@ -1,4 +1,5 @@
 // pattern: Imperative Shell
+//! Decode BGEN Layout 2 probability payloads into dense dosage buffers.
 
 use std::io::Read;
 use std::path::Path;

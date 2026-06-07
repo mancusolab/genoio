@@ -1,4 +1,5 @@
 // pattern: Imperative Shell
+//! Query same-path `.bgi` indexes for BGEN region pushdown.
 
 use std::fs::File;
 use std::io::Seek;

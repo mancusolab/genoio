@@ -1,4 +1,5 @@
 // pattern: Imperative Shell
+//! Parse BGEN headers, sample identifiers, and variant metadata records.
 
 use std::collections::HashSet;
 use std::fs;
