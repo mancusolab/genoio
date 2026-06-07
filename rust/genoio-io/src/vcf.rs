@@ -200,6 +200,18 @@ pub fn read_vcf_haplotypes_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
+        if has_vcf_index(path) {
+            return read_indexed_vcf_haplotypes_dense(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+            );
+        }
+    }
+
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
@@ -228,6 +240,18 @@ pub fn read_vcf_haplotypes_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
+        if has_vcf_index(path) {
+            return read_indexed_vcf_haplotypes_sparse(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+            );
+        }
+    }
+
     reject_unindexed_compressed_region(path, variant_filter)?;
     let mut reader = Reader::from_path(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
@@ -334,6 +358,74 @@ fn read_indexed_vcf_sparse(
         })?;
 
     read_vcf_sparse_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
+fn read_indexed_vcf_haplotypes_dense(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    region: &RegionPredicate,
+) -> Result<DenseGenotypeMatrix> {
+    let mut reader = IndexedReader::from_path(path).map_err(|error| {
+        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
+    })?;
+    let header = reader.header().clone();
+    let rid = match header.name2rid(region.chrom.as_bytes()) {
+        Ok(rid) => rid,
+        Err(_) => return empty_vcf_haplotypes_dense(path, &header, requested_samples),
+    };
+    reader
+        .fetch(
+            rid,
+            u64::from(region.start - 1),
+            Some(u64::from(region.end - 1)),
+        )
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf region fetch error: {error}"))
+        })?;
+
+    read_vcf_haplotypes_dense_records(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        &mut reader,
+    )
+}
+
+fn read_indexed_vcf_haplotypes_sparse(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    region: &RegionPredicate,
+) -> Result<SparseGenotypeMatrix> {
+    let mut reader = IndexedReader::from_path(path).map_err(|error| {
+        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
+    })?;
+    let header = reader.header().clone();
+    let rid = match header.name2rid(region.chrom.as_bytes()) {
+        Ok(rid) => rid,
+        Err(_) => return empty_vcf_haplotypes_sparse(path, &header, requested_samples),
+    };
+    reader
+        .fetch(
+            rid,
+            u64::from(region.start - 1),
+            Some(u64::from(region.end - 1)),
+        )
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf region fetch error: {error}"))
+        })?;
+
+    read_vcf_haplotypes_sparse_records(
         path,
         requested_samples,
         variant_filter,
@@ -890,6 +982,49 @@ fn empty_vcf_sparse(
         Vec::new(),
         Vec::new(),
         selection.samples,
+        Vec::new(),
+        diagnostics,
+    )
+}
+
+fn empty_vcf_haplotypes_dense(
+    path: &Path,
+    header: &rust_htslib::bcf::header::HeaderView,
+    requested_samples: Option<&[String]>,
+) -> Result<DenseGenotypeMatrix> {
+    let all_samples = sample_records_from_header(header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    DenseGenotypeMatrix::new(
+        samples.len(),
+        0,
+        Vec::new(),
+        Vec::new(),
+        samples,
+        Vec::new(),
+        diagnostics,
+    )
+}
+
+fn empty_vcf_haplotypes_sparse(
+    path: &Path,
+    header: &rust_htslib::bcf::header::HeaderView,
+    requested_samples: Option<&[String]>,
+) -> Result<SparseGenotypeMatrix> {
+    let all_samples = sample_records_from_header(header);
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    SparseGenotypeMatrix::new(
+        samples.len(),
+        0,
+        vec![0],
+        Vec::new(),
+        Vec::new(),
+        samples,
         Vec::new(),
         diagnostics,
     )

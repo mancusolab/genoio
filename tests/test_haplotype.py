@@ -1,5 +1,7 @@
 # pattern: Imperative Shell
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +49,26 @@ def write_phased_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def write_indexed_phased_vcf_with_outside_region(tmp_path: Path) -> Path:
+    source = tmp_path / "indexed_phased.vcf"
+    source.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|0
+1\t20\trs20\tC\tT\t.\tPASS\t.\tGT\t0|1\t1|0
+1\t40\toutside_region\tT\tC\t.\tPASS\t.\tGT\t0|0\t0|0
+"""
+    )
+    compressed = tmp_path / "indexed_phased.vcf.gz"
+    with compressed.open("wb") as output:
+        subprocess.run(["bgzip", "-c", str(source)], stdout=output, check=True)
+    subprocess.run(["tabix", "-f", "-p", "vcf", str(compressed)], check=True)
+    return compressed
+
+
 def write_mixed_phase_vcf(tmp_path: Path) -> Path:
     path = tmp_path / "mixed_phase.vcf"
     path.write_text(
@@ -89,6 +111,33 @@ def write_common_a1_vcf(tmp_path: Path) -> Path:
 """
     )
     return path
+
+
+@pytest.mark.skipif(
+    shutil.which("bgzip") is None or shutil.which("tabix") is None,
+    reason="indexed VCF haplotype test requires bgzip and tabix",
+)
+@pytest.mark.parametrize("read_name", ["read_haplotypes_dense", "read_haplotypes_sparse"])
+def test_indexed_vcf_region_pushdown_applies_to_haplotype_reads(tmp_path, read_name):
+    import genoio
+    from genoio import _api, _rust
+
+    path = write_indexed_phased_vcf_with_outside_region(tmp_path)
+    options = {
+        "samples": None,
+        "variants": _api._variant_filter_ir(genoio.region("1:10-20")),
+        "variant_window": None,
+        "dosage": "hardcall",
+        "return_samples": False,
+        "return_variants": False,
+        "matrix_only": False,
+    }
+
+    result = getattr(_rust, read_name)("vcf", {"vcf": str(path)}, options)
+
+    assert result["diagnostics"]["candidate_variants"] == 2
+    assert result["diagnostics"]["retained_variants"] == 2
+    assert tuple(result["shape"]) == (4, 2)
 
 
 def test_plink1_haplotype_reads_raise_unsupported_representation():

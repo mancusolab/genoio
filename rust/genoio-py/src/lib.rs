@@ -933,8 +933,6 @@ fn genoio_error_to_py(error: GenoioError) -> PyErr {
         GenoioError::SampleFilter { .. } => RustSampleFilterError::new_err(error.to_string()),
         GenoioError::MissingData { .. } => RustMissingDataError::new_err(error.to_string()),
         GenoioError::InvalidFilter { .. } => RustInvalidOptionError::new_err(error.to_string()),
-        GenoioError::InternalContract { .. } => {
-            pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
-        }
+        GenoioError::InternalContract { .. } => RustInternalError::new_err(error.to_string()),
     }
 }
