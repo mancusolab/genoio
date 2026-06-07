@@ -120,12 +120,13 @@ def write_common_a1_vcf(tmp_path: Path) -> Path:
 @pytest.mark.parametrize("read_name", ["read_haplotypes_dense", "read_haplotypes_sparse"])
 def test_indexed_vcf_region_pushdown_applies_to_haplotype_reads(tmp_path, read_name):
     import genoio
-    from genoio import _api, _rust
+    from genoio import _rust
+    from genoio._read_options import _variant_filter_ir
 
     path = write_indexed_phased_vcf_with_outside_region(tmp_path)
     options = {
         "samples": None,
-        "variants": _api._variant_filter_ir(genoio.region("1:10-20")),
+        "variants": _variant_filter_ir(genoio.region("1:10-20")),
         "variant_window": None,
         "dosage": "hardcall",
         "return_samples": False,
