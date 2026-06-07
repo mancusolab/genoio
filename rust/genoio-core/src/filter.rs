@@ -155,6 +155,21 @@ impl VariantFilter {
         self.expr.requires_genotype_stats()
     }
 
+    /// Return true when the expression has no variant-metadata predicates.
+    pub fn is_genotype_stats_only(&self) -> bool {
+        self.expr.is_genotype_stats_only()
+    }
+
+    /// Evaluate a metadata-free expression from genotype statistics alone.
+    ///
+    /// Returns `None` when the expression contains any predicate requiring
+    /// `VariantRecord` fields such as chromosome, position, ID, alleles, or
+    /// quality.
+    pub fn evaluate_genotype_stats(&self, stats: &VariantStats) -> Option<bool> {
+        self.is_genotype_stats_only()
+            .then(|| self.expr.evaluate_genotype_stats(stats))
+    }
+
     /// Return true when the expression contains any region predicate.
     pub fn has_region_predicate(&self) -> bool {
         self.expr.has_region_predicate()
@@ -252,6 +267,32 @@ impl Expr {
                 left.requires_genotype_stats() || right.requires_genotype_stats()
             }
             Self::Not(expr) => expr.requires_genotype_stats(),
+        }
+    }
+
+    fn is_genotype_stats_only(&self) -> bool {
+        match self {
+            Self::AlwaysTrue | Self::AlwaysFalse => true,
+            Self::Predicate(predicate) => predicate.is_genotype_stats_only(),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.is_genotype_stats_only() && right.is_genotype_stats_only()
+            }
+            Self::Not(expr) => expr.is_genotype_stats_only(),
+        }
+    }
+
+    fn evaluate_genotype_stats(&self, stats: &VariantStats) -> bool {
+        match self {
+            Self::AlwaysTrue => true,
+            Self::AlwaysFalse => false,
+            Self::Predicate(predicate) => predicate.evaluate_genotype_stats(stats),
+            Self::And(left, right) => {
+                left.evaluate_genotype_stats(stats) && right.evaluate_genotype_stats(stats)
+            }
+            Self::Or(left, right) => {
+                left.evaluate_genotype_stats(stats) || right.evaluate_genotype_stats(stats)
+            }
+            Self::Not(expr) => !expr.evaluate_genotype_stats(stats),
         }
     }
 
@@ -520,18 +561,9 @@ impl Predicate {
             | Self::Snp
             | Self::Biallelic
             | Self::Qual { .. } => self.metadata_decision(variant) == Some(true),
-            Self::Maf { min, max } => stats.and_then(|stats| stats.maf).is_some_and(|maf| {
-                min.is_none_or(|threshold| maf >= f64::from(threshold))
-                    && max.is_none_or(|threshold| maf <= f64::from(threshold))
-            }),
-            Self::Mac { min, max } => stats.and_then(|stats| stats.mac).is_some_and(|mac| {
-                min.is_none_or(|threshold| mac >= f64::from(threshold))
-                    && max.is_none_or(|threshold| mac <= f64::from(threshold))
-            }),
-            Self::MissingRate { max } => {
-                stats.is_some_and(|stats| stats.missing_rate <= f64::from(*max))
+            Self::Maf { .. } | Self::Mac { .. } | Self::MissingRate { .. } | Self::Polymorphic => {
+                stats.and_then(|stats| self.evaluate_from_stats(stats)) == Some(true)
             }
-            Self::Polymorphic => stats.is_some_and(|stats| stats.polymorphic),
         }
     }
 
@@ -540,6 +572,35 @@ impl Predicate {
             self,
             Self::Maf { .. } | Self::Mac { .. } | Self::MissingRate { .. } | Self::Polymorphic
         )
+    }
+
+    fn is_genotype_stats_only(&self) -> bool {
+        self.requires_genotype_stats()
+    }
+
+    fn evaluate_genotype_stats(&self, stats: &VariantStats) -> bool {
+        self.evaluate_from_stats(stats).unwrap_or(false)
+    }
+
+    fn evaluate_from_stats(&self, stats: &VariantStats) -> Option<bool> {
+        match self {
+            Self::Maf { min, max } => Some(stats.maf.is_some_and(|maf| {
+                min.is_none_or(|threshold| maf >= f64::from(threshold))
+                    && max.is_none_or(|threshold| maf <= f64::from(threshold))
+            })),
+            Self::Mac { min, max } => Some(stats.mac.is_some_and(|mac| {
+                min.is_none_or(|threshold| mac >= f64::from(threshold))
+                    && max.is_none_or(|threshold| mac <= f64::from(threshold))
+            })),
+            Self::MissingRate { max } => Some(stats.missing_rate <= f64::from(*max)),
+            Self::Polymorphic => Some(stats.polymorphic),
+            Self::Chrom(_)
+            | Self::Region { .. }
+            | Self::IdIn(_)
+            | Self::Snp
+            | Self::Biallelic
+            | Self::Qual { .. } => None,
+        }
     }
 
     fn and_combine(&self, other: &Self) -> PredicateCombine {

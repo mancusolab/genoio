@@ -79,6 +79,38 @@ fn flush_packed_variant_batch(
     batch.clear();
 }
 
+fn shrink_sample_major_width<T: Copy>(
+    values: &mut Vec<T>,
+    n_samples: usize,
+    old_width: usize,
+    new_width: usize,
+) {
+    debug_assert!(new_width <= old_width);
+    if old_width == new_width {
+        return;
+    }
+    for sample_index in 1..n_samples {
+        let source_start = sample_index * old_width;
+        let target_start = sample_index * new_width;
+        values.copy_within(source_start..source_start + new_width, target_start);
+    }
+    values.truncate(n_samples * new_width);
+}
+
+fn can_skip_pvar_for_matrix_only_genotype_filter(
+    matrix_only: bool,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Option<(&VariantFilter, VariantWindow)> {
+    if !matrix_only {
+        return None;
+    }
+    let filter = variant_filter?;
+    let window = variant_window?;
+    (filter.requires_genotype_stats() && filter.is_genotype_stats_only())
+        .then_some((filter, window))
+}
+
 fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Vec<SampleRecord> {
     let mut haplotype_samples = Vec::with_capacity(selection.samples.len() * 2);
     for (sample, &source_index) in selection.samples.iter().zip(&selection.source_indices) {
@@ -156,7 +188,7 @@ pub fn read_plink2_dense_windowed(
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
     let all_samples_selected = requested_samples.is_none();
-    let mut diagnostics = selection.diagnostics;
+    let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         fs::metadata(pvar).map_err(|source| GenoioError::Io {
             path: pvar.to_path_buf(),
@@ -176,6 +208,24 @@ pub fn read_plink2_dense_windowed(
             matrix_only,
         );
     }
+    if let Some((filter, window)) =
+        can_skip_pvar_for_matrix_only_genotype_filter(matrix_only, variant_filter, variant_window)
+    {
+        // Matrix-only genotype-stat filters do not need per-variant metadata.
+        // Keep the companion-file check, but avoid parsing PVAR rows.
+        fs::metadata(pvar).map_err(|source| GenoioError::Io {
+            path: pvar.to_path_buf(),
+            source,
+        })?;
+        return read_plink2_dense_matrix_only_genotype_filter(
+            pgen,
+            &header,
+            selection,
+            all_samples_selected,
+            filter,
+            window,
+        );
+    }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
@@ -184,10 +234,11 @@ pub fn read_plink2_dense_windowed(
         window.len.min(header.variant_ct)
     });
     let mut variants = Vec::with_capacity(output_variant_capacity);
-    let mut variant_major_values =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut variant_major_missing =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let n_samples = selection.samples.len();
+    let mut values = vec![0.0; n_samples * output_variant_capacity];
+    let mut missing_mask = vec![false; n_samples * output_variant_capacity];
+    let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
+    let mut batch_start = 0_usize;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
@@ -253,17 +304,21 @@ pub fn read_plink2_dense_windowed(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        decoder_state.packed.expand_selected(
-            &selection.source_indices,
-            &mut decoder_state.values,
-            &mut decoder_state.missing,
-        );
         if !matrix_only {
             variants.push(variant);
         }
-        variant_major_values.extend_from_slice(&decoder_state.values);
-        variant_major_missing.extend_from_slice(&decoder_state.missing);
+        packed_batch.push(&decoder_state.packed);
         output_variant_count += 1;
+        if packed_batch.is_full() {
+            flush_packed_variant_batch(
+                &mut packed_batch,
+                &selection.source_indices,
+                &mut batch_start,
+                output_variant_capacity,
+                &mut values,
+                &mut missing_mask,
+            );
+        }
         if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
@@ -272,16 +327,30 @@ pub fn read_plink2_dense_windowed(
     if !stopped_after_window {
         pvar_reader.validate_count(header.variant_ct)?;
     }
+    flush_packed_variant_batch(
+        &mut packed_batch,
+        &selection.source_indices,
+        &mut batch_start,
+        output_variant_capacity,
+        &mut values,
+        &mut missing_mask,
+    );
 
-    let n_samples = selection.samples.len();
     let n_variants = output_variant_count;
+    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        n_variants,
+    );
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
+    finish_dense_matrix(
+        DenseMatrixParts {
             n_samples,
             n_variants,
-            variant_major_values,
-            variant_major_missing,
+            values,
+            missing_mask,
             samples: selection.samples,
             variants,
             diagnostics,
@@ -963,6 +1032,125 @@ fn read_plink2_dense_matrix_only_source_window(
         n_variants,
         &source_indices,
         n_samples,
+        diagnostics,
+    )
+}
+
+fn read_plink2_dense_matrix_only_genotype_filter(
+    pgen: &Path,
+    header: &PgenHeader,
+    selection: DenseSampleSelection,
+    all_samples_selected: bool,
+    filter: &VariantFilter,
+    window: VariantWindow,
+) -> Result<DenseGenotypeMatrix> {
+    let output_variant_capacity = window.len.min(header.variant_ct);
+    let n_samples = selection.samples.len();
+    if output_variant_capacity == 0 {
+        let mut diagnostics = selection.diagnostics;
+        diagnostics.retained_variants = 0;
+        return DenseGenotypeMatrix::new_matrix_only(
+            n_samples,
+            0,
+            Vec::new(),
+            Vec::new(),
+            diagnostics,
+        );
+    }
+
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, n_samples);
+    let mut values = vec![0.0; n_samples * output_variant_capacity];
+    let mut missing_mask = vec![false; n_samples * output_variant_capacity];
+    let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
+    let mut batch_start = 0_usize;
+    let mut retention = RetainedVariantState::new(Some(window));
+    let mut diagnostics = selection.diagnostics;
+    let mut output_variant_count = 0_usize;
+
+    for variant_index in 0..header.variant_ct {
+        diagnostics.candidate_variants += 1;
+
+        match header.layout {
+            PgenLayout::FixedWidth
+            | PgenLayout::FixedWidthDosage
+            | PgenLayout::FixedWidthPhasedDosage => read_fixed_width_variant_packed_sequential(
+                pgen,
+                &mut file,
+                header,
+                &mut decoder_state,
+            )?,
+            PgenLayout::VariableWidth => {
+                read_plink2_variant_packed(
+                    pgen,
+                    &mut file,
+                    header,
+                    variant_index,
+                    &mut decoder_state,
+                )?;
+            }
+        }
+
+        let stats = decoder_state
+            .packed
+            .stats_for_selection(&selection.source_indices, all_samples_selected)?;
+        match retention.genotype_decision(
+            filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
+                GenoioError::internal_contract(
+                    "genotype-stats-only fast path received metadata-dependent filter",
+                )
+            })?,
+            &mut diagnostics,
+        ) {
+            RetentionAction::Include => {
+                packed_batch.push(&decoder_state.packed);
+                output_variant_count += 1;
+                if packed_batch.is_full() {
+                    flush_packed_variant_batch(
+                        &mut packed_batch,
+                        &selection.source_indices,
+                        &mut batch_start,
+                        output_variant_capacity,
+                        &mut values,
+                        &mut missing_mask,
+                    );
+                }
+            }
+            RetentionAction::Skip => {}
+            RetentionAction::Stop => break,
+        }
+        if retention.window_is_satisfied() {
+            break;
+        }
+    }
+
+    flush_packed_variant_batch(
+        &mut packed_batch,
+        &selection.source_indices,
+        &mut batch_start,
+        output_variant_capacity,
+        &mut values,
+        &mut missing_mask,
+    );
+    shrink_sample_major_width(
+        &mut values,
+        n_samples,
+        output_variant_capacity,
+        output_variant_count,
+    );
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        output_variant_count,
+    );
+    diagnostics.retained_variants = output_variant_count;
+
+    DenseGenotypeMatrix::new_matrix_only(
+        n_samples,
+        output_variant_count,
+        values,
+        missing_mask,
         diagnostics,
     )
 }

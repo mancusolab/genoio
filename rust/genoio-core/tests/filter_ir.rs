@@ -297,6 +297,7 @@ fn genotype_predicates_are_not_used_as_metadata_drop_decisions() {
     .expect("filter IR should deserialize");
 
     assert!(filter.requires_genotype_stats());
+    assert!(!filter.is_genotype_stats_only());
     assert_eq!(
         filter.metadata_decision(&variant("rs1", "1", 10, "A", "G")),
         None
@@ -305,6 +306,91 @@ fn genotype_predicates_are_not_used_as_metadata_drop_decisions() {
         filter.metadata_decision(&variant("rs2", "2", 20, "C", "T")),
         Some(false)
     );
+}
+
+#[test]
+fn genotype_stats_only_filters_evaluate_without_variant_metadata() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "maf", "params": {"min": 0.2}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.1}}
+    }))
+    .expect("filter IR should deserialize");
+    let retained = genoio_core::VariantStats {
+        af: Some(0.25),
+        maf: Some(0.25),
+        mac: Some(4.0),
+        missing_rate: 0.0,
+        n_called: 8,
+        polymorphic: true,
+    };
+    let rejected = genoio_core::VariantStats {
+        maf: Some(0.1),
+        ..retained
+    };
+
+    assert!(filter.requires_genotype_stats());
+    assert!(filter.is_genotype_stats_only());
+    assert_eq!(filter.evaluate_genotype_stats(&retained), Some(true));
+    assert_eq!(filter.evaluate_genotype_stats(&rejected), Some(false));
+}
+
+#[test]
+fn genotype_stats_only_detection_handles_boolean_composition() {
+    let cases = [
+        (
+            serde_json::json!({
+                "op": "or",
+                "left": {"op": "predicate", "name": "maf", "params": {"min": 0.2}},
+                "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.1}}
+            }),
+            true,
+        ),
+        (
+            serde_json::json!({
+                "op": "not",
+                "expr": {"op": "predicate", "name": "polymorphic", "params": {}}
+            }),
+            true,
+        ),
+        (
+            serde_json::json!({
+                "op": "or",
+                "left": {"op": "predicate", "name": "id_in", "params": {"values": ["rs1"]}},
+                "right": {"op": "predicate", "name": "maf", "params": {"min": 0.2}}
+            }),
+            false,
+        ),
+    ];
+
+    for (expr, expected) in cases {
+        let filter = genoio_core::VariantFilter::from_json_value(expr)
+            .expect("filter IR should deserialize");
+
+        assert_eq!(filter.is_genotype_stats_only(), expected);
+    }
+}
+
+#[test]
+fn mixed_metadata_filters_do_not_evaluate_from_genotype_stats_only() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "snp", "params": {}},
+        "right": {"op": "predicate", "name": "maf", "params": {"min": 0.2}}
+    }))
+    .expect("filter IR should deserialize");
+    let stats = genoio_core::VariantStats {
+        af: Some(0.25),
+        maf: Some(0.25),
+        mac: Some(4.0),
+        missing_rate: 0.0,
+        n_called: 8,
+        polymorphic: true,
+    };
+
+    assert!(filter.requires_genotype_stats());
+    assert!(!filter.is_genotype_stats_only());
+    assert_eq!(filter.evaluate_genotype_stats(&stats), None);
 }
 
 #[test]

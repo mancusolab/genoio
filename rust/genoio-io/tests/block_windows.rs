@@ -382,6 +382,41 @@ fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
 }
 
 #[test]
+fn plink2_matrix_only_genotype_filter_window_skips_pvar_rows() {
+    let dir = unique_dir("plink2-genotype-filter-skips-pvar");
+    let (pgen, pvar, psam) = write_plink2_filter_window_stop_fixture(&dir);
+    write_text(
+        &pvar,
+        "\
+#CHROM POS ID REF ALT
+malformed
+",
+    );
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only genotype filter should not parse pvar rows");
+
+    assert_eq!(block.n_variants, 1);
+    assert!(block.variants.is_empty());
+    assert_eq!(block.values, vec![1.0, 0.0, 1.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
 fn plink2_sparse_filtered_window_stops_after_requested_retained_variants() {
     let dir = unique_dir("plink2-sparse-filtered-window-stop");
     let (pgen, pvar, psam) = write_plink2_filter_window_stop_fixture(&dir);
