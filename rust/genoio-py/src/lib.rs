@@ -46,7 +46,7 @@ fn read_metadata_impl(
     members: &Bound<'_, PyDict>,
 ) -> PyResult<Py<PyDict>> {
     let source = source_members(format, members)?;
-    let output = read_source_metadata(&source).map_err(genoio_error_to_py)?;
+    let output = run_without_gil(py, || read_source_metadata(&source))?;
 
     metadata_to_py(py, output)
 }
@@ -70,8 +70,9 @@ fn read_dense_impl(
 ) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     let source = source_members(format, members)?;
-    let output = read_dense_matrix(&source, MatrixKind::Genotype, &read_options)
-        .map_err(genoio_error_to_py)?;
+    let output = run_without_gil(py, || {
+        read_dense_matrix(&source, MatrixKind::Genotype, &read_options)
+    })?;
 
     dense_to_py(
         py,
@@ -100,8 +101,9 @@ fn read_sparse_impl(
 ) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     let source = source_members(format, members)?;
-    let output = read_sparse_matrix(&source, MatrixKind::Genotype, &read_options)
-        .map_err(genoio_error_to_py)?;
+    let output = run_without_gil(py, || {
+        read_sparse_matrix(&source, MatrixKind::Genotype, &read_options)
+    })?;
 
     sparse_to_py(
         py,
@@ -130,8 +132,9 @@ fn read_haplotypes_dense_impl(
 ) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     let source = source_members(format, members)?;
-    let output = read_dense_matrix(&source, MatrixKind::Haplotype, &read_options)
-        .map_err(genoio_error_to_py)?;
+    let output = run_without_gil(py, || {
+        read_dense_matrix(&source, MatrixKind::Haplotype, &read_options)
+    })?;
 
     dense_to_py(
         py,
@@ -160,8 +163,9 @@ fn read_haplotypes_sparse_impl(
 ) -> PyResult<Py<PyDict>> {
     let read_options = read_options(options)?;
     let source = source_members(format, members)?;
-    let output = read_sparse_matrix(&source, MatrixKind::Haplotype, &read_options)
-        .map_err(genoio_error_to_py)?;
+    let output = run_without_gil(py, || {
+        read_sparse_matrix(&source, MatrixKind::Haplotype, &read_options)
+    })?;
 
     sparse_to_py(
         py,
@@ -181,6 +185,16 @@ fn catch_internal_panic<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
             panic_message(payload.as_ref())
         ))),
     }
+}
+
+fn run_without_gil<T: Send>(
+    py: Python<'_>,
+    f: impl FnOnce() -> Result<T, GenoioError> + Send,
+) -> PyResult<T> {
+    // Only Rust-owned source paths, filters, options, and output structs may
+    // cross this boundary. Python argument parsing and result construction stay
+    // under the GIL.
+    py.allow_threads(f).map_err(genoio_error_to_py)
 }
 
 fn panic_message(payload: &(dyn PanicPayload + Send)) -> &str {

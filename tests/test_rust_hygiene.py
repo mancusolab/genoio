@@ -7,7 +7,7 @@ RUST_SOURCE_ROOTS = (
 )
 
 
-def test_rust_production_sources_do_not_unwrap_or_expect():
+def test_rust_production_sources_do_not_unwrap_expect_or_panic():
     offenders: list[str] = []
     for source_root in RUST_SOURCE_ROOTS:
         for path in sorted(source_root.glob("**/*.rs")):
@@ -29,7 +29,7 @@ def test_rust_production_sources_do_not_unwrap_or_expect():
                     continue
                 if stripped and not stripped.startswith("#"):
                     pending_cfg_test = False
-                if ".unwrap()" in line or ".expect(" in line:
+                if ".unwrap()" in line or ".expect(" in line or "panic!" in line:
                     offenders.append(f"{path}:{line_number}: {stripped}")
 
     assert offenders == []
