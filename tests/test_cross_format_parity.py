@@ -1,97 +1,16 @@
 # pattern: Imperative Shell
 
-from pathlib import Path
-
 import numpy as np
 import pytest
-from scipy import sparse as scipy_sparse
-
-EXPECTED_MATRIX = np.array(
-    [
-        [0.0, np.nan, 2.0, 0.0],
-        [np.nan, 0.0, 1.0, 1.0],
-        [2.0, 1.0, 0.0, 2.0],
-        [1.0, 2.0, np.nan, 0.0],
-    ],
-    dtype=np.float32,
+from fixture_writers import (
+    EXPECTED_MATRIX,
+    EXPECTED_SAMPLES,
+    EXPECTED_VARIANT_ROWS,
+    write_canonical_plink1,
+    write_canonical_plink2,
+    write_canonical_vcf,
 )
-EXPECTED_SAMPLES = ["S1", "S2", "S3", "S4"]
-EXPECTED_VARIANTS = ["rs1", "rs2", "indel1", "rs4"]
-EXPECTED_VARIANT_ROWS = [
-    ("1", 10, "rs1", "G", "A"),
-    ("1", 20, "rs2", "T", "C"),
-    ("2", 30, "indel1", "A", "AT"),
-    ("2", 40, "rs4", "C", "T"),
-]
-
-
-def write_canonical_vcf(tmp_path: Path) -> Path:
-    path = tmp_path / "canonical.vcf"
-    path.write_text(
-        """\
-##fileformat=VCFv4.2
-##contig=<ID=1>
-##contig=<ID=2>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\tS4
-1\t10\trs1\tG\tA\t.\tPASS\t.\tGT\t0/0\t./.\t1/1\t0/1
-1\t20\trs2\tT\tC\t.\tPASS\t.\tGT\t./.\t0/0\t0/1\t1/1
-2\t30\tindel1\tA\tAT\t.\tPASS\t.\tGT\t1/1\t0/1\t0/0\t./.
-2\t40\trs4\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\t0/0
-"""
-    )
-    return path
-
-
-def write_canonical_plink1(tmp_path: Path) -> Path:
-    prefix = tmp_path / "canonical_bed"
-    prefix.with_suffix(".bed").write_bytes(bytes([0x6C, 0x1B, 0x01, 0x87, 0x2D, 0x78, 0xCB]))
-    prefix.with_suffix(".bim").write_text(
-        """\
-1 rs1 0 10 A G
-1 rs2 0 20 C T
-2 indel1 0 30 AT A
-2 rs4 0 40 T C
-"""
-    )
-    prefix.with_suffix(".fam").write_text(
-        """\
-F1 S1 0 0 1 -9
-F1 S2 S1 0 2 1.5
-F2 S3 0 0 0 2.0
-F2 S4 0 0 2 -9
-"""
-    )
-    return prefix
-
-
-def write_canonical_plink2(tmp_path: Path) -> Path:
-    prefix = tmp_path / "canonical_pgen"
-    prefix.with_suffix(".pgen").write_bytes(
-        bytes([0x6C, 0x1B, 0x02])
-        + (4).to_bytes(4, "little")
-        + (4).to_bytes(4, "little")
-        + bytes([0x00, 0x6C, 0x93, 0xC6, 0x24])
-    )
-    prefix.with_suffix(".pvar").write_text(
-        """\
-#CHROM POS ID REF ALT
-1 10 rs1 G A
-1 20 rs2 T C
-2 30 indel1 A AT
-2 40 rs4 C T
-"""
-    )
-    prefix.with_suffix(".psam").write_text(
-        """\
-#FID IID PAT MAT SEX PHENO
-F1 S1 0 0 1 -9
-F1 S2 S1 0 2 1.5
-F2 S3 0 0 0 2.0
-F2 S4 0 0 2 -9
-"""
-    )
-    return prefix
+from scipy import sparse as scipy_sparse
 
 
 @pytest.fixture

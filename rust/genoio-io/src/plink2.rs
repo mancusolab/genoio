@@ -3833,7 +3833,7 @@ fn parse_psam(path: &Path) -> Result<Vec<SampleRecord>> {
             continue;
         }
         if trimmed.starts_with('#') {
-            header = Some(parse_psam_header(trimmed));
+            header = Some(parse_psam_header(path, trimmed)?);
             continue;
         }
         let columns = header
@@ -3854,7 +3854,7 @@ struct PsamColumns {
     phenotype: Option<usize>,
 }
 
-fn parse_psam_header(line: &str) -> PsamColumns {
+fn parse_psam_header(path: &Path, line: &str) -> Result<PsamColumns> {
     let fields = line
         .trim_start_matches('#')
         .split_whitespace()
@@ -3864,14 +3864,15 @@ fn parse_psam_header(line: &str) -> PsamColumns {
             .iter()
             .position(|field| names.iter().any(|name| field.eq_ignore_ascii_case(name)))
     };
-    PsamColumns {
+    Ok(PsamColumns {
         fid: find(&["FID"]),
-        iid: find(&["IID"]).unwrap_or(0),
+        iid: find(&["IID"])
+            .ok_or_else(|| GenoioError::invalid_source(path, "psam header missing IID"))?,
         father: find(&["PAT", "FATHER"]),
         mother: find(&["MAT", "MOTHER"]),
         sex: find(&["SEX"]),
         phenotype: find(&["PHENO1", "PHENO", "PHENOTYPE"]),
-    }
+    })
 }
 
 fn parse_psam_line(

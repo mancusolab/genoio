@@ -92,16 +92,20 @@ def test_sparse_rejects_missing_policies_that_require_stored_missing_values(tmp_
         dataset.read(sparse=True, missing=missing)
 
 
-def test_sparse_rejects_unknown_options_before_calling_rust(tmp_path):
+@pytest.mark.parametrize(
+    "sparse",
+    [
+        pytest.param("coo", id="unknown-format"),
+        pytest.param([], id="non-string"),
+    ],
+)
+def test_sparse_rejects_unknown_options_before_calling_rust(tmp_path, sparse):
     import genoio
 
     dataset = genoio.vcf(write_sparse_vcf(tmp_path))
 
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
-        dataset.read(sparse="coo", missing="raise")
-
-    with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
-        cast(Any, dataset.read)(sparse=[], missing="raise")
+        cast(Any, dataset.read)(sparse=sparse, missing="raise")
 
 
 def test_sparse_invalid_missing_policy_raises_structured_error(tmp_path):

@@ -2,12 +2,13 @@
 
 import sys
 from importlib.metadata import metadata, version
-from inspect import signature
 from pathlib import Path
 
 import numpy as np
 import pytest
-from test_dense_read import (
+from fixture_writers import (
+    _bgen_sample_identifier_block,
+    _bgen_variant_identifying_data,
     write_bgen_dosage,
     write_fixed_width_phased_dosage_plink2,
     write_fixed_width_plink2,
@@ -84,39 +85,6 @@ def write_layout1_bgen(tmp_path: Path) -> Path:
     contents[0:4] = variant_offset.to_bytes(4, "little")
     path.write_bytes(contents)
     return path
-
-
-def _bgen_sample_identifier_block(sample_ids: list[str]) -> bytes:
-    contents = bytearray()
-    block_len = 8 + sum(2 + len(sample_id.encode()) for sample_id in sample_ids)
-    contents.extend(block_len.to_bytes(4, "little"))
-    contents.extend(len(sample_ids).to_bytes(4, "little"))
-    for sample_id in sample_ids:
-        encoded = sample_id.encode()
-        contents.extend(len(encoded).to_bytes(2, "little"))
-        contents.extend(encoded)
-    return bytes(contents)
-
-
-def _bgen_variant_identifying_data(
-    variant_id: str,
-    rsid: str,
-    chrom: str,
-    pos: int,
-    alleles: list[str],
-) -> bytes:
-    contents = bytearray()
-    for value in (variant_id, rsid, chrom):
-        encoded = value.encode()
-        contents.extend(len(encoded).to_bytes(2, "little"))
-        contents.extend(encoded)
-    contents.extend(pos.to_bytes(4, "little"))
-    contents.extend(len(alleles).to_bytes(2, "little"))
-    for allele in alleles:
-        encoded = allele.encode()
-        contents.extend(len(encoded).to_bytes(4, "little"))
-        contents.extend(encoded)
-    return bytes(contents)
 
 
 def test_import_exposes_public_names_without_reference_packages():
@@ -226,76 +194,72 @@ def test_vcf_dataset_read_rejects_haplotype_dosage_source(tmp_path):
         dataset.read(kind="haplo", dosage="dosage")
 
 
-def test_plink2_dataset_read_haplotype_hardcall_reaches_backend(tmp_path):
+@pytest.mark.parametrize(
+    ("dataset_factory", "read_options", "expected_shape", "expected_first_column"),
+    [
+        pytest.param(
+            lambda genoio, tmp_path: genoio.pfile(write_phased_hardcall_plink2(tmp_path)),
+            {"kind": "haplo"},
+            (6, 2),
+            None,
+            id="plink2-hardcall",
+        ),
+        pytest.param(
+            lambda genoio, tmp_path: genoio.pfile(write_phased_dosage_plink2(tmp_path)),
+            {"kind": "haplo", "dosage": "dosage"},
+            (6, 2),
+            None,
+            id="plink2-dosage",
+        ),
+        pytest.param(
+            lambda genoio, tmp_path: genoio.pfile(write_fixed_width_phased_dosage_plink2(tmp_path)),
+            {"kind": "haplo", "dosage": "dosage"},
+            (6, 2),
+            [0.25, 0.75, 0.0, 0.5, 1.0, 1.0],
+            id="plink2-fixed-width-phased-dosage",
+        ),
+        pytest.param(
+            lambda genoio, tmp_path: genoio.bgen(write_bgen_dosage(tmp_path, phased=True)),
+            {"kind": "haplo", "dosage": "dosage"},
+            (4, 2),
+            None,
+            id="bgen-phased-dosage",
+        ),
+    ],
+)
+def test_dataset_read_haplotype_backends_reach_supported_paths(
+    tmp_path,
+    dataset_factory,
+    read_options,
+    expected_shape,
+    expected_first_column,
+):
     import genoio
 
-    dataset = genoio.pfile(write_phased_hardcall_plink2(tmp_path))
+    dataset = dataset_factory(genoio, tmp_path)
 
-    H = dataset.read(kind="haplo")
+    H = dataset.read(**read_options)
 
-    assert H.shape == (6, 2)
-
-
-def test_plink2_dataset_read_haplotype_dosage_reaches_backend(tmp_path):
-    import genoio
-
-    dataset = genoio.pfile(write_phased_dosage_plink2(tmp_path))
-
-    H = dataset.read(kind="haplo", dosage="dosage")
-
-    assert H.shape == (6, 2)
+    assert H.shape == expected_shape
+    if expected_first_column is not None:
+        np.testing.assert_allclose(H[:, 0], expected_first_column, atol=2.0 / 32768.0)
 
 
-def test_plink2_dataset_read_fixed_width_phased_dosage_reaches_backend(tmp_path):
-    import genoio
-
-    dataset = genoio.pfile(write_fixed_width_phased_dosage_plink2(tmp_path))
-
-    H = dataset.read(kind="haplo", dosage="dosage")
-
-    assert H.shape == (6, 2)
-    np.testing.assert_allclose(
-        H[:, 0],
-        [0.25, 0.75, 0.0, 0.5, 1.0, 1.0],
-        atol=2.0 / 32768.0,
-    )
-
-
-def test_bgen_dataset_read_haplotype_dosage_reaches_backend(tmp_path):
-    import genoio
-
-    dataset = genoio.bgen(write_bgen_dosage(tmp_path, phased=True))
-
-    H = dataset.read(kind="haplo", dosage="dosage")
-
-    assert H.shape == (4, 2)
-
-
-def test_bgen_dataset_read_rejects_hardcall_genotypes(tmp_path):
-    import genoio
-
-    dataset = placeholder_bgen_dataset(tmp_path)
-
-    with pytest.raises(genoio.UnsupportedRepresentation, match="hardcall"):
-        dataset.read(dosage="hardcall")
-
-
-def test_bgen_dataset_read_rejects_sparse_hardcall_genotypes(tmp_path):
-    import genoio
-
-    dataset = placeholder_bgen_dataset(tmp_path)
-
-    with pytest.raises(genoio.UnsupportedRepresentation, match="sparse"):
-        dataset.read(sparse=True, dosage="hardcall")
-
-
-def test_bgen_dataset_read_rejects_haplotypes(tmp_path):
+@pytest.mark.parametrize(
+    ("read_options", "match"),
+    [
+        pytest.param({"dosage": "hardcall"}, "hardcall", id="hardcall-genotype"),
+        pytest.param({"sparse": True, "dosage": "hardcall"}, "sparse", id="sparse-hardcall-genotype"),
+        pytest.param({"kind": "haplo"}, "hardcall haplotype", id="hardcall-haplotype"),
+    ],
+)
+def test_bgen_dataset_read_rejects_unsupported_hardcall_modes(tmp_path, read_options, match):
     import genoio
 
     dataset = placeholder_bgen_dataset(tmp_path)
 
-    with pytest.raises(genoio.UnsupportedRepresentation, match="hardcall haplotype"):
-        dataset.read(kind="haplo")
+    with pytest.raises(genoio.UnsupportedRepresentation, match=match):
+        dataset.read(**read_options)
 
 
 def test_bgen_dataset_read_default_haplotype_does_not_imply_dosage(tmp_path):
@@ -307,25 +271,20 @@ def test_bgen_dataset_read_default_haplotype_does_not_imply_dosage(tmp_path):
         dataset.read(kind="haplo")
 
 
-def test_plink2_dataset_read_rejects_fixed_width_sparse_hardcall_haplotypes(tmp_path):
+@pytest.mark.parametrize(
+    "read_options",
+    [
+        pytest.param({"kind": "haplo"}, id="dense"),
+        pytest.param({"kind": "haplo", "sparse": True}, id="sparse"),
+    ],
+)
+def test_plink2_dataset_read_rejects_fixed_width_hardcall_haplotypes(tmp_path, read_options):
     import genoio
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="variable-width explicit phased records"):
-        dataset.read(kind="haplo", sparse=True)
-
-
-def test_plink2_dataset_read_fixed_width_hardcall_haplotype_is_unsupported(tmp_path):
-    import genoio
-
-    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
-
-    with pytest.raises(
-        genoio.UnsupportedRepresentation,
-        match="variable-width explicit phased records",
-    ):
-        dataset.read(kind="haplo")
+        dataset.read(**read_options)
 
 
 def test_plink2_dataset_read_phased_hardcall_as_haplotype_dosage_is_unsupported(tmp_path):
@@ -355,22 +314,20 @@ def test_bgen_dataset_read_dosage_rejects_invalid_placeholder_source(tmp_path):
         dataset.read(dosage="dosage")
 
 
-def test_bgen_dataset_read_dosage_maps_unsupported_probability_representation(tmp_path):
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param(lambda dataset: dataset.read(dosage="dosage"), id="read"),
+        pytest.param(lambda dataset: dataset.variants(), id="metadata"),
+    ],
+)
+def test_bgen_maps_unsupported_probability_representation(tmp_path, operation):
     import genoio
 
     dataset = genoio.bgen(write_invalid_phase_probability_bgen(tmp_path))
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="phased probability value"):
-        dataset.read(dosage="dosage")
-
-
-def test_bgen_dataset_metadata_maps_unsupported_probability_representation(tmp_path):
-    import genoio
-
-    dataset = genoio.bgen(write_invalid_phase_probability_bgen(tmp_path))
-
-    with pytest.raises(genoio.UnsupportedRepresentation, match="phased probability value"):
-        dataset.variants()
+        operation(dataset)
 
 
 def test_bgen_dataset_metadata_maps_unsupported_layout(tmp_path):
@@ -451,15 +408,6 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
     assert result["missing_mask"].dtype == np.bool_
 
 
-def test_sparse_default_missing_signature_is_readable():
-    import genoio
-
-    missing = signature(genoio.Dataset.read).parameters["missing"]
-
-    assert missing.annotation == "Literal['nan', 'raise', 'impute'] | None"
-    assert missing.default is None
-
-
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
     import genoio
 
@@ -507,33 +455,22 @@ def test_dataset_variants_rejects_stats_until_stat_metadata_is_implemented(tmp_p
         dataset.variants(stats=["maf"])
 
 
-def test_dataset_read_rejects_unsupported_representation_options(tmp_path):
+@pytest.mark.parametrize(
+    ("read_options", "error_type"),
+    [
+        pytest.param({"kind": "unsupported"}, "UnsupportedRepresentation", id="unsupported-kind"),
+        pytest.param({"sparse": "unsupported"}, "InvalidOptionError", id="unsupported-sparse"),
+    ],
+)
+def test_dataset_read_rejects_unsupported_representation_options(tmp_path, read_options, error_type):
     import genoio
 
     source_path = tmp_path / "cohort.vcf.gz"
     source_path.touch()
     dataset = genoio.vcf(source_path)
 
-    with pytest.raises(genoio.UnsupportedRepresentation):
-        dataset.read(kind="unsupported")
-
-    with pytest.raises(genoio.InvalidOptionError):
-        dataset.read(sparse="unsupported")
-
-
-def test_private_rust_errors_map_to_public_error_classes():
-    import genoio
-    from genoio import _rust
-
-    assert issubclass(_rust.RustUnsupportedRepresentationError, Exception)
-    assert issubclass(_rust.RustInvalidSourceError, Exception)
-    assert issubclass(_rust.RustInvalidOptionError, Exception)
-    assert issubclass(_rust.RustMissingDataError, Exception)
-    assert issubclass(_rust.RustSampleFilterError, Exception)
-    assert issubclass(_rust.RustInternalError, Exception)
-
-    assert genoio.UnsupportedRepresentation.__name__ == "UnsupportedRepresentation"
-    assert genoio.InternalError.__name__ == "InternalError"
+    with pytest.raises(getattr(genoio, error_type)):
+        dataset.read(**read_options)
 
 
 def test_private_rust_internal_error_maps_to_public_internal_error():

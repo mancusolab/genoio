@@ -6,8 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy import sparse as scipy_sparse
-from test_dense_read import (
+from fixture_writers import (
     write_bgen_dosage,
     write_ld_phased_dosage_plink2,
     write_ld_phased_hardcall_plink2,
@@ -15,6 +14,7 @@ from test_dense_read import (
     write_phased_hardcall_plink2,
     write_sample_filtered_unphased_hardcall_plink2,
 )
+from scipy import sparse as scipy_sparse
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 

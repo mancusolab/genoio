@@ -3,7 +3,7 @@
 import numpy as np
 import polars as pl
 import pytest
-from test_cross_format_parity import EXPECTED_SAMPLES, write_canonical_plink2
+from fixture_writers import EXPECTED_SAMPLES, write_canonical_plink2
 
 
 def aligned_design(samples: pl.DataFrame, phenotypes: pl.DataFrame, covariates: pl.DataFrame) -> pl.DataFrame:

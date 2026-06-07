@@ -6,6 +6,12 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 import pytest
+from fixture_writers import (
+    _bgen_sample_identifier_block,
+    write_bgen_dosage,
+    write_fixed_width_plink2,
+    write_fixed_width_plink2_dosage,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
@@ -83,53 +89,6 @@ def write_ds_vcf(tmp_path: Path) -> Path:
     return path
 
 
-def write_bgen_dosage(
-    tmp_path: Path,
-    *,
-    missing: bool = False,
-    phased: bool = False,
-    sample_ids: list[str] | None = None,
-    variant_calls: list[list[tuple[int, int] | None]] | None = None,
-    variants: list[tuple[str, str, str, int, list[str]]] | None = None,
-) -> Path:
-    path = tmp_path / "dosage.bgen"
-    contents = bytearray()
-    flags = (2 << 2) | (1 << 31)
-    sample_ids = ["sample_1", "sample_2"] if sample_ids is None else sample_ids
-    variants = (
-        [
-            ("var1", "rs1", "1", 10, ["A", "G"]),
-            ("var2", "rs2", "2", 20, ["C", "T"]),
-        ]
-        if variants is None
-        else variants
-    )
-    if variant_calls is None:
-        variant_calls = [
-            [(204, 26), None if missing else (51, 128)],
-            [(0, 255), (102, 102)],
-        ]
-    if len(variant_calls) != len(variants):
-        raise ValueError("variant_calls and variants must have matching lengths")
-
-    contents.extend((20).to_bytes(4, "little"))
-    contents.extend((20).to_bytes(4, "little"))
-    contents.extend(len(variants).to_bytes(4, "little"))
-    contents.extend(len(sample_ids).to_bytes(4, "little"))
-    contents.extend(b"bgen")
-    contents.extend(flags.to_bytes(4, "little"))
-    contents.extend(_bgen_sample_identifier_block(sample_ids))
-    variant_offset = len(contents) - 4
-    contents[0:4] = variant_offset.to_bytes(4, "little")
-
-    for variant, calls in zip(variants, variant_calls, strict=True):
-        contents.extend(_bgen_variant_identifying_data(*variant))
-        contents.extend(_bgen_dosage_probability_block(8, calls, phased=phased))
-
-    path.write_bytes(contents)
-    return path
-
-
 def write_wrong_magic_bgen(tmp_path: Path) -> Path:
     path = write_bgen_dosage(tmp_path)
     contents = bytearray(path.read_bytes())
@@ -157,83 +116,6 @@ def write_truncated_variant_bgen(tmp_path: Path) -> Path:
     return path
 
 
-def _bgen_sample_identifier_block(sample_ids: list[str]) -> bytes:
-    contents = bytearray()
-    block_len = 8 + sum(2 + len(sample_id.encode()) for sample_id in sample_ids)
-    contents.extend(block_len.to_bytes(4, "little"))
-    contents.extend(len(sample_ids).to_bytes(4, "little"))
-    for sample_id in sample_ids:
-        encoded = sample_id.encode()
-        contents.extend(len(encoded).to_bytes(2, "little"))
-        contents.extend(encoded)
-    return bytes(contents)
-
-
-def _bgen_variant_identifying_data(
-    variant_id: str,
-    rsid: str,
-    chrom: str,
-    pos: int,
-    alleles: list[str],
-) -> bytes:
-    contents = bytearray()
-    for value in (variant_id, rsid, chrom):
-        encoded = value.encode()
-        contents.extend(len(encoded).to_bytes(2, "little"))
-        contents.extend(encoded)
-    contents.extend(pos.to_bytes(4, "little"))
-    contents.extend(len(alleles).to_bytes(2, "little"))
-    for allele in alleles:
-        encoded = allele.encode()
-        contents.extend(len(encoded).to_bytes(4, "little"))
-        contents.extend(encoded)
-    return bytes(contents)
-
-
-def _bgen_dosage_probability_block(
-    bit_depth: int,
-    calls: list[tuple[int, int] | None],
-    *,
-    phased: bool = False,
-) -> bytes:
-    payload = bytearray()
-    payload.extend(len(calls).to_bytes(4, "little"))
-    payload.extend((2).to_bytes(2, "little"))
-    payload.extend((2).to_bytes(1, "little"))
-    payload.extend((2).to_bytes(1, "little"))
-    payload.extend((2 if call is not None else 0b1000_0010) for call in calls)
-    payload.extend((1 if phased else 0).to_bytes(1, "little"))
-    payload.extend(bit_depth.to_bytes(1, "little"))
-    _append_bgen_packed_probabilities(payload, bit_depth, calls)
-
-    contents = bytearray()
-    contents.extend(len(payload).to_bytes(4, "little"))
-    contents.extend(payload)
-    return bytes(contents)
-
-
-def _append_bgen_packed_probabilities(
-    output: bytearray,
-    bit_depth: int,
-    calls: list[tuple[int, int] | None],
-) -> None:
-    current_byte = 0
-    bits_in_current_byte = 0
-    for call in calls:
-        if call is None:
-            continue
-        for value in call:
-            for bit_index in range(bit_depth):
-                current_byte |= ((value >> bit_index) & 1) << bits_in_current_byte
-                bits_in_current_byte += 1
-                if bits_in_current_byte == 8:
-                    output.append(current_byte)
-                    current_byte = 0
-                    bits_in_current_byte = 0
-    if bits_in_current_byte:
-        output.append(current_byte)
-
-
 def write_gt_only_vcf(tmp_path: Path) -> Path:
     path = tmp_path / "gt_only.vcf"
     path.write_text(
@@ -246,265 +128,6 @@ def write_gt_only_vcf(tmp_path: Path) -> Path:
 """
     )
     return path
-
-
-def write_fixed_width_plink2(tmp_path: Path) -> Path:
-    prefix = tmp_path / "tiny"
-    prefix.with_suffix(".pgen").write_bytes(
-        bytes(
-            [
-                0x6C,
-                0x1B,
-                0x02,
-                0x03,
-                0x00,
-                0x00,
-                0x00,
-                0x03,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x2C,
-                0x11,
-                0x06,
-            ]
-        )
-    )
-    prefix.with_suffix(".pvar").write_text(
-        """\
-#CHROM POS ID REF ALT QUAL
-1 10 rs1 A G 30
-1 20 rs2 C T 40
-2 30 rs3 G A 50
-"""
-    )
-    prefix.with_suffix(".psam").write_text(
-        """\
-#FID IID PAT MAT SEX PHENO
-F1 S1 0 0 1 -9
-F1 S2 S1 0 2 1.5
-F2 S3 0 0 0 2.0
-"""
-    )
-    return prefix
-
-
-def write_fixed_width_plink2_dosage(tmp_path: Path) -> Path:
-    prefix = tmp_path / "dosage"
-
-    def scaled(value: float) -> bytes:
-        return round(value / 2.0 * 32768.0).to_bytes(2, "little")
-
-    variant_1_hardcalls = bytes([0x24])
-    variant_2_hardcalls = bytes([0x0C])
-    prefix.with_suffix(".pgen").write_bytes(
-        bytes([0x6C, 0x1B, 0x03])
-        + (2).to_bytes(4, "little")
-        + (3).to_bytes(4, "little")
-        + bytes([0])
-        + variant_1_hardcalls
-        + scaled(0.2)
-        + scaled(1.4)
-        + scaled(1.8)
-        + variant_2_hardcalls
-        + scaled(0.0)
-        + (65535).to_bytes(2, "little")
-        + scaled(0.7)
-    )
-    prefix.with_suffix(".pvar").write_text(
-        """\
-#CHROM POS ID REF ALT QUAL
-1 10 rs1 A G 30
-1 20 rs2 C T 40
-"""
-    )
-    prefix.with_suffix(".psam").write_text(
-        """\
-#FID IID PAT MAT SEX PHENO
-F1 S1 0 0 1 -9
-F1 S2 S1 0 2 1.5
-F2 S3 0 0 0 2.0
-"""
-    )
-    return prefix
-
-
-def write_fixed_width_phased_dosage_plink2(tmp_path: Path) -> Path:
-    prefix = tmp_path / "fixed_width_phased_dosage"
-    record_1 = (
-        bytes([0x25])
-        + _plink2_scaled_dosage(1.0)
-        + _plink2_scaled_dosage(0.5)
-        + _plink2_scaled_dosage(2.0)
-        + _plink2_scaled_phase_delta(0.25, 0.75)
-        + _plink2_scaled_phase_delta(0.0, 0.5)
-        + _plink2_scaled_phase_delta(1.0, 1.0)
-    )
-    record_2 = (
-        bytes([0x00])
-        + _plink2_scaled_dosage(0.0)
-        + _plink2_scaled_dosage(0.2)
-        + _plink2_scaled_dosage(0.4)
-        + _plink2_scaled_phase_delta(0.0, 0.0)
-        + _plink2_scaled_phase_delta(0.1, 0.1)
-        + _plink2_scaled_phase_delta(0.2, 0.2)
-    )
-    prefix.with_suffix(".pgen").write_bytes(
-        bytes([0x6C, 0x1B, 0x04])
-        + (2).to_bytes(4, "little")
-        + (3).to_bytes(4, "little")
-        + bytes([0])
-        + record_1
-        + record_2
-    )
-    _write_plink2_pvar(prefix)
-    _write_plink2_psam(prefix)
-    return prefix
-
-
-def write_phased_hardcall_plink2(tmp_path: Path, *, unphased_second_variant: bool = False) -> Path:
-    prefix = tmp_path / "phased_hardcall"
-    record_1 = bytes([0x21, 0x00])
-    record_2 = bytes([0x35, 0x02])
-    record_types = [0x10, 0x00 if unphased_second_variant else 0x10]
-    records = [record_1, record_2[:-1] if unphased_second_variant else record_2]
-    _write_variable_width_plink2(prefix, record_types, records, n_samples=3)
-    _write_plink2_pvar(prefix)
-    _write_plink2_psam(prefix)
-    return prefix
-
-
-def write_phased_dosage_plink2(tmp_path: Path, *, unphased_second_variant: bool = False) -> Path:
-    prefix = tmp_path / "phased_dosage"
-    record_1 = (
-        bytes([0x25])
-        + _plink2_scaled_dosage(1.0)
-        + _plink2_scaled_dosage(0.5)
-        + _plink2_scaled_dosage(2.0)
-        + _plink2_scaled_phase_delta(0.25, 0.75)
-        + _plink2_scaled_phase_delta(0.0, 0.5)
-        + _plink2_scaled_phase_delta(1.0, 1.0)
-    )
-    record_2 = (
-        bytes([0x00])
-        + _plink2_scaled_dosage(0.0)
-        + _plink2_scaled_dosage(0.2)
-        + _plink2_scaled_dosage(0.4)
-        + _plink2_scaled_phase_delta(0.0, 0.0)
-        + _plink2_scaled_phase_delta(0.1, 0.1)
-        + _plink2_scaled_phase_delta(0.2, 0.2)
-    )
-    if unphased_second_variant:
-        record_2 = bytes([0x00]) + _plink2_scaled_dosage(0.0) + _plink2_scaled_dosage(0.2) + _plink2_scaled_dosage(0.4)
-    _write_variable_width_plink2(
-        prefix,
-        [0xC0, 0x40 if unphased_second_variant else 0xC0],
-        [record_1, record_2],
-        n_samples=3,
-    )
-    _write_plink2_pvar(prefix)
-    _write_plink2_psam(prefix)
-    return prefix
-
-
-def write_ld_phased_hardcall_plink2(tmp_path: Path) -> Path:
-    prefix = tmp_path / "ld_phased_hardcall"
-    record_1 = bytes([0x21, 0x00])
-    record_2 = bytes([0x02, 0x01, 0x0D, 0x01, 0x02])
-    _write_variable_width_plink2(prefix, [0x10, 0x12], [record_1, record_2], n_samples=3)
-    _write_plink2_pvar(prefix)
-    _write_plink2_psam(prefix)
-    return prefix
-
-
-def write_ld_phased_dosage_plink2(tmp_path: Path) -> Path:
-    prefix = tmp_path / "ld_phased_dosage"
-    record_1 = (
-        bytes([0x25])
-        + _plink2_scaled_dosage(1.0)
-        + _plink2_scaled_dosage(0.5)
-        + _plink2_scaled_dosage(2.0)
-        + _plink2_scaled_phase_delta(0.25, 0.75)
-        + _plink2_scaled_phase_delta(0.0, 0.5)
-        + _plink2_scaled_phase_delta(1.0, 1.0)
-    )
-    record_2 = (
-        bytes([0x03, 0x00, 0x00, 0x01, 0x01])
-        + _plink2_scaled_dosage(0.0)
-        + _plink2_scaled_dosage(0.2)
-        + _plink2_scaled_dosage(0.4)
-        + _plink2_scaled_phase_delta(0.0, 0.0)
-        + _plink2_scaled_phase_delta(0.1, 0.1)
-        + _plink2_scaled_phase_delta(0.2, 0.2)
-    )
-    _write_variable_width_plink2(prefix, [0xC0, 0xC2], [record_1, record_2], n_samples=3)
-    _write_plink2_pvar(prefix)
-    _write_plink2_psam(prefix)
-    return prefix
-
-
-def write_sample_filtered_unphased_hardcall_plink2(tmp_path: Path) -> Path:
-    prefix = tmp_path / "sample_filtered_unphased_hardcall"
-    _write_variable_width_plink2(prefix, [0x10], [bytes([0x15, 0x0D, 0x02])], n_samples=3)
-    prefix.with_suffix(".pvar").write_text(
-        """\
-#CHROM POS ID REF ALT QUAL
-1 10 rs1 A G 30
-"""
-    )
-    _write_plink2_psam(prefix)
-    return prefix
-
-
-def _write_variable_width_plink2(
-    prefix: Path,
-    record_types: list[int],
-    records: list[bytes],
-    *,
-    n_samples: int,
-) -> None:
-    header_len = 12 + 8 + len(record_types) + len(records)
-    payload = bytearray([0x6C, 0x1B, 0x10])
-    payload.extend(len(records).to_bytes(4, "little"))
-    payload.extend(n_samples.to_bytes(4, "little"))
-    payload.append(0x04)
-    payload.extend(header_len.to_bytes(8, "little"))
-    payload.extend(record_types)
-    payload.extend(len(record) for record in records)
-    for record in records:
-        payload.extend(record)
-    prefix.with_suffix(".pgen").write_bytes(bytes(payload))
-
-
-def _write_plink2_pvar(prefix: Path) -> None:
-    prefix.with_suffix(".pvar").write_text(
-        """\
-#CHROM POS ID REF ALT QUAL
-1 10 rs1 A G 30
-1 20 rs2 C T 40
-"""
-    )
-
-
-def _write_plink2_psam(prefix: Path) -> None:
-    prefix.with_suffix(".psam").write_text(
-        """\
-#FID IID PAT MAT SEX PHENO
-F1 S1 0 0 1 -9
-F1 S2 S1 0 2 1.5
-F2 S3 0 0 0 2.0
-"""
-    )
-
-
-def _plink2_scaled_dosage(value: float) -> bytes:
-    return round(value / 2.0 * 32768.0).to_bytes(2, "little")
-
-
-def _plink2_scaled_phase_delta(left: float, right: float) -> bytes:
-    raw = round((left - right) * 16384.0)
-    return raw.to_bytes(2, "little", signed=True)
 
 
 def test_dense_vcf_read_returns_sample_by_variant_numpy_array_and_metadata(tmp_path):
@@ -1045,6 +668,68 @@ def test_dense_plink2_metadata_required_paths_reject_malformed_companion_files(
         cast(Any, dataset.read)(**read_options)
 
 
+def test_dense_plink2_rejects_psam_header_without_iid(tmp_path):
+    import genoio
+
+    prefix = write_fixed_width_plink2(tmp_path)
+    prefix.with_suffix(".psam").write_text(
+        """\
+#FID SEX
+F1 1
+F2 2
+F3 0
+"""
+    )
+    dataset = genoio.pfile(prefix)
+
+    with pytest.raises(genoio.InvalidSourceError, match="psam header missing IID"):
+        dataset.read(return_samples=True)
+
+
+@pytest.mark.parametrize(
+    ("psam_text", "expected_iids"),
+    [
+        (
+            """\
+#IID
+S1
+S2
+S3
+""",
+            ["S1", "S2", "S3"],
+        ),
+        (
+            """\
+#FID IID PAT MAT SEX PHENO
+F1 S1 0 0 1 -9
+F1 S2 S1 0 2 1.5
+F2 S3 0 0 0 2.0
+""",
+            ["S1", "S2", "S3"],
+        ),
+        (
+            """\
+#SEX IID FID
+1 S1 F1
+2 S2 F1
+0 S3 F2
+""",
+            ["S1", "S2", "S3"],
+        ),
+    ],
+)
+def test_dense_plink2_accepts_supported_psam_iid_header_forms(tmp_path, psam_text, expected_iids):
+    import genoio
+
+    prefix = write_fixed_width_plink2(tmp_path)
+    prefix.with_suffix(".psam").write_text(psam_text)
+    dataset = genoio.pfile(prefix)
+
+    _, samples = dataset.read(return_samples=True)
+
+    assert samples["iid"].to_list() == expected_iids
+
+
 def test_missing_policies_nan_raise_and_impute(tmp_path):
     import genoio
 
@@ -1069,15 +754,27 @@ def test_missing_policy_impute_rejects_all_missing_variant(tmp_path):
         dataset.read(missing="impute")
 
 
-def test_missing_policy_rejects_integer_dtype_combinations(tmp_path):
+@pytest.mark.parametrize(
+    "missing",
+    [
+        pytest.param("nan", id="nan"),
+        pytest.param("impute", id="impute"),
+    ],
+)
+def test_missing_policy_rejects_integer_dtype_combinations(tmp_path, missing):
     import genoio
 
     dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
 
-    with pytest.raises(genoio.InvalidOptionError, match='missing="nan"'):
-        dataset.read(dtype=np.int16, missing="nan")
-    with pytest.raises(genoio.InvalidOptionError, match='missing="impute"'):
-        dataset.read(dtype=np.int16, missing="impute")
+    with pytest.raises(genoio.InvalidOptionError, match=f'missing="{missing}"'):
+        dataset.read(dtype=np.int16, missing=missing)
+
+
+def test_missing_policy_raise_accepts_integer_dtype_when_no_missing_calls_are_retained(tmp_path):
+    import genoio
+
+    dataset = genoio.vcf(write_biallelic_vcf(tmp_path))
+
     assert dataset.read(dtype=np.int16, missing="raise", samples=["S1"]).dtype == np.dtype("int16")
 
 

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from fixture_writers import write_bgen_dosage, write_fixed_width_plink2
 from scipy import sparse as scipy_sparse
-from test_dense_read import write_bgen_dosage, write_fixed_width_plink2
 
 
 def write_bad_variable_width_block_offset_plink2(tmp_path: Path) -> Path:
@@ -275,36 +275,17 @@ def test_plink2_blocks_return_samples_keeps_source_order_for_each_block(tmp_path
         assert samples["iid"].to_list() == ["S1", "S3"]
 
 
-def test_plink2_matrix_only_blocks_pass_private_matrix_only_option(tmp_path, monkeypatch):
-    import genoio
-
-    dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
-    calls = []
-
-    def fake_read_from_rust(self, kind, sparse, members, options):
-        assert kind == "geno"
-        assert sparse is False
-        calls.append(dict(options))
-        return empty_dense_rust_result()
-
-    monkeypatch.setattr(genoio.Dataset, "_read_from_rust", fake_read_from_rust)
-
-    list(dataset.iter_blocks(size=2))
-
-    assert calls
-    assert calls[0]["matrix_only"] is True
-
-
 @pytest.mark.parametrize(
-    "read_options",
+    ("read_options", "expected_matrix_only"),
     [
-        {"return_samples": True},
-        {"return_variants": True},
-        {"samples": ["S1"]},
-        {"variants": ["rs1"]},
+        pytest.param({}, True, id="matrix-only-fast-path"),
+        pytest.param({"return_samples": True}, False, id="sample-metadata"),
+        pytest.param({"return_variants": True}, False, id="variant-metadata"),
+        pytest.param({"samples": ["S1"]}, False, id="sample-filter"),
+        pytest.param({"variants": ["rs1"]}, False, id="variant-filter"),
     ],
 )
-def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(tmp_path, monkeypatch, read_options):
+def test_plink2_blocks_set_matrix_only_by_metadata_needs(tmp_path, monkeypatch, read_options, expected_matrix_only):
     import genoio
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
@@ -321,7 +302,7 @@ def test_plink2_blocks_disable_matrix_only_when_metadata_or_filters_are_needed(t
     list(dataset.iter_blocks(size=2, **read_options))
 
     assert calls
-    assert calls[0]["matrix_only"] is False
+    assert calls[0]["matrix_only"] is expected_matrix_only
 
 
 @pytest.mark.parametrize(
@@ -384,22 +365,20 @@ def test_plink2_metadata_blocks_validate_full_pvar_before_first_block_return(tmp
         next(dataset.iter_blocks(size=1, return_variants=True))
 
 
-def test_plink2_matrix_only_blocks_reject_bad_variable_width_block_offset(tmp_path):
+@pytest.mark.parametrize(
+    "read_options",
+    [
+        pytest.param({}, id="matrix-only"),
+        pytest.param({"return_variants": True}, id="metadata"),
+    ],
+)
+def test_plink2_blocks_reject_bad_variable_width_block_offset(tmp_path, read_options):
     import genoio
 
     dataset = genoio.pfile(write_bad_variable_width_block_offset_plink2(tmp_path))
 
     with pytest.raises(genoio.InvalidSourceError, match="block offset|header length"):
-        next(dataset.iter_blocks(size=1))
-
-
-def test_plink2_metadata_blocks_reject_bad_variable_width_block_offset(tmp_path):
-    import genoio
-
-    dataset = genoio.pfile(write_bad_variable_width_block_offset_plink2(tmp_path))
-
-    with pytest.raises(genoio.InvalidSourceError, match="block offset|header length"):
-        next(dataset.iter_blocks(size=1, return_variants=True))
+        next(dataset.iter_blocks(size=1, **read_options))
 
 
 def test_blocks_validate_size(tmp_path):

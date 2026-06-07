@@ -9,7 +9,7 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 import pytest
-from test_dense_read import write_bgen_dosage, write_fixed_width_plink2
+from fixture_writers import write_bgen_dosage, write_fixed_width_plink2
 
 
 def write_filter_vcf(tmp_path: Path) -> Path:
