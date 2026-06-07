@@ -93,22 +93,25 @@ def _validate_dosage_compatibility(
     dosage: str,
     sparse_format: str | None,
 ) -> None:
-    if dosage == "hardcall":
+    if dosage == "hardcall" or sparse_format is None:
         return
-    if sparse_format is not None:
-        if kind == "haplo":
-            raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED)
-        raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED)
+    if kind == "haplo":
+        raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED)
+    raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED)
 
 
 def _validate_sparse(sparse: object) -> str | None:
-    if sparse is False:
-        return None
-    if sparse is True:
-        return "csc"
-    if isinstance(sparse, str) and sparse in {"csc", "csr"}:
-        return sparse
-    raise InvalidOptionError(f"unsupported sparse option: {sparse!r}")
+    match sparse:
+        case False:
+            return None
+        case True:
+            return "csc"
+        case "csc":
+            return "csc"
+        case "csr":
+            return "csr"
+        case _:
+            raise InvalidOptionError(f"unsupported sparse option: {sparse!r}")
 
 
 def _variant_filter_ir(variants: Any) -> dict[str, Any] | None:
@@ -161,7 +164,7 @@ def _normalize_dtype(dtype: DTypeLike) -> np.dtype[Any]:
 
 
 def _validate_missing_dtype_compatibility(missing: str, dtype: np.dtype[Any]) -> None:
-    if isinstance(missing, str) and missing in {"nan", "impute"} and not np.issubdtype(dtype, np.floating):
+    if missing in {"nan", "impute"} and not np.issubdtype(dtype, np.floating):
         raise InvalidOptionError(f'missing="{missing}" requires a floating dtype')
 
 
