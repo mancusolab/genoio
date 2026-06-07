@@ -1,13 +1,20 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("genoio-{name}-{nanos}"));
+    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "genoio-{name}-{}-{nanos}-{counter}",
+        std::process::id()
+    ));
     fs::create_dir(&dir).expect("test temp dir should be created");
     dir
 }
@@ -84,6 +91,24 @@ fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
         vec!["S1", "S2", "S3"]
+    );
+}
+
+#[test]
+fn plink1_dense_matrix_only_omits_metadata() {
+    let dir = unique_dir("plink1-dense-matrix-only");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
+
+    let dense = genoio_io::read_plink1_dense_windowed(&bed, &bim, &fam, None, None, None, true)
+        .expect("plink1 matrix-only read should decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 3);
+    assert!(dense.samples.is_empty());
+    assert!(dense.variants.is_empty());
+    assert_eq!(
+        dense.values,
+        vec![0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0]
     );
 }
 

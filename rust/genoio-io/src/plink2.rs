@@ -15,8 +15,8 @@ use crate::hardcall::HardcallBatch as PackedVariantBatch;
 #[cfg(test)]
 use crate::hardcall::{PackedHardcalls as PackedGenotypes, HARDCALL_BATCH_SIZE};
 use crate::matrix::{
-    finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
-    VariantMajorDenseParts,
+    finish_dense_matrix, finish_variant_major_dense_matrix, shrink_sample_major_width,
+    DenseMatrixParts, VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -77,24 +77,6 @@ fn flush_packed_variant_batch(
     );
     *batch_start += batch.len();
     batch.clear();
-}
-
-fn shrink_sample_major_width<T: Copy>(
-    values: &mut Vec<T>,
-    n_samples: usize,
-    old_width: usize,
-    new_width: usize,
-) {
-    debug_assert!(new_width <= old_width);
-    if old_width == new_width {
-        return;
-    }
-    for sample_index in 1..n_samples {
-        let source_start = sample_index * old_width;
-        let target_start = sample_index * new_width;
-        values.copy_within(source_start..source_start + new_width, target_start);
-    }
-    values.truncate(n_samples * new_width);
 }
 
 fn can_skip_pvar_for_matrix_only_genotype_filter(

@@ -100,6 +100,24 @@ pub(crate) fn finish_variant_major_dense_matrix(
     )
 }
 
+pub(crate) fn shrink_sample_major_width<T: Copy>(
+    values: &mut Vec<T>,
+    n_samples: usize,
+    old_width: usize,
+    new_width: usize,
+) {
+    debug_assert!(new_width <= old_width);
+    if old_width == new_width {
+        return;
+    }
+    for sample_index in 1..n_samples {
+        let source_start = sample_index * old_width;
+        let target_start = sample_index * new_width;
+        values.copy_within(source_start..source_start + new_width, target_start);
+    }
+    values.truncate(n_samples * new_width);
+}
+
 fn validate_variant_major_len(
     field: &str,
     actual_len: usize,

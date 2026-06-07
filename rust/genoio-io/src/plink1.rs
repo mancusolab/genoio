@@ -6,19 +6,65 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order, DenseGenotypeMatrix, GenoioError,
-    MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantWindow,
+    reject_sparse_missing_values, select_samples_source_order, DenseDiagnostics,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantWindow,
 };
 
 use crate::error::Result;
 use crate::hardcall::{HardcallBatch, PackedHardcalls};
 use crate::matrix::{
-    empty_dense_matrix, empty_sparse_matrix, finish_variant_major_dense_matrix,
-    VariantMajorDenseParts,
+    empty_sparse_matrix, finish_dense_matrix, shrink_sample_major_width, DenseMatrixParts,
 };
 use crate::plink_common::{optional_plink_value, PLINK1_MISSING_VALUES};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+
+fn can_skip_bim_for_matrix_only_genotype_filter(
+    matrix_only: bool,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+) -> Option<(&VariantFilter, VariantWindow)> {
+    if !matrix_only {
+        return None;
+    }
+    let filter = variant_filter?;
+    let window = variant_window?;
+    (filter.requires_genotype_stats() && filter.is_genotype_stats_only())
+        .then_some((filter, window))
+}
+
+struct Plink1DenseContext<'a> {
+    bed: &'a Path,
+    bed_file: File,
+    n_source_samples: usize,
+    n_source_variants: usize,
+    bytes_per_variant: usize,
+    selection: DenseSampleSelection,
+    all_samples_selected: bool,
+}
+
+fn flush_packed_variant_batch(
+    batch: &mut HardcallBatch,
+    source_indices: &[usize],
+    batch_start: &mut usize,
+    n_variants: usize,
+    values: &mut [f32],
+    missing_mask: &mut [bool],
+) {
+    if batch.is_empty() {
+        return;
+    }
+    batch.expand_into_sample_major(
+        source_indices,
+        *batch_start,
+        n_variants,
+        values,
+        missing_mask,
+    );
+    *batch_start += batch.len();
+    batch.clear();
+}
 
 /// Read PLINK1 sample and variant metadata without decoding BED genotypes.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
@@ -44,7 +90,15 @@ pub fn read_plink1_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
-    read_plink1_dense_windowed(bed, bim, fam, requested_samples, variant_filter, None)
+    read_plink1_dense_windowed(
+        bed,
+        bim,
+        fam,
+        requested_samples,
+        variant_filter,
+        None,
+        false,
+    )
 }
 
 /// Read retained PLINK1 genotypes as a dense matrix over an optional block window.
@@ -55,44 +109,106 @@ pub fn read_plink1_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        return empty_plink1_dense(bed, bim, fam, requested_samples);
+        return empty_plink1_dense(bed, bim, fam, requested_samples, matrix_only);
     }
 
     if let (None, Some(window)) = (variant_filter, variant_window) {
-        return read_plink1_dense_source_window(bed, bim, fam, requested_samples, window);
+        return read_plink1_dense_source_window(
+            bed,
+            bim,
+            fam,
+            requested_samples,
+            window,
+            matrix_only,
+        );
     }
 
-    let mut bed_file = open_bed_file(bed)?;
+    let bed_file = open_bed_file(bed)?;
 
     let all_samples = parse_fam(fam)?;
-    let source_variants = parse_bim(bim)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
     let all_samples_selected = requested_samples.is_none();
-    let mut diagnostics = selection.diagnostics;
     let n_source_samples = all_samples.len();
-    let n_source_variants = source_variants.len();
     let bytes_per_variant = n_source_samples.div_ceil(4);
-    validate_bed_payload_len(
+    if let Some((filter, window)) =
+        can_skip_bim_for_matrix_only_genotype_filter(matrix_only, variant_filter, variant_window)
+    {
+        // Matrix-only genotype-stat filters need BED hard calls and FAM sample order,
+        // but not parsed BIM rows. Still require the companion file to exist.
+        fs::metadata(bim).map_err(|source| GenoioError::Io {
+            path: bim.to_path_buf(),
+            source,
+        })?;
+        let n_source_variants =
+            infer_bed_variant_count(bed, &bed_file, n_source_samples, bytes_per_variant)?;
+        let context = Plink1DenseContext {
+            bed,
+            bed_file,
+            n_source_samples,
+            n_source_variants,
+            bytes_per_variant,
+            selection,
+            all_samples_selected,
+        };
+        return read_plink1_dense_matrix_only_genotype_filter(context, filter, window);
+    }
+    let source_variants = parse_bim(bim)?;
+    let n_source_variants = source_variants.len();
+    let diagnostics = selection.diagnostics.clone();
+    let context = Plink1DenseContext {
         bed,
-        &bed_file,
+        bed_file,
         n_source_samples,
         n_source_variants,
         bytes_per_variant,
+        selection,
+        all_samples_selected,
+    };
+    read_plink1_dense_with_variants(
+        context,
+        source_variants,
+        variant_filter,
+        variant_window,
+        matrix_only,
+        diagnostics,
+    )
+}
+
+fn read_plink1_dense_with_variants(
+    mut context: Plink1DenseContext<'_>,
+    source_variants: Vec<VariantRecord>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
+    mut diagnostics: DenseDiagnostics,
+) -> Result<DenseGenotypeMatrix> {
+    validate_bed_payload_len(
+        context.bed,
+        &context.bed_file,
+        context.n_source_samples,
+        context.n_source_variants,
+        context.bytes_per_variant,
     )?;
 
-    let output_variant_capacity = variant_window.map_or(n_source_variants, |window| {
-        window.len.min(n_source_variants)
+    let output_variant_capacity = variant_window.map_or(context.n_source_variants, |window| {
+        window.len.min(context.n_source_variants)
     });
     let mut variants = Vec::with_capacity(output_variant_capacity);
-    let mut variant_major_values =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut variant_major_missing =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut decoder_state =
-        Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
+    let n_samples = context.selection.samples.len();
+    let mut values = vec![0.0; n_samples * output_variant_capacity];
+    let mut missing_mask = vec![false; n_samples * output_variant_capacity];
+    let mut batch = HardcallBatch::new(context.n_source_samples);
+    let mut batch_start = 0_usize;
+    let mut decoder_state = Plink1DecoderState::new(
+        context.n_source_samples,
+        context.bytes_per_variant,
+        context.selection.samples.len(),
+    );
     let mut retention = RetainedVariantState::new(variant_window);
+    let mut output_variant_count = 0_usize;
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
@@ -107,20 +223,19 @@ pub fn read_plink1_dense_windowed(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         read_plink1_variant_packed(
-            bed,
-            &mut bed_file,
+            context.bed,
+            &mut context.bed_file,
             variant_index,
-            bytes_per_variant,
-            n_source_samples,
+            context.bytes_per_variant,
+            context.n_source_samples,
             &mut decoder_state,
         )?;
 
         let stats = if needs_genotype_decision {
-            Some(
-                decoder_state
-                    .packed
-                    .stats_for_selection(&selection.source_indices, all_samples_selected)?,
-            )
+            Some(decoder_state.packed.stats_for_selection(
+                &context.selection.source_indices,
+                context.all_samples_selected,
+            )?)
         } else {
             None
         };
@@ -137,33 +252,54 @@ pub fn read_plink1_dense_windowed(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        decoder_state.packed.expand_selected(
-            &selection.source_indices,
-            &mut decoder_state.values,
-            &mut decoder_state.missing,
-        );
-        variants.push(variant);
-        variant_major_values.extend_from_slice(&decoder_state.values);
-        variant_major_missing.extend_from_slice(&decoder_state.missing);
+        if !matrix_only {
+            variants.push(variant);
+        }
+        batch.push(&decoder_state.packed);
+        output_variant_count += 1;
+        if batch.is_full() {
+            flush_packed_variant_batch(
+                &mut batch,
+                &context.selection.source_indices,
+                &mut batch_start,
+                output_variant_capacity,
+                &mut values,
+                &mut missing_mask,
+            );
+        }
         if retention.window_is_satisfied() {
             break;
         }
     }
+    flush_packed_variant_batch(
+        &mut batch,
+        &context.selection.source_indices,
+        &mut batch_start,
+        output_variant_capacity,
+        &mut values,
+        &mut missing_mask,
+    );
 
-    let n_samples = selection.samples.len();
-    let n_variants = variants.len();
+    let n_variants = output_variant_count;
+    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        n_variants,
+    );
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
+    finish_dense_matrix(
+        DenseMatrixParts {
             n_samples,
             n_variants,
-            variant_major_values,
-            variant_major_missing,
-            samples: selection.samples,
+            values,
+            missing_mask,
+            samples: context.selection.samples,
             variants,
             diagnostics,
         },
-        false,
+        matrix_only,
     )
 }
 
@@ -173,6 +309,7 @@ fn read_plink1_dense_source_window(
     fam: &Path,
     requested_samples: Option<&[String]>,
     window: VariantWindow,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let mut bed_file = open_bed_file(bed)?;
     let all_samples = parse_fam(fam)?;
@@ -185,7 +322,17 @@ fn read_plink1_dense_source_window(
     let n_variants = n_source_variants
         .saturating_sub(window.start)
         .min(window.len);
-    let variants = parse_bim_source_window(bim, window, n_variants)?;
+    let variants = if matrix_only {
+        // Source-window reads can infer the variant count from BED size, so matrix-only
+        // callers do not need BIM row parsing unless metadata is requested.
+        fs::metadata(bim).map_err(|source| GenoioError::Io {
+            path: bim.to_path_buf(),
+            source,
+        })?;
+        Vec::new()
+    } else {
+        parse_bim_source_window(bim, window, n_variants)?
+    };
 
     let n_samples = selection.samples.len();
     let mut values = vec![0.0; n_samples * n_variants];
@@ -205,36 +352,144 @@ fn read_plink1_dense_source_window(
         )?;
         batch.push(&decoder_state.packed);
         if batch.is_full() {
-            batch.expand_into_sample_major(
+            flush_packed_variant_batch(
+                &mut batch,
                 &selection.source_indices,
-                batch_start,
+                &mut batch_start,
                 n_variants,
                 &mut values,
                 &mut missing_mask,
             );
-            batch_start += batch.len();
-            batch.clear();
         }
         diagnostics.candidate_variants = variant_offset + 1;
     }
-    if !batch.is_empty() {
-        batch.expand_into_sample_major(
-            &selection.source_indices,
-            batch_start,
+    flush_packed_variant_batch(
+        &mut batch,
+        &selection.source_indices,
+        &mut batch_start,
+        n_variants,
+        &mut values,
+        &mut missing_mask,
+    );
+
+    diagnostics.retained_variants = n_variants;
+    finish_dense_matrix(
+        DenseMatrixParts {
+            n_samples,
             n_variants,
-            &mut values,
-            &mut missing_mask,
+            values,
+            missing_mask,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        matrix_only,
+    )
+}
+
+fn read_plink1_dense_matrix_only_genotype_filter(
+    mut context: Plink1DenseContext<'_>,
+    filter: &VariantFilter,
+    window: VariantWindow,
+) -> Result<DenseGenotypeMatrix> {
+    let output_variant_capacity = window.len.min(context.n_source_variants);
+    let n_samples = context.selection.samples.len();
+    if output_variant_capacity == 0 {
+        let mut diagnostics = context.selection.diagnostics;
+        diagnostics.retained_variants = 0;
+        return DenseGenotypeMatrix::new_matrix_only(
+            n_samples,
+            0,
+            Vec::new(),
+            Vec::new(),
+            diagnostics,
         );
     }
 
-    diagnostics.retained_variants = n_variants;
-    DenseGenotypeMatrix::new(
+    let mut values = vec![0.0; n_samples * output_variant_capacity];
+    let mut missing_mask = vec![false; n_samples * output_variant_capacity];
+    let mut decoder_state = Plink1DecoderState::new(
+        context.n_source_samples,
+        context.bytes_per_variant,
+        context.selection.samples.len(),
+    );
+    let mut batch = HardcallBatch::new(context.n_source_samples);
+    let mut batch_start = 0_usize;
+    let mut retention = RetainedVariantState::new(Some(window));
+    let mut diagnostics = context.selection.diagnostics;
+    let mut output_variant_count = 0_usize;
+
+    for _ in 0..context.n_source_variants {
+        diagnostics.candidate_variants += 1;
+        read_plink1_variant_packed_sequential(
+            context.bed,
+            &mut context.bed_file,
+            context.bytes_per_variant,
+            context.n_source_samples,
+            &mut decoder_state,
+        )?;
+
+        let stats = decoder_state.packed.stats_for_selection(
+            &context.selection.source_indices,
+            context.all_samples_selected,
+        )?;
+        match retention.genotype_decision(
+            filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
+                GenoioError::internal_contract(
+                    "genotype-stats-only fast path received metadata-dependent filter",
+                )
+            })?,
+            &mut diagnostics,
+        ) {
+            RetentionAction::Include => {
+                batch.push(&decoder_state.packed);
+                output_variant_count += 1;
+                if batch.is_full() {
+                    flush_packed_variant_batch(
+                        &mut batch,
+                        &context.selection.source_indices,
+                        &mut batch_start,
+                        output_variant_capacity,
+                        &mut values,
+                        &mut missing_mask,
+                    );
+                }
+            }
+            RetentionAction::Skip => {}
+            RetentionAction::Stop => break,
+        }
+        if retention.window_is_satisfied() {
+            break;
+        }
+    }
+
+    flush_packed_variant_batch(
+        &mut batch,
+        &context.selection.source_indices,
+        &mut batch_start,
+        output_variant_capacity,
+        &mut values,
+        &mut missing_mask,
+    );
+    shrink_sample_major_width(
+        &mut values,
         n_samples,
-        n_variants,
+        output_variant_capacity,
+        output_variant_count,
+    );
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        output_variant_count,
+    );
+    diagnostics.retained_variants = output_variant_count;
+
+    DenseGenotypeMatrix::new_matrix_only(
+        n_samples,
+        output_variant_count,
         values,
         missing_mask,
-        selection.samples,
-        variants,
         diagnostics,
     )
 }
@@ -369,6 +624,7 @@ fn empty_plink1_dense(
     bim: &Path,
     fam: &Path,
     requested_samples: Option<&[String]>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     fs::metadata(bed).map_err(|source| GenoioError::Io {
         path: bed.to_path_buf(),
@@ -380,7 +636,18 @@ fn empty_plink1_dense(
     })?;
     let all_samples = parse_fam(fam)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
-    empty_dense_matrix(selection.samples, selection.diagnostics)
+    finish_dense_matrix(
+        DenseMatrixParts {
+            n_samples: selection.samples.len(),
+            n_variants: 0,
+            values: Vec::new(),
+            missing_mask: Vec::new(),
+            samples: selection.samples,
+            variants: Vec::new(),
+            diagnostics: selection.diagnostics,
+        },
+        matrix_only,
+    )
 }
 
 fn empty_plink1_sparse(

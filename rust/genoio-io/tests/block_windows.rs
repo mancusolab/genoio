@@ -1,15 +1,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use genoio_core::VariantWindow;
+
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("genoio-{name}-{nanos}"));
+    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "genoio-{name}-{}-{nanos}-{counter}",
+        std::process::id()
+    ));
     fs::create_dir(&dir).expect("test temp dir should be created");
     dir
 }
@@ -281,6 +288,7 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
         None,
         Some(&filter),
         Some(VariantWindow { start: 1, len: 2 }),
+        false,
     )
     .expect("windowed plink should decode");
 
@@ -307,6 +315,7 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
         None,
         None,
         Some(VariantWindow { start: 0, len: 1 }),
+        false,
     )
     .expect("unfiltered plink1 source window should stop before later malformed metadata");
 
@@ -318,6 +327,34 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
             .collect::<Vec<_>>(),
         vec!["rs1"]
     );
+    assert_eq!(block.values, vec![2.0, 0.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn plink1_matrix_only_source_window_skips_bim_rows() {
+    let dir = unique_dir("plink1-matrix-only-source-window");
+    let (bed, bim, fam) = write_plink_source_window_stop_fixture(&dir);
+    write_text(
+        &bim,
+        "\
+malformed
+",
+    );
+
+    let block = genoio_io::read_plink1_dense_windowed(
+        &bed,
+        &bim,
+        &fam,
+        None,
+        None,
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only plink1 source window should not parse bim rows");
+
+    assert_eq!(block.n_variants, 1);
+    assert!(block.variants.is_empty());
     assert_eq!(block.values, vec![2.0, 0.0]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
@@ -340,11 +377,46 @@ fn plink1_dense_impossible_filter_returns_empty_without_parsing_bim_variants() {
         None,
         Some(&filter),
         Some(VariantWindow { start: 0, len: 1 }),
+        false,
     )
     .expect("impossible plink1 filter should not parse malformed bim rows");
 
     assert_eq!(block.n_variants, 0);
     assert_eq!(block.diagnostics.candidate_variants, 0);
+}
+
+#[test]
+fn plink1_matrix_only_genotype_filter_window_skips_bim_rows() {
+    let dir = unique_dir("plink1-genotype-filter-skips-bim");
+    let (bed, bim, fam) = write_plink_source_window_stop_fixture(&dir);
+    write_text(
+        &bim,
+        "\
+malformed
+",
+    );
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink1_dense_windowed(
+        &bed,
+        &bim,
+        &fam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only genotype filter should not parse bim rows");
+
+    assert_eq!(block.n_variants, 1);
+    assert!(block.variants.is_empty());
+    assert_eq!(block.values, vec![0.0, 2.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 3);
 }
 
 #[test]
