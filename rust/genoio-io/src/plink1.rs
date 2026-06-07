@@ -69,6 +69,7 @@ pub fn read_plink1_dense_windowed(
     let all_samples = parse_fam(fam)?;
     let source_variants = parse_bim(bim)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
+    let all_samples_selected = requested_samples.is_none();
     let mut diagnostics = selection.diagnostics;
     let n_source_samples = all_samples.len();
     let n_source_variants = source_variants.len();
@@ -118,7 +119,7 @@ pub fn read_plink1_dense_windowed(
             Some(
                 decoder_state
                     .packed
-                    .stats_for_selected(&selection.source_indices)?,
+                    .stats_for_selection(&selection.source_indices, all_samples_selected)?,
             )
         } else {
             None
@@ -267,6 +268,7 @@ pub fn read_plink1_sparse_windowed(
     let all_samples = parse_fam(fam)?;
     let source_variants = parse_bim(bim)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
+    let all_samples_selected = requested_samples.is_none();
     let mut diagnostics = selection.diagnostics;
     let n_source_samples = all_samples.len();
     let n_source_variants = source_variants.len();
@@ -316,7 +318,7 @@ pub fn read_plink1_sparse_windowed(
             Some(
                 decoder_state
                     .packed
-                    .stats_for_selected(&selection.source_indices)?,
+                    .stats_for_selection(&selection.source_indices, all_samples_selected)?,
             )
         } else {
             None

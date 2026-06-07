@@ -15,6 +15,7 @@ pub(crate) struct PackedHardcalls {
 impl PackedHardcalls {
     const SAMPLES_PER_WORD: usize = 32;
     const BITS_PER_SAMPLE: usize = 2;
+    const LOW_BITS: u64 = 0x5555_5555_5555_5555;
 
     pub(crate) fn resize(&mut self, sample_ct: usize) {
         self.sample_ct = sample_ct;
@@ -130,12 +131,52 @@ impl PackedHardcalls {
         variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
     }
 
+    pub(crate) fn stats_for_selection(
+        &self,
+        source_indices: &[usize],
+        all_samples_selected: bool,
+    ) -> Result<VariantStats> {
+        if all_samples_selected {
+            return self.stats_for_all();
+        }
+        self.stats_for_selected(source_indices)
+    }
+
+    fn stats_for_all(&self) -> Result<VariantStats> {
+        let mut hom_ref_count = 0_u64;
+        let mut het_count = 0_u64;
+        let mut hom_alt_count = 0_u64;
+        let mut missing_count = 0_u64;
+
+        for (word_index, word) in self.words.iter().copied().enumerate() {
+            let valid_lanes = self.valid_lane_mask(word_index);
+            let low_bits = word & valid_lanes;
+            let high_bits = (word >> 1) & valid_lanes;
+
+            hom_ref_count += ((!low_bits & !high_bits) & valid_lanes).count_ones() as u64;
+            het_count += (low_bits & !high_bits & valid_lanes).count_ones() as u64;
+            hom_alt_count += (!low_bits & high_bits & valid_lanes).count_ones() as u64;
+            missing_count += (low_bits & high_bits & valid_lanes).count_ones() as u64;
+        }
+
+        variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
+    }
+
+    fn valid_lane_mask(&self, word_index: usize) -> u64 {
+        let word_start = word_index * Self::SAMPLES_PER_WORD;
+        let remaining = self.sample_ct.saturating_sub(word_start);
+        match remaining.min(Self::SAMPLES_PER_WORD) {
+            0 => 0,
+            Self::SAMPLES_PER_WORD => Self::LOW_BITS,
+            used_slots => ((1_u64 << (used_slots * Self::BITS_PER_SAMPLE)) - 1) & Self::LOW_BITS,
+        }
+    }
+
     fn rotate_plink1_to_canonical(&mut self) {
-        const LOW_BITS: u64 = 0x5555_5555_5555_5555;
         const HIGH_BITS: u64 = 0xaaaa_aaaa_aaaa_aaaa;
         for word in &mut self.words {
-            let old_high_bits_in_low_position = (*word >> 1) & LOW_BITS;
-            let new_low_bits = (*word & LOW_BITS) ^ old_high_bits_in_low_position;
+            let old_high_bits_in_low_position = (*word >> 1) & Self::LOW_BITS;
+            let new_low_bits = (*word & Self::LOW_BITS) ^ old_high_bits_in_low_position;
             let new_high_bits = (!*word) & HIGH_BITS;
             *word = new_low_bits | new_high_bits;
         }
@@ -416,5 +457,27 @@ mod tests {
 
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn packed_hardcalls_stats_for_all_matches_expanded_stats_with_partial_word() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(35);
+        for sample_index in 0..packed.sample_ct() {
+            packed.set(sample_index, (sample_index % 4) as u8);
+        }
+
+        let source_indices = (0..packed.sample_ct()).collect::<Vec<_>>();
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        packed.expand_selected(&source_indices, &mut values, &mut missing);
+
+        let expected = genoio_core::compute_variant_stats(&values, &missing)
+            .expect("expanded stats should compute");
+        let actual = packed
+            .stats_for_selection(&source_indices, true)
+            .expect("packed stats should compute");
+
+        assert_eq!(actual, expected);
     }
 }

@@ -155,6 +155,7 @@ pub fn read_plink2_dense_windowed(
     let all_samples = parse_psam(psam)?;
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let all_samples_selected = requested_samples.is_none();
     let mut diagnostics = selection.diagnostics;
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         fs::metadata(pvar).map_err(|source| GenoioError::Io {
@@ -231,7 +232,7 @@ pub fn read_plink2_dense_windowed(
             Some(
                 decoder_state
                     .packed
-                    .stats_for_selected(&selection.source_indices)?,
+                    .stats_for_selection(&selection.source_indices, all_samples_selected)?,
             )
         } else {
             None
@@ -422,6 +423,7 @@ pub fn read_plink2_haplotypes_dense_windowed(
     let all_samples = parse_psam(psam)?;
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let all_samples_selected = requested_samples.is_none();
     let mut diagnostics = selection.diagnostics.clone();
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
@@ -484,7 +486,7 @@ pub fn read_plink2_haplotypes_dense_windowed(
         if needs_genotype_decision {
             let stats = decoder_state
                 .packed
-                .stats_for_selected(&selection.source_indices)?;
+                .stats_for_selection(&selection.source_indices, all_samples_selected)?;
             match retention.genotype_decision(
                 variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
                 &mut diagnostics,
@@ -780,6 +782,7 @@ pub fn read_plink2_sparse_windowed(
     let all_samples = parse_psam(psam)?;
     validate_plink2_sample_count(pgen, &header, all_samples.len())?;
     let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let all_samples_selected = requested_samples.is_none();
     let mut diagnostics = selection.diagnostics;
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         fs::metadata(pvar).map_err(|source| GenoioError::Io {
@@ -854,7 +857,7 @@ pub fn read_plink2_sparse_windowed(
             Some(
                 decoder_state
                     .packed
-                    .stats_for_selected(&selection.source_indices)?,
+                    .stats_for_selection(&selection.source_indices, all_samples_selected)?,
             )
         } else {
             None
