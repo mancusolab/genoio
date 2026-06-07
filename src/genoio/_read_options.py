@@ -15,11 +15,6 @@ from ._filters import FilterExpr, id_in
 _SUPPORTED_KINDS = {"geno", "haplo"}
 _SUPPORTED_DOSAGE_SOURCES = {"hardcall", "dosage"}
 _SUPPORTED_MISSING_POLICIES = {"nan", "raise", "impute"}
-_SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED = "sparse dosage-backed genotype reads are intentionally unsupported"
-_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
-    "sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
-    "use dense haplotype reads with sparse=False"
-)
 
 _READ_OPTION_DEFAULTS: dict[str, Any] = {
     "kind": "geno",
@@ -64,7 +59,6 @@ def _validate_read_options(options: _ReadOptions) -> _ValidatedReadOptions:
     normalized_missing = _normalize_missing(options.missing, sparse_format=sparse_format)
     variant_filter_ir = _variant_filter_ir(options.variants)
     normalized_dtype = _normalize_dtype(options.dtype)
-    _validate_dosage_compatibility(options.kind, options.dosage, sparse_format)
     _validate_sparse_missing_compatibility(sparse_format, normalized_missing)
     _validate_missing_dtype_compatibility(normalized_missing, normalized_dtype)
     _validate_sample_filter(options.samples)
@@ -86,18 +80,6 @@ def _validate_kind(kind: str) -> None:
 def _validate_dosage_source(dosage: str) -> None:
     if not isinstance(dosage, str) or dosage not in _SUPPORTED_DOSAGE_SOURCES:
         raise InvalidOptionError(f"unsupported dosage source: {dosage!r}")
-
-
-def _validate_dosage_compatibility(
-    kind: str,
-    dosage: str,
-    sparse_format: str | None,
-) -> None:
-    if dosage == "hardcall" or sparse_format is None:
-        return
-    if kind == "haplo":
-        raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED)
-    raise UnsupportedRepresentation(_SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED)
 
 
 def _validate_sparse(sparse: object) -> str | None:

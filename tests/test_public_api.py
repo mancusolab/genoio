@@ -380,6 +380,61 @@ def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_pat
     np.testing.assert_array_equal(observed, np.array([[0.0, 1.0]], dtype=np.float32))
 
 
+def test_dataset_read_validates_source_support_with_rust(monkeypatch, tmp_path):
+    import genoio
+    import genoio._api as api
+
+    calls = []
+
+    def fake_validate_read_support(format, kind, dosage, sparse):
+        calls.append((format, kind, dosage, sparse))
+
+    def fake_read_dense(format, members, options):
+        return {
+            "values": np.array([0.0], dtype=np.float32),
+            "shape": (1, 1),
+            "missing_mask": np.array([False], dtype=bool),
+        }
+
+    monkeypatch.setattr(api._rust, "validate_read_support", fake_validate_read_support)
+    monkeypatch.setattr(api._rust, "read_dense", fake_read_dense)
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    dataset.read()
+
+    assert calls == [("vcf", "geno", "hardcall", False)]
+
+
+def test_dataset_read_maps_rust_support_validation_errors(monkeypatch, tmp_path):
+    import genoio
+    import genoio._api as api
+    from genoio import _rust
+
+    def fake_validate_read_support(format, kind, dosage, sparse):
+        raise _rust.RustUnsupportedRepresentationError("unsupported by Rust policy")
+
+    monkeypatch.setattr(api._rust, "validate_read_support", fake_validate_read_support)
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="unsupported by Rust policy"):
+        dataset.read()
+
+
+def test_sparse_dosage_support_policy_comes_from_rust(monkeypatch, tmp_path):
+    import genoio
+    import genoio._api as api
+    from genoio import _rust
+
+    def fake_validate_read_support(format, kind, dosage, sparse):
+        raise _rust.RustUnsupportedRepresentationError("rust sparse dosage policy")
+
+    monkeypatch.setattr(api._rust, "validate_read_support", fake_validate_read_support)
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match="rust sparse dosage policy"):
+        dataset.read(dosage="dosage", sparse=True)
+
+
 def test_rust_dense_read_returns_numpy_buffers(tmp_path):
     import genoio
     import genoio._api as api

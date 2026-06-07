@@ -42,10 +42,6 @@ from ._read_options import (
 from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile, resolve_vcf
 
 _Region = TypeVar("_Region")
-_PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED = (
-    "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; "
-    "use dense haplotype reads with sparse=False"
-)
 _RUST_ERROR_MAP = (
     (_rust.RustInternalError, InternalError),
     (_rust.RustSampleFilterError, SampleFilterError),
@@ -714,65 +710,33 @@ class Dataset:
         assert self._metadata_cache is not None
         return self._metadata_cache
 
-    def _validate_source_supports_kind(self, kind: str) -> None:
-        if kind == "geno":
-            return
-        if self.source.format.value == "bgen":
-            raise _unsupported_haplotype_source(self.source.format.value)
-        capabilities = self._metadata()["capabilities"]
-        if not capabilities["supports_haplo"]:
-            raise _unsupported_haplotype_source(self.source.format.value)
-
     def _validate_source_supports_read(
         self,
         kind: str,
         dosage: str,
         sparse_format: str | None,
     ) -> None:
-        if kind == "haplo" and sparse_format is not None and self.source.format.value == "bgen":
-            raise UnsupportedRepresentation(
-                f"{self.source.format.value} sparse haplotype reads are not implemented; "
-                "use dense haplotype reads with sparse=False"
+        try:
+            _rust.validate_read_support(
+                self.source.format.value,
+                kind,
+                dosage,
+                sparse_format is not None,
             )
-        if self.source.format.value == "bgen":
-            # BGEN has no hardcall read path in this API. Layout 2 probability
-            # records are exposed as dosage-backed genotype or haplotype values.
-            if kind == "haplo":
-                if dosage == "dosage" and sparse_format is None:
-                    return
-                raise UnsupportedRepresentation(
-                    'bgen hardcall haplotype reads are not implemented; use dosage="dosage" for '
-                    "source-encoded phased haplotype dosage"
-                )
-            if dosage == "hardcall":
-                if sparse_format is not None:
-                    raise UnsupportedRepresentation(
-                        'bgen sparse genotype reads are not implemented; use sparse=False with dosage="dosage"'
-                    )
-                raise UnsupportedRepresentation('bgen hardcall genotype reads are not implemented; use dosage="dosage"')
-            return
-        if kind == "haplo" and dosage == "dosage" and self.source.format.value == "vcf":
-            raise UnsupportedRepresentation(
-                "VCF haplotype dosage reads are unsupported because VCF haplotype support is hardcall GT-based"
-            )
-        if kind == "haplo" and self.source.format.value == "plink2":
-            self._validate_source_supports_dosage(kind, dosage)
-            return
-        self._validate_source_supports_kind(kind)
-        self._validate_source_supports_dosage(kind, dosage)
+        except _RUST_PUBLIC_ERROR_TYPES as error:
+            raise _public_rust_error(error) from error
+        except ValueError as error:
+            raise _public_read_error(error) from error
 
-    def _validate_source_supports_dosage(self, kind: str, dosage: str) -> None:
-        if dosage == "hardcall":
-            return
-        if kind == "haplo":
-            if self.source.format.value in {"plink2", "bgen"}:
-                return
-            raise UnsupportedRepresentation(
-                f"{self.source.format.value} does not support dosage-backed haplotype reads"
-            )
-        if self.source.format.value in {"vcf", "plink2"}:
-            return
-        raise UnsupportedRepresentation(f"{self.source.format.value} does not support dosage-backed genotype reads")
+        # Rust owns format-level support policy. VCF/BCF haplotype hardcall
+        # reads also depend on source metadata, so Python keeps this preflight
+        # beside the metadata cache.
+        if kind == "haplo" and dosage == "hardcall" and self.source.format.value in {"vcf", "bcf"}:
+            capabilities = self._metadata()["capabilities"]
+            if not capabilities["supports_haplo"]:
+                raise UnsupportedRepresentation(
+                    'VCF source has no phased GT evidence; kind="haplo" requires phased retained variants'
+                )
 
 
 def vcf(path: str | Path) -> Dataset:
@@ -855,14 +819,6 @@ def _reject_options(options: Mapping[str, object]) -> None:
 def _validate_variant_stats(stats: object) -> None:
     if stats is not None:
         raise InvalidOptionError("variant stats are not implemented until a later phase")
-
-
-def _unsupported_haplotype_source(source_format: str) -> UnsupportedRepresentation:
-    if source_format == "vcf":
-        return UnsupportedRepresentation(
-            'VCF source has no phased GT evidence; kind="haplo" requires phased retained variants'
-        )
-    return UnsupportedRepresentation(f"{source_format} does not support haplo reads")
 
 
 def _public_rust_error(error: Exception) -> Exception:
