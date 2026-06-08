@@ -30,24 +30,19 @@ For complete documentation and examples, see the
 
 ## Quick Example
 
-This sketch/mockup shows how to perform a blockwise scan for GWAS using `genoio`.
-
 ```python
 import genoio
 
-# load PLINK2 genotype data
 ds = genoio.pfile("data/chr22_hg38")
-y = load_phenotypes()
+samples = ds.samples()
+y = load_phenotype_vector(samples["iid"])
+C = load_covariates(samples["iid"])
 
-# set up filters
-common = genoio.maf(min=0.01) & genoio.missing_rate(max=0.1)
-
-# iterate blockwise
-for X, variants in ds.iter_blocks(10_000, variants=common, return_variants=True):
-    association_scan(X, y, variants=variants)
+for X, variants in ds.iter_blocks(10_000, return_variants=True):
+    # X has shape (samples, variants_in_this_block).
+    # `y` and `C` must be aligned to the rows described by `samples`.
+    association_scan(X, y, C, variants=variants)
 ```
-
-Phenotypes and covariates should be aligned to `ds.samples()`.
 
 Use `read(...)` for one matrix, `iter_blocks(...)` for streaming scans, and
 `iter_regions(...)` for interval-based workflows.

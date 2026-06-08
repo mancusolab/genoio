@@ -20,7 +20,6 @@ nav = [
         { "cis-eQTL" = "examples/cis-eqtl.md" },
     ] },
     { "API" = [
-        { "Overview" = "api/index.md" },
         { "Reading" = "api/reading.md" },
         { "Filters" = "api/filters.md" },
         { "Errors" = "api/errors.md" },
@@ -92,7 +91,7 @@ heading_level = 3
 show_root_heading = true
 show_symbol_type_heading = true
 show_symbol_type_toc = true
-filters = ["!^_"]
+filters = ["!^_", "!^source$"]
 inherited_members = true
 members_order = "source"
 docstring_style = "google"

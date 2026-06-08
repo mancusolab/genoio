@@ -1,12 +1,10 @@
 # Filters
 
-Filters are composable predicates over variant metadata and, when requested,
-genotype-derived statistics. Metadata-only filters can usually be applied before
-genotype decoding, while MAF, MAC, missing-rate, and polymorphism filters require
-called genotype statistics for the selected samples. Use these constructors with
-[`Dataset.read`](reading.md#genoio.Dataset.read) or
-[`Dataset.iter_blocks`](reading.md#genoio.Dataset.iter_blocks) when you need the
-returned matrix and variant metadata to reflect the same retained variant set.
+Filters are composable variant predicates. Use them with
+[`Dataset.read`](reading.md#genoio.Dataset.read),
+[`Dataset.iter_blocks`](reading.md#genoio.Dataset.iter_blocks), or
+[`Dataset.iter_regions`](reading.md#genoio.Dataset.iter_regions) to keep matrix
+columns and returned variant metadata aligned.
 
 ::: genoio.FilterExpr
 
