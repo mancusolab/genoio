@@ -443,7 +443,7 @@ fn validate_read_support_impl(
         )),
         (SourceFormat::Bgen, MatrixKind::Genotype, DosageSource::Hardcall, false) => {
             Err(GenoioError::unsupported(
-                "bgen hardcall genotype reads are not implemented",
+                "bgen hardcall genotype reads are not implemented; use dosage=\"dosage\"",
             ))
         }
         (SourceFormat::Bgen, MatrixKind::Haplotype, DosageSource::Hardcall, false) => {
