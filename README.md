@@ -1,18 +1,26 @@
 # genoio
 
-`genoio` is a genotype matrix IO layer for statistical genetics software. It
-provides one Python API for VCF/BCF, BGEN, PLINK1, and PLINK2 inputs, with Rust
-readers for parsing, filtering, and matrix construction.
+`genoio` reads common statistical-genetics file formats into Python matrices.
+It exposes one API for VCF/BCF, PLINK1, PLINK2, and BGEN inputs, with Rust
+readers underneath for parsing, filtering, and matrix construction.
 
-`genoio` is designed for tool developers and researchers who need stable
-behavior across genotype formats:
+Use it when downstream code needs predictable matrix contracts across formats:
 
-- matrices are returned with samples on rows and variants on columns
+- samples are rows and variants are columns
 - sample metadata rows match matrix rows
 - variant metadata rows match matrix columns
-- block reads stream retained variant chunks with matching metadata
+- block and region reads return metadata aligned to each matrix chunk
+
+The full documentation is at
+[mancusolab.github.io/genoio](https://mancusolab.github.io/genoio).
 
 ## Installation
+
+Install the development version from GitHub:
+
+```bash
+pip install git+https://github.com/mancusolab/genoio.git
+```
 
 From a local checkout:
 
@@ -20,137 +28,94 @@ From a local checkout:
 pip install .
 ```
 
-For development, install `uv`, then use the Makefile to sync `.venv` from
-`uv.lock` and build the Rust extension:
+For development, build the Rust extension in the project environment:
 
 ```bash
-make build
+make build-dev
 ```
 
-Useful development targets:
-
-```bash
-make help
-make build-release
-make build-wheel
-make lock
-make verify
-```
-
-## Documentation
-
-Available at [https://mancusolab.github.io/genoio](https://mancusolab.github.io/genoio).
-
-## Quick Examples
-
-### GWAS
+## Quick Example
 
 ```python
-import polars as pl
 import genoio
 
 ds = genoio.pfile("data/chr22_hg38")
 samples = ds.samples()
 
-phenotypes = pl.read_csv("phenotypes.tsv", separator="\t")
-covariates = pl.read_csv("covariates.tsv", separator="\t")
+y = load_phenotype_vector(samples["iid"])
+C = load_covariates(samples["iid"])
 
-design = (
-    samples.select("iid")
-    .join(phenotypes.select("iid", "trait"), on="iid", how="left")
-    .join(covariates.select("iid", "age", "sex", "PC1", "PC2"), on="iid", how="left")
-)
+rare = genoio.maf(max=0.01) & genoio.missing_rate(max=0.1)
 
-y = design["trait"].to_numpy()
-C = design.select("age", "sex", "PC1", "PC2").to_numpy()
-
-variant_filter = genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic()
-
-for X, variants in ds.iter_blocks(10_000, variants=variant_filter, return_variants=True):
+for X, variants in ds.iter_blocks(10_000, variants=rare, return_variants=True):
+    # X has shape (samples, variants_in_this_block).
     association_scan(X, y, C, variants=variants)
 ```
 
-### cis-eQTL
+`read(...)` loads one matrix. `iter_blocks(...)` streams retained variant
+chunks. `iter_regions(...)` reads one result per genomic interval.
 
 ```python
-import polars as pl
-import genoio
-
-ds = genoio.bgen("data/chr22_hg38.bgen")
-samples = ds.samples()
-
-expression = pl.read_csv("expression.tsv", separator="\t")
-covariates = pl.read_csv("covariates.tsv", separator="\t")
-genes = pl.read_csv("cis_windows.tsv", separator="\t")
-
-design = (
-    samples.select("iid")
-    .join(expression, on="iid", how="left")
-    .join(covariates.select("iid", "age", "sex", "PC1", "PC2"), on="iid", how="left")
-)
-C = design.select("age", "sex", "PC1", "PC2").to_numpy()
-
-variant_filter = genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic()
-regions = [genoio.region(region) & variant_filter for region in genes["cis_region"]]
-
-for region_index, (region, (X_region, variants)) in enumerate(
-    ds.iter_regions(regions, dosage="dosage", return_variants=True)
-):
-    gene = genes.row(region_index, named=True)
-    y_region = design[gene["gene_id"]].to_numpy()
-    cis_scan(X_region, y_region, C, gene=gene["gene_id"], region=region, variants=variants)
+X, samples, variants = ds.read(return_samples=True, return_variants=True)
 ```
 
-Open supported genotype sources with the matching constructor:
+## Supported Inputs
+
+| Format | Constructor | Inputs | Notes |
+|---|---|---|---|
+| VCF/BCF | `genoio.vcf(...)` | `.vcf`, `.vcf.gz`, `.bcf` | Hardcall reads by default; dense `FORMAT/DS` dosage reads are supported. |
+| PLINK1 | `genoio.bfile(...)` | `.bed/.bim/.fam` | Variant-major BED hardcall reads. |
+| PLINK2 | `genoio.pfile(...)` | `.pgen/.pvar[.zst]/.psam` | Hardcalls, dense genotype dosage, and explicit phased haplotype records. |
+| BGEN | `genoio.bgen(...)` | `.bgen` plus optional `.sample` | Dense dosage-backed reads for supported BGEN v1.2+ Layout 2 records. |
+
+Dense reads return NumPy arrays. Sparse reads return SciPy sparse matrices.
+Metadata is returned as Polars DataFrames.
+
+For source-specific behavior and current limitations, read
+[Format support](docs/formats.md).
+
+## Filtering And Read Options
+
+Filters are serializable expressions:
 
 ```python
-vcf_ds = genoio.vcf("cohort.vcf.gz")
-bed_ds = genoio.bfile("cohort")       # .bed/.bim/.fam
-pgen_ds = genoio.pfile("cohort.pgen") # .pgen/.pvar[.zst]/.psam
-bgen_ds = genoio.bgen("cohort.bgen")  # .bgen plus optional .sample
-```
-
-Use `dosage="dosage"` for stored dosage values. BGEN v1.2+ Layout 2 biallelic
-diploid dosage records are returned as expected A1 allele counts. Genotype reads
-of phased BGEN records sum source haplotype probabilities to expected diploid A1
-dosage; `kind="haplo", dosage="dosage"` returns expected A1 dosage per
-haplotype row:
-
-```python
-X = bgen_ds.read(dosage="dosage")
-H = bgen_ds.read(kind="haplo", dosage="dosage")
-```
-
-PLINK2 haplotype reads support source-encoded explicit phased hardcalls and
-explicit phased full dosages. Explicit phased hardcall haplotypes can also be
-read sparsely when retained calls are non-missing:
-
-```python
-H_hardcall = pgen_ds.read(kind="haplo", dosage="hardcall")
-H_hardcall_sparse = pgen_ds.read(kind="haplo", dosage="hardcall", sparse=True)
-H_dosage = pgen_ds.read(kind="haplo", dosage="dosage")
-```
-
-For BGEN region reads, place a bgenix SQLite index beside the source as
-`cohort.bgen.bgi`. Concrete region filters use that index when present and
-fall back to a sequential BGEN scan when it is absent:
-
-```python
-X, variants = bgen_ds.read(
-    dosage="dosage",
-    variants=genoio.region("22:20000000-21000000"),
-    return_variants=True,
-)
-```
-
-Use serializable filters when reading whole matrices or blocks:
-
-```python
-rare = (
+variants = (
     genoio.chrom("22")
-    & genoio.maf(max=0.01)
-    & genoio.missing_rate(max=0.1)
+    & genoio.region("22:20000000-21000000")
+    & genoio.maf(max=0.05)
 )
-
-X, variants = pgen_ds.read(variants=rare, return_variants=True)
+X, variants = ds.read(variants=variants, return_variants=True)
 ```
+
+By default, genotype reads return hardcall A1 allele counts. Use
+`dosage="dosage"` for source dosage or probability values when the format
+supports them, `sparse=True` for SciPy CSC output, and `kind="haplo"` for
+haplotype rows.
+
+```python
+X = genoio.bgen("cohort.bgen").read(dosage="dosage")
+H = genoio.pfile("phased").read(kind="haplo", dosage="hardcall")
+```
+
+See [Filtering](docs/filtering.md) for filter expressions and pushdown rules,
+[Reading](docs/api/reading.md) for matrix options, and
+[Format support](docs/formats.md) for source-specific limitations.
+
+## Development
+
+Useful targets:
+
+```bash
+make help
+make build-dev
+make build-wheel
+make verify
+```
+
+The project uses Python for the public API and Rust for file parsing and matrix
+construction. Build configuration lives in `pyproject.toml`; Rust crates live
+under `rust/`.
+
+## License
+
+`genoio` is distributed under the MIT license. See [LICENSE](LICENSE).
