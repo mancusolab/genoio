@@ -5,6 +5,27 @@
     deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
 )]
 
+//! PyO3 adapter for the private `genoio._rust` extension module.
+//!
+//! This crate is the boundary between the public Python API and the Rust
+//! backend crates. Python owns user-facing ergonomics, overloads, docstrings,
+//! and public exceptions. This adapter validates Python-owned dictionaries,
+//! translates them into Rust-owned paths/options/filters, calls `genoio-io`,
+//! and converts validated core structs back into Python dictionaries.
+//!
+//! Long-running reader calls release the GIL only after argument extraction has
+//! produced Rust-owned values. No borrowed Python object crosses
+//! `Python::allow_threads`; result construction resumes under the GIL.
+//!
+//! Expected backend failures are represented as `genoio_core::GenoioError` and
+//! mapped to private Python exception classes. The pure-Python layer then maps
+//! those private classes to public `genoio` exceptions. Rust panics are treated
+//! as internal bugs and are contained at each `#[pyfunction]` entry point.
+//!
+//! NumPy arrays returned from this crate are backed by Python-owned byte
+//! buffers. Rust vectors are copied into `PyByteArray` before their memory is
+//! dropped, so Python arrays do not borrow Rust-owned memory.
+
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;

@@ -10,6 +10,11 @@
 //! This crate is intentionally free of file IO and Python bindings. Reader
 //! crates populate these validated containers, and the PyO3 layer converts
 //! them into NumPy, SciPy, and Polars objects.
+//!
+//! The public Rust items here are workspace contracts between backend crates.
+//! They are documented for maintainers, but they are not yet a standalone
+//! stable Rust API. Compatibility promises are made at the Python package
+//! boundary unless a future release explicitly publishes Rust API stability.
 
 pub mod capabilities;
 pub mod dense;
