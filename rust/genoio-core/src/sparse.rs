@@ -20,7 +20,7 @@ pub struct SparseGenotypeMatrix {
 
 impl SparseGenotypeMatrix {
     /// Build a sparse matrix after validating CSC and metadata contracts.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "constructor mirrors validated CSC matrix fields"
     )]
