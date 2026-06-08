@@ -9,7 +9,7 @@ Yes. Dense reads return NumPy arrays, so convert each block with
 import jax.numpy as jnp
 
 for X, variants in ds.iter_blocks(
-    block_size=4096,
+    size=4096,
     variants=genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic(),
     return_variants=True,
 ):
@@ -31,7 +31,7 @@ CPU arrays without copying.
 import torch
 
 for X, variants in ds.iter_blocks(
-    block_size=4096,
+    size=4096,
     variants=genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic(),
     return_variants=True,
 ):

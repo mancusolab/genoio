@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock requirements rust-audit rust-check rust-doc rust-fmt rust-test test ty venv verify
+.PHONY: build build-dev build-release build-wheel check clean docs fresh help lock requirements ruff-check ruff-fmt rust-audit rust-check rust-doc rust-fmt rust-test test ty venv verify
 
 VENV ?= .venv
 SYSTEM_PYTHON ?= python3
@@ -18,6 +18,7 @@ CARGO ?= cargo
 ZENSICAL ?= $(VENV_BIN)/zensical
 TY ?= $(VENV_BIN)/ty
 PYTEST ?= $(VENV_BIN)/pytest
+RUFF ?= $(VENV_BIN)/ruff
 MATURIN ?= env -u CONDA_PREFIX VIRTUAL_ENV=$(abspath $(VENV)) $(PYTHON) -m maturin
 DIST_DIR ?= dist
 CODESIGN_ALLOCATE ?= /usr/bin/codesign_allocate
@@ -52,6 +53,12 @@ test: build-dev  ## Run Python tests
 ty: build-dev  ## Run Python type checks
 	$(TY) check src tests scripts
 
+ruff-check: requirements  ## Run Python lint checks
+	$(RUFF) check src tests scripts
+
+ruff-fmt: requirements  ## Check Python formatting
+	$(RUFF) format --check src tests scripts
+
 docs: build-dev  ## Build documentation with strict checks
 	$(ZENSICAL) build --strict
 	rm -rf site
@@ -71,7 +78,7 @@ rust-test:  ## Run Rust tests
 rust-doc:  ## Build Rust docs with warnings as errors
 	$(RUST_ENV) RUSTDOCFLAGS=-Dwarnings $(CARGO) doc --manifest-path rust/Cargo.toml --workspace --no-deps
 
-check: rust-fmt rust-check rust-test ty test docs  ## Run the standard validation suite
+check: rust-fmt rust-check rust-test ruff-check ruff-fmt ty test docs  ## Run the standard validation suite
 
 verify: build-dev check rust-doc  ## Build the extension and run all validation checks
 
