@@ -1,22 +1,17 @@
 # genoio
 
-`genoio` reads common statistical-genetics file formats into Python matrices.
-It exposes one API for VCF/BCF, PLINK1, PLINK2, and BGEN inputs, with Rust
-readers underneath for parsing, filtering, and matrix construction.
+`genoio` reads VCF/BCF, PLINK1, PLINK2, and BGEN genotype sources into Python
+matrices. The public API is Python; the file readers are Rust. This pairing
+keeps the interface simple while moving parsing and matrix construction into
+compiled, efficient code.
 
-Use it when downstream code needs predictable matrix contracts across formats:
+It is built for downstream genetics tools that need stable matrix contracts:
+samples on rows, variants on columns, and metadata aligned to returned matrices,
+blocks, or regions.
 
-- samples are rows and variants are columns
-- sample metadata rows match matrix rows
-- variant metadata rows match matrix columns
-- block and region reads return metadata aligned to each matrix chunk
+Documentation: [mancusolab.github.io/genoio](https://mancusolab.github.io/genoio)
 
-The full documentation is at
-[mancusolab.github.io/genoio](https://mancusolab.github.io/genoio).
-
-## Installation
-
-Install the development version from GitHub:
+## Install
 
 ```bash
 pip install git+https://github.com/mancusolab/genoio.git
@@ -28,94 +23,44 @@ From a local checkout:
 pip install .
 ```
 
-For development, build the Rust extension in the project environment:
+## Documentation
 
-```bash
-make build-dev
-```
+For complete documentation and examples, see the
+[documentation site](https://mancusolab.github.io/genoio).
 
 ## Quick Example
+
+This sketch/mockup shows how to perform a blockwise scan for GWAS using `genoio`.
 
 ```python
 import genoio
 
+# load PLINK2 genotype data
 ds = genoio.pfile("data/chr22_hg38")
-samples = ds.samples()
+y = load_phenotypes()
 
-y = load_phenotype_vector(samples["iid"])
-C = load_covariates(samples["iid"])
+# set up filters
+common = genoio.maf(min=0.01) & genoio.missing_rate(max=0.1)
 
-rare = genoio.maf(max=0.01) & genoio.missing_rate(max=0.1)
-
-for X, variants in ds.iter_blocks(10_000, variants=rare, return_variants=True):
-    # X has shape (samples, variants_in_this_block).
-    association_scan(X, y, C, variants=variants)
+# iterate blockwise
+for X, variants in ds.iter_blocks(10_000, variants=common, return_variants=True):
+    association_scan(X, y, variants=variants)
 ```
 
-`read(...)` loads one matrix. `iter_blocks(...)` streams retained variant
-chunks. `iter_regions(...)` reads one result per genomic interval.
+Phenotypes and covariates should be aligned to `ds.samples()`.
 
-```python
-X, samples, variants = ds.read(return_samples=True, return_variants=True)
-```
-
-## Supported Inputs
-
-| Format | Constructor | Inputs | Notes |
-|---|---|---|---|
-| VCF/BCF | `genoio.vcf(...)` | `.vcf`, `.vcf.gz`, `.bcf` | Hardcall reads by default; dense `FORMAT/DS` dosage reads are supported. |
-| PLINK1 | `genoio.bfile(...)` | `.bed/.bim/.fam` | Variant-major BED hardcall reads. |
-| PLINK2 | `genoio.pfile(...)` | `.pgen/.pvar[.zst]/.psam` | Hardcalls, dense genotype dosage, and explicit phased haplotype records. |
-| BGEN | `genoio.bgen(...)` | `.bgen` plus optional `.sample` | Dense dosage-backed reads for supported BGEN v1.2+ Layout 2 records. |
-
-Dense reads return NumPy arrays. Sparse reads return SciPy sparse matrices.
-Metadata is returned as Polars DataFrames.
-
-For source-specific behavior and current limitations, read
-[Format support](docs/formats.md).
-
-## Filtering And Read Options
-
-Filters are serializable expressions:
-
-```python
-variants = (
-    genoio.chrom("22")
-    & genoio.region("22:20000000-21000000")
-    & genoio.maf(max=0.05)
-)
-X, variants = ds.read(variants=variants, return_variants=True)
-```
-
-By default, genotype reads return hardcall A1 allele counts. Use
-`dosage="dosage"` for source dosage or probability values when the format
-supports them, `sparse=True` for SciPy CSC output, and `kind="haplo"` for
-haplotype rows.
-
-```python
-X = genoio.bgen("cohort.bgen").read(dosage="dosage")
-H = genoio.pfile("phased").read(kind="haplo", dosage="hardcall")
-```
-
-See [Filtering](docs/filtering.md) for filter expressions and pushdown rules,
-[Reading](docs/api/reading.md) for matrix options, and
-[Format support](docs/formats.md) for source-specific limitations.
-
-## Development
-
-Useful targets:
-
-```bash
-make help
-make build-dev
-make build-wheel
-make verify
-```
-
-The project uses Python for the public API and Rust for file parsing and matrix
-construction. Build configuration lives in `pyproject.toml`; Rust crates live
-under `rust/`.
+Use `read(...)` for one matrix, `iter_blocks(...)` for streaming scans, and
+`iter_regions(...)` for interval-based workflows.
 
 ## License
 
-`genoio` is distributed under the MIT license. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
+
+---
+
+## Notes
+
+`genoio` was developed by members of the Mancuso Lab with assistance from Codex,
+following the practices described in the
+[scientific-software-playbook](https://github.com/mancusolab/scientific-software-playbook)
+and [coding-skills](https://github.com/mancusolab/coding-skills) repositories.
