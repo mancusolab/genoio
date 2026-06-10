@@ -728,16 +728,6 @@ class Dataset:
         except ValueError as error:
             raise _public_read_error(error) from error
 
-        # Rust owns format-level support policy. VCF/BCF haplotype hardcall
-        # reads also depend on source metadata, so Python keeps this preflight
-        # beside the metadata cache.
-        if kind == "haplo" and dosage == "hardcall" and self.source.format.value in {"vcf", "bcf"}:
-            capabilities = self._metadata()["capabilities"]
-            if not capabilities["supports_haplo"]:
-                raise UnsupportedRepresentation(
-                    'VCF source has no phased GT evidence; kind="haplo" requires phased retained variants'
-                )
-
 
 def vcf(path: str | Path) -> Dataset:
     r"""Resolve a VCF/BCF file and return a reusable dataset.

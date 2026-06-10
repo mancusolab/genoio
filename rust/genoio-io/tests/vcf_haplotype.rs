@@ -133,6 +133,43 @@ fn phased_vcf_haplotype_sparse_reconstructs_dense_values() {
 }
 
 #[test]
+fn threaded_haplotype_reads_match_unthreaded_reads() {
+    let dir = unique_dir("vcf-haplo-threaded");
+    let path = dir.join("phased.vcf");
+    fs::write(&path, phased_vcf()).expect("fixture should be written");
+
+    let dense = genoio_io::read_vcf_haplotypes_dense_windowed(&path, None, None, None)
+        .expect("unthreaded dense haplotypes should decode");
+    let threaded_dense = genoio_io::read_vcf_haplotypes_dense_windowed_with_threads(
+        &path,
+        None,
+        None,
+        None,
+        Some(2),
+    )
+    .expect("threaded dense haplotypes should decode");
+    assert_eq!(threaded_dense.values, dense.values);
+    assert_eq!(threaded_dense.n_samples, dense.n_samples);
+    assert_eq!(threaded_dense.n_variants, dense.n_variants);
+
+    let sparse = genoio_io::read_vcf_haplotypes_sparse_windowed(&path, None, None, None)
+        .expect("unthreaded sparse haplotypes should decode");
+    let threaded_sparse = genoio_io::read_vcf_haplotypes_sparse_windowed_with_threads(
+        &path,
+        None,
+        None,
+        None,
+        Some(2),
+    )
+    .expect("threaded sparse haplotypes should decode");
+    assert_eq!(threaded_sparse.data, sparse.data);
+    assert_eq!(threaded_sparse.indices, sparse.indices);
+    assert_eq!(threaded_sparse.indptr, sparse.indptr);
+    assert_eq!(threaded_sparse.n_rows, sparse.n_rows);
+    assert_eq!(threaded_sparse.n_cols, sparse.n_cols);
+}
+
+#[test]
 fn haplotype_decode_rejects_unphased_retained_genotype() {
     let dir = unique_dir("vcf-haplo-unphased");
     let path = dir.join("mixed.vcf");

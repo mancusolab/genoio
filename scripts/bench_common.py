@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from scipy import sparse as scipy_sparse
 
 
 def positive_int(value: str) -> int:
@@ -24,6 +25,14 @@ def nonnegative_float(value: str) -> float:
 
 
 def matrix_summary(matrix: Any) -> dict[str, Any]:
+    if scipy_sparse.issparse(matrix):
+        data = np.asarray(matrix.data)
+        return {
+            "shape": tuple(matrix.shape),
+            "dtype": str(data.dtype),
+            "sum": float(data.sum()) if data.size else 0.0,
+            "missing": int(np.isnan(data).sum()) if np.issubdtype(data.dtype, np.floating) else 0,
+        }
     array = np.asarray(matrix)
     return {
         "shape": tuple(array.shape),

@@ -23,6 +23,8 @@ enum Scenario {
     Dense,
     Dosage,
     Sparse,
+    HaploDense,
+    HaploSparse,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +99,38 @@ fn run() -> Result<(), String> {
                     args.threads,
                 )
                 .map_err(|error| format!("failed to read sparse VCF: {error}"))?;
+                ProfileSummary {
+                    rows: matrix.n_rows,
+                    cols: matrix.n_cols,
+                    checksum: matrix.data.iter().copied().map(f64::from).sum(),
+                    missing: 0,
+                }
+            }
+            Scenario::HaploDense => {
+                let matrix = genoio_io::read_vcf_haplotypes_dense_windowed_with_threads(
+                    &args.path,
+                    args.samples.as_deref(),
+                    filter_ref,
+                    window,
+                    args.threads,
+                )
+                .map_err(|error| format!("failed to read dense haplotype VCF: {error}"))?;
+                ProfileSummary {
+                    rows: matrix.n_samples,
+                    cols: matrix.n_variants,
+                    checksum: matrix.values.iter().copied().map(f64::from).sum(),
+                    missing: matrix.missing_mask.iter().filter(|value| **value).count(),
+                }
+            }
+            Scenario::HaploSparse => {
+                let matrix = genoio_io::read_vcf_haplotypes_sparse_windowed_with_threads(
+                    &args.path,
+                    args.samples.as_deref(),
+                    filter_ref,
+                    window,
+                    args.threads,
+                )
+                .map_err(|error| format!("failed to read sparse haplotype VCF: {error}"))?;
                 ProfileSummary {
                     rows: matrix.n_rows,
                     cols: matrix.n_cols,
@@ -257,8 +291,10 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario, String> {
         Some("dense") => Ok(Scenario::Dense),
         Some("dosage") => Ok(Scenario::Dosage),
         Some("sparse") => Ok(Scenario::Sparse),
+        Some("haplo-dense") => Ok(Scenario::HaploDense),
+        Some("haplo-sparse") => Ok(Scenario::HaploSparse),
         Some(other) => Err(format!(
-            "--scenario must be one of dense, dosage, sparse; got {other:?}"
+            "--scenario must be one of dense, dosage, sparse, haplo-dense, haplo-sparse; got {other:?}"
         )),
         None => Err(format!("--scenario requires a value\n\n{}", usage())),
     }
@@ -315,5 +351,5 @@ fn parse_filter_f64(name: &str, value: Option<&str>) -> Result<f64, String> {
 }
 
 fn usage() -> String {
-    "usage: vcf_profile <vcf-path> [--max-variants N] [--repeats N] [--threads N] [--region chrom:start-end] [--samples S1,S2] [--scenario dense|dosage|sparse] [--filter biallelic|snp|none|qual-min:N|maf-max:N]".to_string()
+    "usage: vcf_profile <vcf-path> [--max-variants N] [--repeats N] [--threads N] [--region chrom:start-end] [--samples S1,S2] [--scenario dense|dosage|sparse|haplo-dense|haplo-sparse] [--filter biallelic|snp|none|qual-min:N|maf-max:N]".to_string()
 }
