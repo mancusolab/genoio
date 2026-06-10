@@ -11,7 +11,14 @@ from typing import Any
 import numpy as np
 from bench_common import benchmark, compare_summaries, nonnegative_float, positive_int
 
-SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered", "indexed-region")
+SCENARIOS = (
+    "matrix-only",
+    "with-variants",
+    "sample-filtered",
+    "genotype-filtered",
+    "indexed-region",
+    "indexed-region-sample-filtered",
+)
 KINDS = ("geno", "haplo")
 _last_variant_metadata_length: int | None = None
 
@@ -150,13 +157,23 @@ def read_genoio_indexed_region(args: argparse.Namespace) -> Any:
             **_read_options(args.kind, args.sparse),
         )
     )
-    if variants.height:
-        chrom, coords = args.region.split(":", 1)
-        start, end = (int(value) for value in coords.split("-", 1))
-        observed_min = int(variants["pos"].min())
-        observed_max = int(variants["pos"].max())
-        if variants["chrom"].unique().to_list() != [chrom] or observed_min < start or observed_max > end:
-            raise RuntimeError(f"indexed region result escaped requested region: {args.region}")
+    _validate_region_variants(variants, args.region)
+    return matrix
+
+
+def read_genoio_indexed_region_sample_filtered(args: argparse.Namespace) -> Any:
+    import genoio
+
+    matrix, variants = next(
+        genoio.vcf(args.vcf).iter_blocks(
+            args.max_variants,
+            variants=genoio.region(args.region) & genoio_filter(args),
+            samples=_requested_sample_ids(args),
+            return_variants=True,
+            **_read_options(args.kind, args.sparse),
+        )
+    )
+    _validate_region_variants(variants, args.region)
     return matrix
 
 
@@ -193,6 +210,17 @@ def _read_vcf_sample_ids(path: Path) -> list[str]:
                     return sample_ids
                 break
     raise RuntimeError(f"{path} does not contain VCF sample IDs")
+
+
+def _validate_region_variants(variants: Any, region: str) -> None:
+    if not variants.height:
+        return
+    chrom, coords = region.split(":", 1)
+    start, end = (int(value) for value in coords.split("-", 1))
+    observed_min = int(variants["pos"].min())
+    observed_max = int(variants["pos"].max())
+    if variants["chrom"].unique().to_list() != [chrom] or observed_min < start or observed_max > end:
+        raise RuntimeError(f"indexed region result escaped requested region: {region}")
 
 
 def selected_scenarios(scenario: str) -> tuple[str, ...]:
@@ -238,6 +266,12 @@ def benchmark_genoio_scenario(scenario: str, args: argparse.Namespace) -> Any:
         return benchmark(
             _genoio_label(args.kind, scenario, args.sparse),
             lambda: read_genoio_indexed_region(args),
+            args.repeats,
+        )
+    if scenario == "indexed-region-sample-filtered":
+        return benchmark(
+            _genoio_label(args.kind, scenario, args.sparse),
+            lambda: read_genoio_indexed_region_sample_filtered(args),
             args.repeats,
         )
     raise ValueError(f"unknown scenario: {scenario}")

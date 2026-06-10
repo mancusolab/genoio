@@ -122,6 +122,7 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
     monkeypatch.setattr(benchmark_vcf, "read_genoio_sample_filtered", lambda args: _matrix(3.0))
     monkeypatch.setattr(benchmark_vcf, "read_genoio_genotype_filtered", lambda args: _matrix(4.0))
     monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region", lambda args: _matrix(5.0))
+    monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region_sample_filtered", lambda args: _matrix(6.0))
 
     benchmark_vcf.main()
 
@@ -132,6 +133,58 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
     assert "genoio_vcf_sample_filtered" in output
     assert "genoio_vcf_genotype_filtered" in output
     assert "genoio_vcf_indexed_region" in output
+    assert "genoio_vcf_indexed_region_sample_filtered" in output
+
+
+def test_haplotype_sparse_indexed_region_scenario_names_reader(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_vcf.py",
+            "--scenario",
+            "indexed-region",
+            "--backend",
+            "genoio",
+            "--kind",
+            "haplo",
+            "--sparse",
+            "--max-variants",
+            "3",
+            "--repeats",
+            "1",
+        ],
+    )
+    monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region", lambda args: _matrix(1.0))
+
+    benchmark_vcf.main()
+
+    output = capsys.readouterr().out
+    assert "genoio_vcf_haplo_sparse_indexed_region" in output
+
+
+def test_indexed_region_sample_filtered_scenario_names_reader(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_vcf.py",
+            "--scenario",
+            "indexed-region-sample-filtered",
+            "--backend",
+            "genoio",
+            "--max-variants",
+            "3",
+            "--repeats",
+            "1",
+        ],
+    )
+    monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region_sample_filtered", lambda args: _matrix(1.0))
+
+    benchmark_vcf.main()
+
+    output = capsys.readouterr().out
+    assert "genoio_vcf_indexed_region_sample_filtered" in output
 
 
 def test_matrix_only_scenario_compares_cyvcf2(monkeypatch, capsys) -> None:
