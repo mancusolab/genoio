@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from typing import Any, cast
 
@@ -15,6 +17,13 @@ benchmark_vcf = cast(Any, load_benchmark_script("benchmark_vcf"))
 
 def _matrix(value: float = 1.0) -> np.ndarray:
     return np.array([[value, value + 1.0]], dtype=np.float32)
+
+
+def _capture_stdout(func) -> str:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        func()
+    return output.getvalue()
 
 
 def test_parse_args_accepts_scenario_kind_sparse_and_samples(monkeypatch) -> None:
@@ -68,7 +77,7 @@ def test_read_vcf_sample_ids_supports_plain_vcf(tmp_path) -> None:
     assert benchmark_vcf._read_vcf_sample_ids(path) == ["S1", "S2"]
 
 
-def test_haplotype_kind_dispatches_genoio_without_cyvcf2_comparison(monkeypatch, capsys) -> None:
+def test_haplotype_kind_dispatches_genoio_without_cyvcf2_comparison(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -89,15 +98,13 @@ def test_haplotype_kind_dispatches_genoio_without_cyvcf2_comparison(monkeypatch,
     monkeypatch.setattr(benchmark_vcf, "read_genoio_matrix_only", lambda args: _matrix(1.0))
     monkeypatch.setattr(benchmark_vcf, "read_cyvcf2", lambda args: _matrix(1.0))
 
-    benchmark_vcf.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_vcf.main)
     assert "genoio_vcf_haplo_matrix_only" in output
     assert "skipped cyvcf2 comparison for haplo matrix-only" in output
     assert "cyvcf2_vcf" not in output
 
 
-def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
+def test_all_scenario_names_each_genoio_reader(monkeypatch) -> None:
     def read_with_variants(args) -> np.ndarray:
         benchmark_vcf._last_variant_metadata_length = 3
         return _matrix(2.0)
@@ -124,9 +131,7 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
     monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region", lambda args: _matrix(5.0))
     monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region_sample_filtered", lambda args: _matrix(6.0))
 
-    benchmark_vcf.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_vcf.main)
     assert "genoio_vcf_matrix_only" in output
     assert "genoio_vcf_with_variants" in output
     assert "variant_metadata length=3" in output
@@ -136,7 +141,7 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch, capsys) -> None:
     assert "genoio_vcf_indexed_region_sample_filtered" in output
 
 
-def test_haplotype_sparse_indexed_region_scenario_names_reader(monkeypatch, capsys) -> None:
+def test_haplotype_sparse_indexed_region_scenario_names_reader(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -157,13 +162,11 @@ def test_haplotype_sparse_indexed_region_scenario_names_reader(monkeypatch, caps
     )
     monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region", lambda args: _matrix(1.0))
 
-    benchmark_vcf.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_vcf.main)
     assert "genoio_vcf_haplo_sparse_indexed_region" in output
 
 
-def test_indexed_region_sample_filtered_scenario_names_reader(monkeypatch, capsys) -> None:
+def test_indexed_region_sample_filtered_scenario_names_reader(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -181,13 +184,11 @@ def test_indexed_region_sample_filtered_scenario_names_reader(monkeypatch, capsy
     )
     monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region_sample_filtered", lambda args: _matrix(1.0))
 
-    benchmark_vcf.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_vcf.main)
     assert "genoio_vcf_indexed_region_sample_filtered" in output
 
 
-def test_matrix_only_scenario_compares_cyvcf2(monkeypatch, capsys) -> None:
+def test_matrix_only_scenario_compares_cyvcf2(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -206,15 +207,13 @@ def test_matrix_only_scenario_compares_cyvcf2(monkeypatch, capsys) -> None:
     monkeypatch.setattr(benchmark_vcf, "read_genoio_matrix_only", lambda args: _matrix(1.0))
     monkeypatch.setattr(benchmark_vcf, "read_cyvcf2", lambda args: _matrix(1.0))
 
-    benchmark_vcf.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_vcf.main)
     assert "genoio_vcf_matrix_only" in output
     assert "cyvcf2_vcf" in output
     assert "comparison" in output
 
 
-def test_sparse_dispatches_genoio_without_cyvcf2_comparison(monkeypatch, capsys) -> None:
+def test_sparse_dispatches_genoio_without_cyvcf2_comparison(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -234,9 +233,7 @@ def test_sparse_dispatches_genoio_without_cyvcf2_comparison(monkeypatch, capsys)
     monkeypatch.setattr(benchmark_vcf, "read_genoio_matrix_only", lambda args: _matrix(1.0))
     monkeypatch.setattr(benchmark_vcf, "read_cyvcf2", lambda args: _matrix(1.0))
 
-    benchmark_vcf.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_vcf.main)
     assert "genoio_vcf_sparse_matrix_only" in output
     assert "skipped cyvcf2 comparison for sparse matrix-only" in output
     assert "cyvcf2_vcf" not in output
