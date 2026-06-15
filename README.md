@@ -9,8 +9,6 @@ It is built for downstream genetics tools that need stable matrix contracts:
 samples on rows, variants on columns, and metadata aligned to returned matrices,
 blocks, or regions.
 
-Documentation: [mancusolab.github.io/genoio](https://mancusolab.github.io/genoio)
-
 ## Install
 
 ```bash
