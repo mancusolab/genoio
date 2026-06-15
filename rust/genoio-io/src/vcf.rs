@@ -1,5 +1,6 @@
 // pattern: Imperative Shell
 
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
 use genoio_core::{
@@ -13,6 +14,7 @@ use rust_htslib::bcf::{
     record::{GenotypeAllele, Numeric},
     IndexedReader, Read, Reader,
 };
+use rust_htslib::htslib;
 
 use crate::error::Result;
 use crate::matrix::{
@@ -69,10 +71,25 @@ pub fn read_vcf_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    read_vcf_dense_windowed_with_threads(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        None,
+    )
+}
+
+/// Read retained VCF/BCF diploid genotypes with optional htslib BGZF threads.
+pub fn read_vcf_dense_windowed_with_threads(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        let reader = Reader::from_path(path).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf reader error: {error}"))
-        })?;
+        let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_dense(path, reader.header(), requested_samples);
     }
 
@@ -86,18 +103,19 @@ pub fn read_vcf_dense_windowed(
                 variant_filter,
                 variant_window,
                 &region,
+                threads,
             );
         }
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
-    let mut reader = Reader::from_path(path)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
+    let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_dense_records(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        original_source_indices.as_deref(),
         &mut reader,
     )
 }
@@ -109,10 +127,25 @@ pub fn read_vcf_dosage_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    read_vcf_dosage_dense_windowed_with_threads(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        None,
+    )
+}
+
+/// Read retained VCF/BCF FORMAT/DS values with optional htslib BGZF threads.
+pub fn read_vcf_dosage_dense_windowed_with_threads(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        let reader = Reader::from_path(path).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf reader error: {error}"))
-        })?;
+        let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_dense(path, reader.header(), requested_samples);
     }
 
@@ -124,18 +157,19 @@ pub fn read_vcf_dosage_dense_windowed(
                 variant_filter,
                 variant_window,
                 &region,
+                threads,
             );
         }
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
-    let mut reader = Reader::from_path(path)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
+    let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_dosage_dense_records(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        original_source_indices.as_deref(),
         &mut reader,
     )
 }
@@ -156,10 +190,25 @@ pub fn read_vcf_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    read_vcf_sparse_windowed_with_threads(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        None,
+    )
+}
+
+/// Read retained VCF/BCF diploid genotypes as sparse CSC with optional htslib BGZF threads.
+pub fn read_vcf_sparse_windowed_with_threads(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<SparseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        let reader = Reader::from_path(path).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf reader error: {error}"))
-        })?;
+        let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_sparse(path, reader.header(), requested_samples);
     }
 
@@ -173,18 +222,19 @@ pub fn read_vcf_sparse_windowed(
                 variant_filter,
                 variant_window,
                 &region,
+                threads,
             );
         }
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
-    let mut reader = Reader::from_path(path)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
+    let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_sparse_records(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        original_source_indices.as_deref(),
         &mut reader,
     )
 }
@@ -205,6 +255,28 @@ pub fn read_vcf_haplotypes_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<DenseGenotypeMatrix> {
+    read_vcf_haplotypes_dense_windowed_with_threads(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        None,
+    )
+}
+
+/// Read phased VCF/BCF diploid genotypes as dense haplotype rows with optional htslib BGZF threads.
+pub fn read_vcf_haplotypes_dense_windowed_with_threads(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<DenseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
+        return empty_vcf_haplotypes_dense(path, reader.header(), requested_samples);
+    }
+
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
             return read_indexed_vcf_haplotypes_dense(
@@ -213,18 +285,19 @@ pub fn read_vcf_haplotypes_dense_windowed(
                 variant_filter,
                 variant_window,
                 &region,
+                threads,
             );
         }
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
-    let mut reader = Reader::from_path(path)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
+    let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_haplotypes_dense_records(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        original_source_indices.as_deref(),
         &mut reader,
     )
 }
@@ -245,6 +318,28 @@ pub fn read_vcf_haplotypes_sparse_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
 ) -> Result<SparseGenotypeMatrix> {
+    read_vcf_haplotypes_sparse_windowed_with_threads(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        None,
+    )
+}
+
+/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows with optional htslib BGZF threads.
+pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<SparseGenotypeMatrix> {
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
+        return empty_vcf_haplotypes_sparse(path, reader.header(), requested_samples);
+    }
+
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
             return read_indexed_vcf_haplotypes_sparse(
@@ -253,20 +348,102 @@ pub fn read_vcf_haplotypes_sparse_windowed(
                 variant_filter,
                 variant_window,
                 &region,
+                threads,
             );
         }
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
-    let mut reader = Reader::from_path(path)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
+    let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_haplotypes_sparse_records(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        original_source_indices.as_deref(),
         &mut reader,
     )
+}
+
+fn open_vcf_reader(
+    path: &Path,
+    threads: Option<usize>,
+    requested_samples: Option<&[String]>,
+) -> Result<(Reader, Option<Vec<usize>>)> {
+    let mut reader = Reader::from_path(path)
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
+    set_vcf_reader_threads(path, &mut reader, threads, "vcf reader")?;
+    let original_source_indices = set_vcf_reader_samples(path, &mut reader, requested_samples)?;
+    Ok((reader, original_source_indices))
+}
+
+fn set_vcf_reader_samples(
+    path: &Path,
+    reader: &mut Reader,
+    requested_samples: Option<&[String]>,
+) -> Result<Option<Vec<usize>>> {
+    let Some(requested_samples) = requested_samples else {
+        return Ok(None);
+    };
+
+    let source_samples = sample_records_from_header(reader.header());
+    let selection = select_samples_source_order(&source_samples, Some(requested_samples), path)?;
+    if selection.samples.len() == source_samples.len() {
+        return Ok(None);
+    }
+    let sample_list = selection
+        .samples
+        .iter()
+        .map(|sample| sample.iid.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sample_list = CString::new(sample_list).map_err(|_| {
+        GenoioError::invalid_source(path, "vcf sample IDs must not contain NUL bytes")
+    })?;
+    let status =
+        unsafe { htslib::bcf_hdr_set_samples(reader.header().as_ptr(), sample_list.as_ptr(), 0) };
+    match status {
+        0 => Ok(Some(selection.source_indices)),
+        positive if positive > 0 => Err(GenoioError::invalid_source(
+            path,
+            format!(
+                "vcf sample subset rejected sample at list index {}",
+                positive - 1
+            ),
+        )),
+        _ => Err(GenoioError::invalid_source(
+            path,
+            "vcf sample subset setup error",
+        )),
+    }
+}
+
+fn open_indexed_vcf_reader(path: &Path, threads: Option<usize>) -> Result<IndexedReader> {
+    let mut reader = IndexedReader::from_path(path).map_err(|error| {
+        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
+    })?;
+    set_vcf_reader_threads(path, &mut reader, threads, "indexed vcf reader")?;
+    Ok(reader)
+}
+
+fn set_vcf_reader_threads<R: Read>(
+    path: &Path,
+    reader: &mut R,
+    threads: Option<usize>,
+    label: &str,
+) -> Result<()> {
+    let Some(threads) = threads else {
+        return Ok(());
+    };
+    if threads == 0 {
+        return Err(GenoioError::invalid_source(
+            path,
+            "vcf thread count must be greater than zero",
+        ));
+    }
+    reader.set_threads(threads).map_err(|error| {
+        GenoioError::invalid_source(path, format!("{label} thread setup error: {error}"))
+    })
 }
 
 fn read_indexed_vcf_dense(
@@ -275,10 +452,9 @@ fn read_indexed_vcf_dense(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
-    })?;
+    let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
@@ -299,6 +475,7 @@ fn read_indexed_vcf_dense(
         requested_samples,
         variant_filter,
         variant_window,
+        None,
         &mut reader,
     )
 }
@@ -309,10 +486,9 @@ fn read_indexed_vcf_dosage_dense(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
-    })?;
+    let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
@@ -333,6 +509,7 @@ fn read_indexed_vcf_dosage_dense(
         requested_samples,
         variant_filter,
         variant_window,
+        None,
         &mut reader,
     )
 }
@@ -343,10 +520,9 @@ fn read_indexed_vcf_sparse(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    threads: Option<usize>,
 ) -> Result<SparseGenotypeMatrix> {
-    let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
-    })?;
+    let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
@@ -367,6 +543,7 @@ fn read_indexed_vcf_sparse(
         requested_samples,
         variant_filter,
         variant_window,
+        None,
         &mut reader,
     )
 }
@@ -377,10 +554,9 @@ fn read_indexed_vcf_haplotypes_dense(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
-    })?;
+    let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
@@ -401,6 +577,7 @@ fn read_indexed_vcf_haplotypes_dense(
         requested_samples,
         variant_filter,
         variant_window,
+        None,
         &mut reader,
     )
 }
@@ -411,10 +588,9 @@ fn read_indexed_vcf_haplotypes_sparse(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    threads: Option<usize>,
 ) -> Result<SparseGenotypeMatrix> {
-    let mut reader = IndexedReader::from_path(path).map_err(|error| {
-        GenoioError::invalid_source(path, format!("indexed vcf reader error: {error}"))
-    })?;
+    let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
@@ -435,6 +611,7 @@ fn read_indexed_vcf_haplotypes_sparse(
         requested_samples,
         variant_filter,
         variant_window,
+        None,
         &mut reader,
     )
 }
@@ -444,11 +621,13 @@ fn read_vcf_dense_records<R: Read>(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    original_source_indices: Option<&[usize]>,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    apply_original_source_indices(&mut selection.samples, original_source_indices);
     let mut diagnostics = selection.diagnostics;
 
     let mut variants = Vec::new();
@@ -535,11 +714,13 @@ fn read_vcf_dosage_dense_records<R: Read>(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    original_source_indices: Option<&[usize]>,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    apply_original_source_indices(&mut selection.samples, original_source_indices);
     let mut diagnostics = selection.diagnostics;
 
     let mut variants = Vec::new();
@@ -606,11 +787,13 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    original_source_indices: Option<&[usize]>,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    apply_original_source_indices(&mut selection.samples, original_source_indices);
     let mut diagnostics = selection.diagnostics;
 
     let mut variants = Vec::new();
@@ -688,11 +871,13 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    original_source_indices: Option<&[usize]>,
     reader: &mut R,
 ) -> Result<SparseGenotypeMatrix> {
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    apply_original_source_indices(&mut selection.samples, original_source_indices);
     let mut diagnostics = selection.diagnostics;
 
     let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
@@ -774,11 +959,13 @@ fn read_vcf_sparse_records<R: Read>(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    original_source_indices: Option<&[usize]>,
     reader: &mut R,
 ) -> Result<SparseGenotypeMatrix> {
     let header = reader.header().clone();
     let all_samples = sample_records_from_header(&header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    apply_original_source_indices(&mut selection.samples, original_source_indices);
     let mut diagnostics = selection.diagnostics;
 
     let n_samples = selection.samples.len();
@@ -903,7 +1090,7 @@ fn empty_vcf_haplotypes_sparse(
 }
 
 fn validate_dense_biallelic_record(path: &Path, record: &rust_htslib::bcf::Record) -> Result<()> {
-    let allele_count = record.alleles().len();
+    let allele_count = record.allele_count();
     if allele_count == 2 {
         return Ok(());
     }
@@ -937,6 +1124,20 @@ fn sample_records_from_header(header: &rust_htslib::bcf::header::HeaderView) -> 
             haplotype_index: None,
         })
         .collect()
+}
+
+fn apply_original_source_indices(
+    samples: &mut [SampleRecord],
+    original_source_indices: Option<&[usize]>,
+) {
+    let Some(original_source_indices) = original_source_indices else {
+        return;
+    };
+
+    debug_assert_eq!(samples.len(), original_source_indices.len());
+    for (sample, source_index) in samples.iter_mut().zip(original_source_indices) {
+        sample.source_sample_index = Some(*source_index);
+    }
 }
 
 fn variant_record_from_record(
@@ -1212,7 +1413,7 @@ fn decode_phased_diploid_gt(
             )
         {
             return Err(GenoioError::unsupported(format!(
-                "vcf record {} contains an unphased GT separator in a retained haplotype variant",
+                "vcf haplotype read record {} contains an unphased GT separator in a retained haplotype variant",
                 String::from_utf8_lossy(&record.id())
             )));
         }
@@ -1245,9 +1446,10 @@ fn haplotype_sample_records(
 ) -> Vec<SampleRecord> {
     let mut haplotype_samples = Vec::with_capacity(samples.len() * 2);
     for (sample, source_index) in samples.iter().zip(source_indices) {
+        let original_source_index = sample.source_sample_index.unwrap_or(*source_index);
         for haplotype_index in 0..2 {
             let mut haplotype_sample = sample.clone();
-            haplotype_sample.source_sample_index = Some(*source_index);
+            haplotype_sample.source_sample_index = Some(original_source_index);
             haplotype_sample.haplotype_index = Some(haplotype_index);
             haplotype_samples.push(haplotype_sample);
         }

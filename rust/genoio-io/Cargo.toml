@@ -9,10 +9,10 @@ flate2 = "1"
 genoio-core = { path = "../genoio-core" }
 rust-htslib = { version = "1.0.0", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
 zstd = "0.13"
 
 [dev-dependencies]
-serde_json = "1"
 tempfile = "3"
 
 [lib]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +16,13 @@ benchmark_plink2 = cast(Any, load_benchmark_script("benchmark_plink2"))
 
 def _matrix(value: float = 1.0) -> np.ndarray:
     return np.array([[value, value + 1.0]], dtype=np.float32)
+
+
+def _capture_stdout(func) -> str:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        func()
+    return output.getvalue()
 
 
 def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch) -> None:
@@ -49,7 +58,7 @@ def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch)
     assert args.no_compare is True
 
 
-def test_haplotype_kinds_dispatch_genoio_and_skip_pgenlib(monkeypatch, capsys) -> None:
+def test_haplotype_kinds_dispatch_genoio_and_skip_pgenlib(monkeypatch) -> None:
     calls: list[str] = []
 
     def read_matrix(prefix, max_variants, kind) -> np.ndarray:
@@ -59,28 +68,29 @@ def test_haplotype_kinds_dispatch_genoio_and_skip_pgenlib(monkeypatch, capsys) -
     monkeypatch.setattr(benchmark_plink2, "read_genoio_matrix_only", read_matrix)
     monkeypatch.setattr(benchmark_plink2, "read_pgenlib", lambda args: _matrix(1.0))
 
-    for kind in ("haplo-hardcall", "haplo-dosage"):
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "benchmark_plink2.py",
-                "--scenario",
-                "matrix-only",
-                "--kind",
-                kind,
-                "--backend",
-                "both",
-                "--max-variants",
-                "3",
-                "--repeats",
-                "1",
-            ],
-        )
+    def run_benchmark_kinds() -> None:
+        for kind in ("haplo-hardcall", "haplo-dosage"):
+            monkeypatch.setattr(
+                sys,
+                "argv",
+                [
+                    "benchmark_plink2.py",
+                    "--scenario",
+                    "matrix-only",
+                    "--kind",
+                    kind,
+                    "--backend",
+                    "both",
+                    "--max-variants",
+                    "3",
+                    "--repeats",
+                    "1",
+                ],
+            )
 
-        benchmark_plink2.main()
+            benchmark_plink2.main()
 
-    output = capsys.readouterr().out
+    output = _capture_stdout(run_benchmark_kinds)
     assert calls == ["haplo-hardcall", "haplo-hardcall", "haplo-dosage", "haplo-dosage"]
     assert "genoio_plink2_haplo_hardcall_matrix_only" in output
     assert "genoio_plink2_haplo_dosage_matrix_only" in output
@@ -88,7 +98,7 @@ def test_haplotype_kinds_dispatch_genoio_and_skip_pgenlib(monkeypatch, capsys) -
     assert "pgenlib_pgenreader" not in output
 
 
-def test_all_scenario_names_each_genoio_reader_and_skips_pgenlib(monkeypatch, capsys) -> None:
+def test_all_scenario_names_each_genoio_reader_and_skips_pgenlib(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -118,9 +128,7 @@ def test_all_scenario_names_each_genoio_reader_and_skips_pgenlib(monkeypatch, ca
     )
     monkeypatch.setattr(benchmark_plink2, "read_pgenlib", lambda args: _matrix(1.0))
 
-    benchmark_plink2.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_plink2.main)
     assert "genoio_plink2_matrix_only" in output
     assert "pgenlib_pgenreader" in output
     assert "comparison" in output
@@ -131,7 +139,7 @@ def test_all_scenario_names_each_genoio_reader_and_skips_pgenlib(monkeypatch, ca
     assert output.count("skipped pgenlib comparison") == 3
 
 
-def test_matrix_only_scenario_includes_pgenlib_comparison(monkeypatch, capsys) -> None:
+def test_matrix_only_scenario_includes_pgenlib_comparison(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
@@ -150,9 +158,7 @@ def test_matrix_only_scenario_includes_pgenlib_comparison(monkeypatch, capsys) -
     monkeypatch.setattr(benchmark_plink2, "read_genoio_matrix_only", lambda prefix, max_variants, kind: _matrix(1.0))
     monkeypatch.setattr(benchmark_plink2, "read_pgenlib", lambda args: _matrix(1.0))
 
-    benchmark_plink2.main()
-
-    output = capsys.readouterr().out
+    output = _capture_stdout(benchmark_plink2.main)
     assert "genoio_plink2_matrix_only" in output
     assert "pgenlib_pgenreader" in output
     assert "  time median=" in output

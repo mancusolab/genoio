@@ -50,6 +50,47 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
 }
 
 #[test]
+fn vcf_dense_sample_subset_preserves_source_order() {
+    let dir = unique_dir("vcf-dense-sample-subset");
+    let path = dir.join("subset.vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/1\t0/0\t0/0
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense =
+        genoio_io::read_vcf_dense(&path, Some(&samples), None).expect("dense vcf should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.source_sample_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(2)]
+    );
+}
+
+#[test]
 fn vcf_dense_marks_missing_gt_calls() {
     let dir = unique_dir("vcf-dense-missing");
     let path = dir.join("missing.vcf");

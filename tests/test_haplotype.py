@@ -332,6 +332,23 @@ def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
     np.testing.assert_array_equal(scipy_sparse.hstack(blocks, format="csc").toarray(), full.toarray())
 
 
+def test_vcf_sparse_haplotype_blocks_do_not_prefetch_metadata(tmp_path, monkeypatch):
+    import genoio
+    from genoio._api import Dataset
+
+    dataset = genoio.vcf(write_phased_vcf(tmp_path))
+
+    def fail_metadata(self):
+        raise AssertionError("bounded VCF haplotype block reads must not scan metadata first")
+
+    monkeypatch.setattr(Dataset, "_metadata", fail_metadata)
+
+    block = next(dataset.iter_blocks(size=1, kind="haplo", sparse=True))
+
+    assert scipy_sparse.isspmatrix_csc(block)
+    assert block.shape == (4, 1)
+
+
 def test_bgen_haplotype_dosage_blocks_concatenate_to_full_matrix(tmp_path):
     import genoio
 
