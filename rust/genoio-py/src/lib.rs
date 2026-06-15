@@ -235,7 +235,7 @@ fn run_without_gil<T: Send>(
     // Only Rust-owned source paths, filters, options, and output structs may
     // cross this boundary. Python argument parsing and result construction stay
     // under the GIL.
-    py.allow_threads(f).map_err(genoio_error_to_py)
+    py.detach(f).map_err(genoio_error_to_py)
 }
 
 fn panic_message(payload: &(dyn PanicPayload + Send)) -> &str {
@@ -799,7 +799,7 @@ fn variant_window_option(
     if value.is_none() {
         return Ok(None);
     }
-    let dict = value.downcast::<PyDict>()?;
+    let dict = value.cast::<PyDict>()?;
     let start = dict
         .get_item("start")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing variant_window.start"))?
@@ -1057,36 +1057,36 @@ fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     if value.is_none() {
         return Ok(serde_json::Value::Null);
     }
-    if value.downcast::<PyBool>().is_ok() {
+    if value.cast::<PyBool>().is_ok() {
         return Ok(serde_json::Value::Bool(value.extract::<bool>()?));
     }
-    if value.downcast::<PyString>().is_ok() {
+    if value.cast::<PyString>().is_ok() {
         return Ok(serde_json::Value::String(value.extract::<String>()?));
     }
-    if value.downcast::<PyInt>().is_ok() {
+    if value.cast::<PyInt>().is_ok() {
         return Ok(serde_json::Value::Number(value.extract::<i64>()?.into()));
     }
-    if value.downcast::<PyFloat>().is_ok() {
+    if value.cast::<PyFloat>().is_ok() {
         let number = serde_json::Number::from_f64(value.extract::<f64>()?).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("filter IR contains a non-finite float")
         })?;
         return Ok(serde_json::Value::Number(number));
     }
-    if let Ok(dict) = value.downcast::<PyDict>() {
+    if let Ok(dict) = value.cast::<PyDict>() {
         let mut object = serde_json::Map::new();
         for (key, item) in dict.iter() {
             object.insert(key.extract::<String>()?, py_to_json_value(&item)?);
         }
         return Ok(serde_json::Value::Object(object));
     }
-    if let Ok(list) = value.downcast::<PyList>() {
+    if let Ok(list) = value.cast::<PyList>() {
         return list
             .iter()
             .map(|item| py_to_json_value(&item))
             .collect::<PyResult<Vec<_>>>()
             .map(serde_json::Value::Array);
     }
-    if let Ok(tuple) = value.downcast::<PyTuple>() {
+    if let Ok(tuple) = value.cast::<PyTuple>() {
         return tuple
             .iter()
             .map(|item| py_to_json_value(&item))
