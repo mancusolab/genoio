@@ -18,7 +18,7 @@ use rust_htslib::htslib;
 
 use crate::error::Result;
 use crate::matrix::{
-    empty_dense_matrix, empty_sparse_matrix, finish_variant_major_dense_matrix,
+    empty_sparse_matrix, finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
     VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
@@ -61,7 +61,7 @@ pub fn read_vcf_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dense_windowed(path, requested_samples, variant_filter, None)
+    read_vcf_dense_windowed(path, requested_samples, variant_filter, None, false)
 }
 
 /// Read retained VCF/BCF diploid genotypes as dense values over an optional block window.
@@ -70,12 +70,14 @@ pub fn read_vcf_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     read_vcf_dense_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        matrix_only,
         None,
     )
 }
@@ -86,11 +88,12 @@ pub fn read_vcf_dense_windowed_with_threads(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
-        return empty_vcf_dense(path, reader.header(), requested_samples);
+        return empty_vcf_dense(path, reader.header(), requested_samples, matrix_only);
     }
 
     // Region filters can be pushed into htslib only when the expression shape
@@ -103,6 +106,7 @@ pub fn read_vcf_dense_windowed_with_threads(
                 variant_filter,
                 variant_window,
                 &region,
+                matrix_only,
                 threads,
             );
         }
@@ -116,6 +120,7 @@ pub fn read_vcf_dense_windowed_with_threads(
         variant_filter,
         variant_window,
         original_source_indices.as_deref(),
+        matrix_only,
         &mut reader,
     )
 }
@@ -126,12 +131,14 @@ pub fn read_vcf_dosage_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     read_vcf_dosage_dense_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        matrix_only,
         None,
     )
 }
@@ -142,11 +149,12 @@ pub fn read_vcf_dosage_dense_windowed_with_threads(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
-        return empty_vcf_dense(path, reader.header(), requested_samples);
+        return empty_vcf_dense(path, reader.header(), requested_samples, matrix_only);
     }
 
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
@@ -157,6 +165,7 @@ pub fn read_vcf_dosage_dense_windowed_with_threads(
                 variant_filter,
                 variant_window,
                 &region,
+                matrix_only,
                 threads,
             );
         }
@@ -170,6 +179,7 @@ pub fn read_vcf_dosage_dense_windowed_with_threads(
         variant_filter,
         variant_window,
         original_source_indices.as_deref(),
+        matrix_only,
         &mut reader,
     )
 }
@@ -245,7 +255,7 @@ pub fn read_vcf_haplotypes_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
-    read_vcf_haplotypes_dense_windowed(path, requested_samples, variant_filter, None)
+    read_vcf_haplotypes_dense_windowed(path, requested_samples, variant_filter, None, false)
 }
 
 /// Read phased VCF/BCF diploid genotypes as dense haplotype rows over a block window.
@@ -254,12 +264,14 @@ pub fn read_vcf_haplotypes_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     read_vcf_haplotypes_dense_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        matrix_only,
         None,
     )
 }
@@ -270,11 +282,12 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
-        return empty_vcf_haplotypes_dense(path, reader.header(), requested_samples);
+        return empty_vcf_haplotypes_dense(path, reader.header(), requested_samples, matrix_only);
     }
 
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
@@ -285,6 +298,7 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads(
                 variant_filter,
                 variant_window,
                 &region,
+                matrix_only,
                 threads,
             );
         }
@@ -298,6 +312,7 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads(
         variant_filter,
         variant_window,
         original_source_indices.as_deref(),
+        matrix_only,
         &mut reader,
     )
 }
@@ -452,13 +467,14 @@ fn read_indexed_vcf_dense(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
-        Err(_) => return empty_vcf_dense(path, &header, requested_samples),
+        Err(_) => return empty_vcf_dense(path, &header, requested_samples, matrix_only),
     };
     reader
         .fetch(
@@ -476,6 +492,7 @@ fn read_indexed_vcf_dense(
         variant_filter,
         variant_window,
         None,
+        matrix_only,
         &mut reader,
     )
 }
@@ -486,13 +503,14 @@ fn read_indexed_vcf_dosage_dense(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
-        Err(_) => return empty_vcf_dense(path, &header, requested_samples),
+        Err(_) => return empty_vcf_dense(path, &header, requested_samples, matrix_only),
     };
     reader
         .fetch(
@@ -510,6 +528,7 @@ fn read_indexed_vcf_dosage_dense(
         variant_filter,
         variant_window,
         None,
+        matrix_only,
         &mut reader,
     )
 }
@@ -554,13 +573,16 @@ fn read_indexed_vcf_haplotypes_dense(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     let mut reader = open_indexed_vcf_reader(path, threads)?;
     let header = reader.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(rid) => rid,
-        Err(_) => return empty_vcf_haplotypes_dense(path, &header, requested_samples),
+        Err(_) => {
+            return empty_vcf_haplotypes_dense(path, &header, requested_samples, matrix_only);
+        }
     };
     reader
         .fetch(
@@ -578,6 +600,7 @@ fn read_indexed_vcf_haplotypes_dense(
         variant_filter,
         variant_window,
         None,
+        matrix_only,
         &mut reader,
     )
 }
@@ -622,6 +645,7 @@ fn read_vcf_dense_records<R: Read>(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     original_source_indices: Option<&[usize]>,
+    matrix_only: bool,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
@@ -633,6 +657,7 @@ fn read_vcf_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
+    let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         // Check before pulling another record; otherwise block reads still pay
@@ -643,10 +668,20 @@ fn read_vcf_dense_records<R: Read>(
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
-        let mut variant = variant_record_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
+        let variant = if !matrix_only || variant_filter.is_some() {
+            Some(variant_record_from_record(path, &header, &record)?)
+        } else {
+            None
+        };
+        let partial_decision = match (variant_filter, variant.as_ref()) {
+            (Some(filter), Some(variant)) => filter.partial_decision(variant),
+            (Some(_), None) => {
+                return Err(GenoioError::internal_contract(
+                    "vcf filter requires variant metadata",
+                ));
+            }
+            (None, _) => PartialFilterDecision::Accept,
+        };
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
             MetadataRetentionAction::Skip => continue,
@@ -675,8 +710,11 @@ fn read_vcf_dense_records<R: Read>(
             None
         };
         if needs_genotype_decision {
+            let variant = variant.as_ref().ok_or_else(|| {
+                GenoioError::internal_contract("vcf filter requires variant metadata")
+            })?;
             match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                variant_filter.is_none_or(|filter| filter.evaluate(variant, stats.as_ref())),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
@@ -684,16 +722,21 @@ fn read_vcf_dense_records<R: Read>(
                 RetentionAction::Stop => break,
             }
         }
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
+        if !matrix_only {
+            let mut variant = variant.ok_or_else(|| {
+                GenoioError::internal_contract("vcf metadata output requires variant metadata")
+            })?;
+            if let Some(stats) = stats {
+                attach_variant_stats(&mut variant, stats);
+            }
+            variants.push(variant);
         }
-        variants.push(variant);
+        n_variants += 1;
         variant_major_values.extend(current_values);
         variant_major_missing.extend(current_missing);
     }
 
     let n_samples = selection.samples.len();
-    let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
     finish_variant_major_dense_matrix(
         VariantMajorDenseParts {
@@ -705,7 +748,7 @@ fn read_vcf_dense_records<R: Read>(
             variants,
             diagnostics,
         },
-        false,
+        matrix_only,
     )
 }
 
@@ -715,6 +758,7 @@ fn read_vcf_dosage_dense_records<R: Read>(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     original_source_indices: Option<&[usize]>,
+    matrix_only: bool,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
@@ -726,6 +770,7 @@ fn read_vcf_dosage_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
+    let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         if retention.window_is_satisfied() {
@@ -734,10 +779,20 @@ fn read_vcf_dosage_dense_records<R: Read>(
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
-        let mut variant = variant_record_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
+        let mut variant = if !matrix_only || variant_filter.is_some() {
+            Some(variant_record_from_record(path, &header, &record)?)
+        } else {
+            None
+        };
+        let partial_decision = match (variant_filter, variant.as_ref()) {
+            (Some(filter), Some(variant)) => filter.partial_decision(variant),
+            (Some(_), None) => {
+                return Err(GenoioError::internal_contract(
+                    "vcf filter requires variant metadata",
+                ));
+            }
+            (None, _) => PartialFilterDecision::Accept,
+        };
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
             MetadataRetentionAction::Skip => continue,
@@ -750,23 +805,36 @@ fn read_vcf_dosage_dense_records<R: Read>(
         let decoded = decode_ds_dosage_record(path, &record, &selection.source_indices)?;
         if needs_genotype_decision {
             let stats = compute_dosage_variant_stats(&decoded.values, &decoded.missing)?;
+            let filter_variant = variant.as_ref().ok_or_else(|| {
+                GenoioError::internal_contract("vcf filter requires variant metadata")
+            })?;
             match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                variant_filter.is_none_or(|filter| filter.evaluate(filter_variant, Some(&stats))),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-            attach_variant_stats(&mut variant, stats);
+            if !matrix_only {
+                let variant = variant.as_mut().ok_or_else(|| {
+                    GenoioError::internal_contract("vcf metadata output requires variant metadata")
+                })?;
+                attach_variant_stats(variant, stats);
+            }
         }
-        variants.push(variant);
+        if !matrix_only {
+            let variant = variant.ok_or_else(|| {
+                GenoioError::internal_contract("vcf metadata output requires variant metadata")
+            })?;
+            variants.push(variant);
+        }
+        n_variants += 1;
         variant_major_values.extend(decoded.values);
         variant_major_missing.extend(decoded.missing);
     }
 
     let n_samples = selection.samples.len();
-    let n_variants = variants.len();
     diagnostics.retained_variants = n_variants;
     finish_variant_major_dense_matrix(
         VariantMajorDenseParts {
@@ -778,7 +846,7 @@ fn read_vcf_dosage_dense_records<R: Read>(
             variants,
             diagnostics,
         },
-        false,
+        matrix_only,
     )
 }
 
@@ -788,6 +856,7 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     original_source_indices: Option<&[usize]>,
+    matrix_only: bool,
     reader: &mut R,
 ) -> Result<DenseGenotypeMatrix> {
     let header = reader.header().clone();
@@ -799,6 +868,7 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
     let mut variant_major_missing = Vec::new();
+    let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     for record_result in reader.records() {
         // Haplotype reads use the same retained-window semantics as genotype
@@ -809,10 +879,20 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
         let record = record_result.map_err(|error| {
             GenoioError::invalid_source(path, format!("vcf record error: {error}"))
         })?;
-        let mut variant = variant_record_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
+        let variant = if !matrix_only || variant_filter.is_some() {
+            Some(variant_record_from_record(path, &header, &record)?)
+        } else {
+            None
+        };
+        let partial_decision = match (variant_filter, variant.as_ref()) {
+            (Some(filter), Some(variant)) => filter.partial_decision(variant),
+            (Some(_), None) => {
+                return Err(GenoioError::internal_contract(
+                    "vcf filter requires variant metadata",
+                ));
+            }
+            (None, _) => PartialFilterDecision::Accept,
+        };
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
             MetadataRetentionAction::Skip => continue,
@@ -830,8 +910,11 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
             None
         };
         if needs_genotype_decision {
+            let variant = variant.as_ref().ok_or_else(|| {
+                GenoioError::internal_contract("vcf filter requires variant metadata")
+            })?;
             match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                variant_filter.is_none_or(|filter| filter.evaluate(variant, stats.as_ref())),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
@@ -839,18 +922,27 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
                 RetentionAction::Stop => break,
             }
         }
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
+        if !matrix_only {
+            let mut variant = variant.ok_or_else(|| {
+                GenoioError::internal_contract("vcf metadata output requires variant metadata")
+            })?;
+            if let Some(stats) = stats {
+                attach_variant_stats(&mut variant, stats);
+            }
+            variants.push(variant);
         }
         let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
-        variants.push(variant);
+        n_variants += 1;
         variant_major_values.extend(decoded.haplotype_values);
         variant_major_missing.extend(decoded.haplotype_missing);
     }
 
-    let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
-    let n_samples = samples.len();
-    let n_variants = variants.len();
+    let samples = if matrix_only {
+        Vec::new()
+    } else {
+        haplotype_sample_records(&selection.samples, &selection.source_indices)
+    };
+    let n_samples = selection.samples.len() * 2;
     diagnostics.retained_variants = n_variants;
     finish_variant_major_dense_matrix(
         VariantMajorDenseParts {
@@ -862,7 +954,7 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
             variants,
             diagnostics,
         },
-        false,
+        matrix_only,
     )
 }
 
@@ -1051,10 +1143,24 @@ fn empty_vcf_dense(
     path: &Path,
     header: &rust_htslib::bcf::header::HeaderView,
     requested_samples: Option<&[String]>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let all_samples = sample_records_from_header(header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
-    empty_dense_matrix(selection.samples, selection.diagnostics)
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let n_samples = selection.samples.len();
+    selection.diagnostics.retained_variants = 0;
+    finish_dense_matrix(
+        DenseMatrixParts {
+            n_samples,
+            n_variants: 0,
+            values: Vec::new(),
+            missing_mask: Vec::new(),
+            samples: selection.samples,
+            variants: Vec::new(),
+            diagnostics: selection.diagnostics,
+        },
+        matrix_only,
+    )
 }
 
 fn empty_vcf_sparse(
@@ -1071,11 +1177,29 @@ fn empty_vcf_haplotypes_dense(
     path: &Path,
     header: &rust_htslib::bcf::header::HeaderView,
     requested_samples: Option<&[String]>,
+    matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let all_samples = sample_records_from_header(header);
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
-    let samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
-    empty_dense_matrix(samples, selection.diagnostics)
+    let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let n_samples = selection.samples.len() * 2;
+    let samples = if matrix_only {
+        Vec::new()
+    } else {
+        haplotype_sample_records(&selection.samples, &selection.source_indices)
+    };
+    selection.diagnostics.retained_variants = 0;
+    finish_dense_matrix(
+        DenseMatrixParts {
+            n_samples,
+            n_variants: 0,
+            values: Vec::new(),
+            missing_mask: Vec::new(),
+            samples,
+            variants: Vec::new(),
+            diagnostics: selection.diagnostics,
+        },
+        matrix_only,
+    )
 }
 
 fn empty_vcf_haplotypes_sparse(

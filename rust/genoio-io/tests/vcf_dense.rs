@@ -50,6 +50,64 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
 }
 
 #[test]
+fn vcf_dense_matrix_only_omits_metadata() {
+    let dir = unique_dir("vcf-dense-matrix-only");
+    let path = dir.join("tiny.vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0|1\t0/0\t1|1
+",
+    );
+
+    let dense = genoio_io::read_vcf_dense_windowed(&path, None, None, None, true)
+        .expect("matrix-only dense vcf should decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]);
+    assert_eq!(dense.missing_mask, vec![false; 6]);
+    assert!(dense.samples.is_empty());
+    assert!(dense.variants.is_empty());
+}
+
+#[test]
+fn vcf_dosage_dense_matrix_only_omits_metadata() {
+    let dir = unique_dir("vcf-dosage-dense-matrix-only");
+    let path = dir.join("dosage.vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Expected alternate allele dosage\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DS\t0/0:0.2\t0/1:1.4\t1/1:1.8
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT:DS\t0/0:0\t0/0:.\t0/1:0.7
+",
+    );
+
+    let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, None, None, true)
+        .expect("matrix-only vcf dosage should decode");
+
+    assert_eq!(dense.n_samples, 3);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.2, 0.0, 1.4, 0.0, 1.8, 0.7]);
+    assert_eq!(
+        dense.missing_mask,
+        vec![false, false, false, true, false, false]
+    );
+    assert!(dense.samples.is_empty());
+    assert!(dense.variants.is_empty());
+}
+
+#[test]
 fn vcf_dense_sample_subset_preserves_source_order() {
     let dir = unique_dir("vcf-dense-sample-subset");
     let path = dir.join("subset.vcf");

@@ -12,9 +12,10 @@ use crate::matrix::{
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 use crate::Result;
 use genoio_core::{
-    attach_variant_stats, compute_dosage_variant_stats, select_samples_source_order,
-    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    SampleRecord, SourceCapabilities, VariantFilter, VariantWindow,
+    attach_variant_stats, compute_dosage_variant_stats, is_dosage_polymorphic,
+    select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
+    GenotypeFilterPlan, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
+    VariantFilter, VariantRecord, VariantStats, VariantWindow,
 };
 
 mod decode;
@@ -32,6 +33,26 @@ use header::{
     BgenHeader,
 };
 use index::{indexed_region_records, validate_index_record_consumed, BgenIndexRecord};
+
+fn evaluate_dosage_filter(
+    values: &[f32],
+    missing: &[bool],
+    filter: &VariantFilter,
+    variant: &VariantRecord,
+    require_stats: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    if !require_stats
+        && matches!(
+            filter.genotype_filter_plan(),
+            GenotypeFilterPlan::Polymorphic
+        )
+    {
+        return Ok((is_dosage_polymorphic(values, missing)?, None));
+    }
+
+    let stats = compute_dosage_variant_stats(values, missing)?;
+    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
+}
 
 /// Read BGEN sample and variant metadata without returning dosages.
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
@@ -177,21 +198,27 @@ pub fn read_bgen_dosage_dense_windowed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_values,
                     &decode_buffers.selected_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => continue,
                     RetentionAction::Stop => {
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -333,21 +360,27 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_collapsed_values,
                     &decode_buffers.selected_collapsed_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => continue,
                     RetentionAction::Stop => {
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -485,14 +518,18 @@ fn read_bgen_dosage_dense_indexed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_values,
                     &decode_buffers.selected_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => {
                         validate_index_record_consumed(reader, bgen, index_record)?;
@@ -503,7 +540,9 @@ fn read_bgen_dosage_dense_indexed(
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -615,14 +654,18 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_collapsed_values,
                     &decode_buffers.selected_collapsed_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => {
                         validate_index_record_consumed(reader, bgen, index_record)?;
@@ -633,7 +676,9 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 

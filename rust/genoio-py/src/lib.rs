@@ -503,6 +503,7 @@ fn read_dense_matrix(
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.matrix_only,
             )
         }
         (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Dosage) => {
@@ -511,6 +512,7 @@ fn read_dense_matrix(
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.matrix_only,
             )
         }
         (SourceMembers::Vcf { path, .. }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
@@ -519,6 +521,7 @@ fn read_dense_matrix(
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.matrix_only,
             )
         }
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {

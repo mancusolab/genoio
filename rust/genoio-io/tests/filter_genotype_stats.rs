@@ -241,7 +241,7 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
     }))
     .expect("filter should parse");
 
-    let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None)
+    let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None, false)
         .expect("vcf dosage should filter");
 
     assert_eq!(dense.n_variants, 1);
