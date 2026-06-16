@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
-    compute_variant_stats, flip_values_to_minor_allele, reject_sparse_missing_values,
-    select_samples_source_order, DenseGenotypeMatrix, GenoioError, MetadataOutput,
+    flip_values_to_minor_allele, reject_sparse_missing_values, select_samples_source_order,
+    variant_stats_from_counts, DenseGenotypeMatrix, GenoioError, MetadataOutput,
     PartialFilterDecision, RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantWindow,
+    VariantFilter, VariantRecord, VariantStats, VariantWindow,
 };
 use rust_htslib::bcf::{
     record::{GenotypeAllele, Numeric},
@@ -692,22 +692,13 @@ fn read_vcf_dense_records<R: Read>(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
-        let genotypes = record.format(b"GT").integer().map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
-        })?;
-        let mut current_values = Vec::with_capacity(selection.source_indices.len());
-        let mut current_missing = Vec::with_capacity(selection.source_indices.len());
-        for source_index in &selection.source_indices {
-            let (value, is_missing) =
-                decode_raw_diploid_gt(path, &record, genotypes[*source_index])?;
-            current_values.push(value);
-            current_missing.push(is_missing);
-        }
-
-        let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(&current_values, &current_missing)?)
+        let (current_values, current_missing, stats) = if needs_genotype_decision {
+            let decoded =
+                decode_diploid_genotype_with_stats(path, &record, &selection.source_indices)?;
+            (decoded.values, decoded.missing, Some(decoded.stats))
         } else {
-            None
+            let decoded = decode_diploid_genotype_values(path, &record, &selection.source_indices)?;
+            (decoded.values, decoded.missing, None)
         };
         if needs_genotype_decision {
             let variant = variant.as_ref().ok_or_else(|| {
@@ -904,8 +895,9 @@ fn read_vcf_haplotypes_dense_records<R: Read>(
 
         validate_dense_biallelic_record(path, &record)?;
         let stats = if needs_genotype_decision {
-            let decoded = decode_diploid_genotype_record(path, &record, &selection.source_indices)?;
-            Some(compute_variant_stats(&decoded.values, &decoded.missing)?)
+            let decoded =
+                decode_diploid_genotype_with_stats(path, &record, &selection.source_indices)?;
+            Some(decoded.stats)
         } else {
             None
         };
@@ -1003,8 +995,9 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
 
         validate_dense_biallelic_record(path, &record)?;
         let stats = if needs_genotype_decision {
-            let decoded = decode_diploid_genotype_record(path, &record, &selection.source_indices)?;
-            Some(compute_variant_stats(&decoded.values, &decoded.missing)?)
+            let decoded =
+                decode_diploid_genotype_with_stats(path, &record, &selection.source_indices)?;
+            Some(decoded.stats)
         } else {
             None
         };
@@ -1089,22 +1082,13 @@ fn read_vcf_sparse_records<R: Read>(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
 
         validate_dense_biallelic_record(path, &record)?;
-        let genotypes = record.format(b"GT").integer().map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
-        })?;
-        let mut current_values = Vec::with_capacity(selection.source_indices.len());
-        let mut current_missing = Vec::with_capacity(selection.source_indices.len());
-        for source_index in &selection.source_indices {
-            let (value, is_missing) =
-                decode_raw_diploid_gt(path, &record, genotypes[*source_index])?;
-            current_values.push(value);
-            current_missing.push(is_missing);
-        }
-
-        let stats = if needs_genotype_decision {
-            Some(compute_variant_stats(&current_values, &current_missing)?)
+        let (mut current_values, current_missing, stats) = if needs_genotype_decision {
+            let decoded =
+                decode_diploid_genotype_with_stats(path, &record, &selection.source_indices)?;
+            (decoded.values, decoded.missing, Some(decoded.stats))
         } else {
-            None
+            let decoded = decode_diploid_genotype_values(path, &record, &selection.source_indices)?;
+            (decoded.values, decoded.missing, None)
         };
         if needs_genotype_decision {
             match retention.genotype_decision(
@@ -1353,11 +1337,31 @@ fn is_compressed_vcf(path: &Path) -> bool {
         .is_some_and(|extension| matches!(extension, "gz" | "bgz"))
 }
 
-fn decode_raw_diploid_gt(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiploidGtClass {
+    HomRef,
+    Het,
+    HomAlt,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RawDiploidGtCall {
+    value: f32,
+    class: DiploidGtClass,
+}
+
+impl RawDiploidGtCall {
+    fn is_missing(self) -> bool {
+        self.class == DiploidGtClass::Missing
+    }
+}
+
+fn decode_raw_diploid_gt_call(
     path: &Path,
     record: &rust_htslib::bcf::Record,
     genotype: &[i32],
-) -> Result<(f32, bool)> {
+) -> Result<RawDiploidGtCall> {
     if genotype.len() != 2 {
         return Err(GenoioError::invalid_source(
             path,
@@ -1369,12 +1373,17 @@ fn decode_raw_diploid_gt(
         ));
     }
 
-    let mut dosage = 0.0;
+    let mut alt_count = 0_u8;
     for encoded in genotype {
         match decode_raw_gt_allele(*encoded) {
-            RawGtAllele::Missing => return Ok((0.0, true)),
+            RawGtAllele::Missing => {
+                return Ok(RawDiploidGtCall {
+                    value: 0.0,
+                    class: DiploidGtClass::Missing,
+                });
+            }
             RawGtAllele::Reference => {}
-            RawGtAllele::Alternate => dosage += 1.0,
+            RawGtAllele::Alternate => alt_count += 1,
             RawGtAllele::Unsupported(other) => {
                 return Err(GenoioError::invalid_source(
                     path,
@@ -1387,7 +1396,16 @@ fn decode_raw_diploid_gt(
         }
     }
 
-    Ok((dosage, false))
+    let class = match alt_count {
+        0 => DiploidGtClass::HomRef,
+        1 => DiploidGtClass::Het,
+        2 => DiploidGtClass::HomAlt,
+        _ => unreachable!("two diploid GT alleles can only produce dosage 0, 1, or 2"),
+    };
+    Ok(RawDiploidGtCall {
+        value: f32::from(alt_count),
+        class,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1410,16 +1428,22 @@ fn decode_raw_gt_allele(encoded: i32) -> RawGtAllele {
     }
 }
 
-struct DecodedDiploidGenotypeRecord {
+struct DecodedDiploidGenotypeWithStats {
+    values: Vec<f32>,
+    missing: Vec<bool>,
+    stats: VariantStats,
+}
+
+struct DecodedDiploidGenotypeValues {
     values: Vec<f32>,
     missing: Vec<bool>,
 }
 
-fn decode_diploid_genotype_record(
+fn decode_diploid_genotype_values(
     path: &Path,
     record: &rust_htslib::bcf::Record,
     source_indices: &[usize],
-) -> Result<DecodedDiploidGenotypeRecord> {
+) -> Result<DecodedDiploidGenotypeValues> {
     let genotypes = record.format(b"GT").integer().map_err(|error| {
         GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
     })?;
@@ -1427,19 +1451,56 @@ fn decode_diploid_genotype_record(
     let mut missing = Vec::with_capacity(source_indices.len());
 
     for source_index in source_indices {
-        let (value, is_missing) = decode_raw_diploid_gt(path, record, genotypes[*source_index])?;
-        values.push(value);
-        missing.push(is_missing);
+        let call = decode_raw_diploid_gt_call(path, record, genotypes[*source_index])?;
+        values.push(call.value);
+        missing.push(call.is_missing());
     }
 
-    Ok(DecodedDiploidGenotypeRecord { values, missing })
+    Ok(DecodedDiploidGenotypeValues { values, missing })
+}
+
+fn decode_diploid_genotype_with_stats(
+    path: &Path,
+    record: &rust_htslib::bcf::Record,
+    source_indices: &[usize],
+) -> Result<DecodedDiploidGenotypeWithStats> {
+    let genotypes = record.format(b"GT").integer().map_err(|error| {
+        GenoioError::invalid_source(path, format!("vcf genotype error: {error}"))
+    })?;
+    let mut values = Vec::with_capacity(source_indices.len());
+    let mut missing = Vec::with_capacity(source_indices.len());
+    let mut hom_ref_count = 0_u64;
+    let mut het_count = 0_u64;
+    let mut hom_alt_count = 0_u64;
+    let mut missing_count = 0_u64;
+
+    // Genotype filters need per-variant counts before matrix materialization, so
+    // this path fuses GT decoding with hard-call counting to avoid a second pass.
+    for source_index in source_indices {
+        let call = decode_raw_diploid_gt_call(path, record, genotypes[*source_index])?;
+        match call.class {
+            DiploidGtClass::HomRef => hom_ref_count += 1,
+            DiploidGtClass::Het => het_count += 1,
+            DiploidGtClass::HomAlt => hom_alt_count += 1,
+            DiploidGtClass::Missing => missing_count += 1,
+        }
+        values.push(call.value);
+        missing.push(call.is_missing());
+    }
+
+    let stats = variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)?;
+    Ok(DecodedDiploidGenotypeWithStats {
+        values,
+        missing,
+        stats,
+    })
 }
 
 fn decode_ds_dosage_record(
     path: &Path,
     record: &rust_htslib::bcf::Record,
     source_indices: &[usize],
-) -> Result<DecodedDiploidGenotypeRecord> {
+) -> Result<DecodedDiploidGenotypeValues> {
     let dosages = record.format(b"DS").float().map_err(|error| {
         GenoioError::unsupported(format!(
             "vcf dosage reads require FORMAT/DS values: {error}"
@@ -1479,7 +1540,7 @@ fn decode_ds_dosage_record(
         missing.push(false);
     }
 
-    Ok(DecodedDiploidGenotypeRecord { values, missing })
+    Ok(DecodedDiploidGenotypeValues { values, missing })
 }
 
 struct PhasedHaplotypeRecord {
@@ -1597,4 +1658,53 @@ fn record_has_phased_genotype(
             )
         })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use rust_htslib::bcf::{Read, Reader};
+
+    use super::*;
+
+    fn write_test_vcf(contents: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new()
+            .suffix(".vcf")
+            .tempfile()
+            .expect("temp VCF should be created");
+        fs::write(file.path(), contents).expect("test VCF should be written");
+        file
+    }
+
+    #[test]
+    fn diploid_gt_decode_accumulates_stats_in_same_pass() {
+        let file = write_test_vcf(
+            "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\tS4
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\t./.
+",
+        );
+        let path = file.path();
+        let mut reader = Reader::from_path(path).expect("test VCF should open");
+        let record = reader
+            .records()
+            .next()
+            .expect("record should exist")
+            .expect("record should decode");
+
+        let decoded = decode_diploid_genotype_with_stats(path, &record, &[0, 2, 3])
+            .expect("GT should decode");
+
+        assert_eq!(decoded.values, vec![0.0, 2.0, 0.0]);
+        assert_eq!(decoded.missing, vec![false, false, true]);
+        assert_eq!(decoded.stats.n_called, 2);
+        assert_eq!(decoded.stats.mac, Some(2.0));
+        assert_eq!(decoded.stats.maf, Some(0.5));
+        assert!((decoded.stats.missing_rate - (1.0 / 3.0)).abs() < f64::EPSILON);
+        assert!(decoded.stats.polymorphic);
+    }
 }
