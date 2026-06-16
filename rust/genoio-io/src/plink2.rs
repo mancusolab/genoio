@@ -13,8 +13,10 @@ use genoio_core::{
 
 use crate::error::Result;
 #[cfg(test)]
+use crate::hardcall::PackedHardcalls as PackedGenotypes;
+#[cfg(test)]
 use crate::hardcall::HARDCALL_BATCH_SIZE;
-use crate::hardcall::{HardcallBatch as PackedVariantBatch, PackedHardcalls as PackedGenotypes};
+use crate::hardcall::{evaluate_packed_hardcall_filter, HardcallBatch as PackedVariantBatch};
 use crate::matrix::{
     finish_dense_matrix, finish_variant_major_dense_matrix, shrink_sample_major_width,
     DenseMatrixParts, VariantMajorDenseParts,
@@ -78,38 +80,6 @@ fn flush_packed_variant_batch(
     );
     *batch_start += batch.len();
     batch.clear();
-}
-
-fn evaluate_packed_hardcall_filter(
-    packed: &PackedGenotypes,
-    source_indices: &[usize],
-    all_samples_selected: bool,
-    filter: &VariantFilter,
-    filter_plan: GenotypeFilterPlan,
-    variant: Option<&VariantRecord>,
-    require_stats: bool,
-) -> Result<(bool, Option<VariantStats>)> {
-    if !require_stats {
-        if let Some(retain) = packed.evaluate_filter_plan_for_selection(
-            filter_plan,
-            source_indices,
-            all_samples_selected,
-        )? {
-            return Ok((retain, None));
-        }
-    }
-
-    let stats = packed.stats_for_selection(source_indices, all_samples_selected)?;
-    let retain = if let Some(variant) = variant {
-        filter.evaluate(variant, Some(&stats))
-    } else {
-        filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
-            GenoioError::internal_contract(
-                "genotype-stats-only fast path received metadata-dependent filter",
-            )
-        })?
-    };
-    Ok((retain, Some(stats)))
 }
 
 fn evaluate_dosage_filter(

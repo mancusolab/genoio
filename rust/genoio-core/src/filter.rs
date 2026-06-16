@@ -39,11 +39,17 @@ pub enum GenotypeFilterPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenotypeFilterConjunction {
+    /// True when a nonzero reference and nonzero alternate allele are required.
     pub polymorphic: bool,
+    /// Inclusive lower bound for minor allele count.
     pub mac_min: Option<u32>,
+    /// Inclusive upper bound for minor allele count.
     pub mac_max: Option<u32>,
+    /// Inclusive lower bound for minor allele frequency.
     pub maf_min: Option<f32>,
+    /// Inclusive upper bound for minor allele frequency.
     pub maf_max: Option<f32>,
+    /// Inclusive upper bound for missing-call rate.
     pub missing_rate_max: Option<f32>,
 }
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # pattern: Mixed
 
+"""Summarize samply Firefox profiles without opening the browser UI."""
+
 from __future__ import annotations
 
 import argparse
@@ -33,9 +35,7 @@ class SymbolTable(NamedTuple):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Summarize top frames from a samply Firefox profile."
-    )
+    parser = argparse.ArgumentParser(description="Summarize top frames from a samply Firefox profile.")
     parser.add_argument("profile", type=Path, help="Path to *.profile.json.gz")
     parser.add_argument(
         "--symbols",
@@ -62,6 +62,7 @@ def load_profile(path: Path) -> dict[str, Any]:
 
 
 def load_matching_symbols(profile_path: Path) -> dict[str, Any] | None:
+    """Load samply's optional presymbolication sidecar for ``profile_path``."""
     sidecar_path = matching_symbols_path(profile_path)
     if not sidecar_path.exists():
         return None
@@ -117,6 +118,7 @@ def collect_frame_counts(
     thread: dict[str, Any],
     resolver: FrameResolver,
 ) -> tuple[Counter[str], Counter[str], int]:
+    """Collect inclusive and self sample counts for one Firefox-profile thread."""
     samples = thread["samples"]
     stack_table = thread["stackTable"]
     stack_prefix = stack_table["prefix"]
@@ -166,6 +168,8 @@ def top_rows(
 
 
 class FrameResolver:
+    """Resolve profile frame indices into names, using sidecar symbols when present."""
+
     def __init__(
         self,
         profile: dict[str, Any],

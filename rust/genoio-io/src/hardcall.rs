@@ -2,7 +2,7 @@
 
 use genoio_core::{
     variant_stats_from_counts, GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan,
-    VariantStats,
+    VariantFilter, VariantRecord, VariantStats,
 };
 
 use crate::error::Result;
@@ -416,6 +416,41 @@ impl PackedHardcalls {
             *last_word &= mask;
         }
     }
+}
+
+pub(crate) fn evaluate_packed_hardcall_filter(
+    packed: &PackedHardcalls,
+    source_indices: &[usize],
+    all_samples_selected: bool,
+    filter: &VariantFilter,
+    filter_plan: GenotypeFilterPlan,
+    variant: Option<&VariantRecord>,
+    require_stats: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    // Matrix-only reads can answer common genotype-stat filters from packed
+    // counts alone. Metadata output still asks for stats so they can be
+    // attached to retained variant rows.
+    if !require_stats {
+        if let Some(retain) = packed.evaluate_filter_plan_for_selection(
+            filter_plan,
+            source_indices,
+            all_samples_selected,
+        )? {
+            return Ok((retain, None));
+        }
+    }
+
+    let stats = packed.stats_for_selection(source_indices, all_samples_selected)?;
+    let retain = if let Some(variant) = variant {
+        filter.evaluate(variant, Some(&stats))
+    } else {
+        filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
+            GenoioError::internal_contract(
+                "genotype-stats-only fast path received metadata-dependent filter",
+            )
+        })?
+    };
+    Ok((retain, Some(stats)))
 }
 
 #[derive(Debug, Clone)]

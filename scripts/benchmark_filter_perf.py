@@ -1,6 +1,12 @@
 #!/usr/bin/env python
 # pattern: Mixed
 
+"""Benchmark Rust-side genotype filters against NumPy post-filtering.
+
+The script is intentionally mixed: it owns CLI parsing, dataset I/O, and the
+small NumPy mirror used to compare filter execution strategies.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -37,9 +43,7 @@ def nonnegative_int(value: str) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Benchmark Rust-side variant filtering against NumPy post-filtering."
-    )
+    parser = argparse.ArgumentParser(description="Benchmark Rust-side variant filtering against NumPy post-filtering.")
     parser.add_argument(
         "--source-format",
         choices=SOURCE_FORMATS,
@@ -106,6 +110,17 @@ def active_filter_shape(args: argparse.Namespace) -> str:
     return args.filter_shape or args.predicate
 
 
+def numpy_filter_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "filter_shape": active_filter_shape(args),
+        "maf_min": args.maf_min,
+        "maf_max": args.maf_max,
+        "mac_min": args.mac_min,
+        "mac_max": args.mac_max,
+        "missing_rate_max": args.missing_rate_max,
+    }
+
+
 def read_options(args: argparse.Namespace) -> dict[str, object]:
     dosage = "dosage" if args.dosage == "auto" and args.source_format == "bgen" else args.dosage
     options: dict[str, object] = {
@@ -169,16 +184,12 @@ def stat_filter(args: argparse.Namespace) -> Any:
     elif shape == "mac_missing_rate":
         if args.missing_rate_max is None:
             raise ValueError("--missing-rate-max is required when --filter-shape mac_missing_rate")
-        expr = genoio.mac(min=args.mac_min, max=args.mac_max) & genoio.missing_rate(
-            max=args.missing_rate_max
-        )
+        expr = genoio.mac(min=args.mac_min, max=args.mac_max) & genoio.missing_rate(max=args.missing_rate_max)
     elif shape == "maf_missing_rate_polymorphic":
         if args.maf_max is None:
             raise ValueError("--maf-max is required when --filter-shape maf_missing_rate_polymorphic")
         if args.missing_rate_max is None:
-            raise ValueError(
-                "--missing-rate-max is required when --filter-shape maf_missing_rate_polymorphic"
-            )
+            raise ValueError("--missing-rate-max is required when --filter-shape maf_missing_rate_polymorphic")
         expr = (
             genoio.maf(min=args.maf_min, max=args.maf_max)
             & genoio.missing_rate(max=args.missing_rate_max)
@@ -187,9 +198,7 @@ def stat_filter(args: argparse.Namespace) -> Any:
     elif shape == "generic_fallback":
         if args.missing_rate_max is None:
             raise ValueError("--missing-rate-max is required when --filter-shape generic_fallback")
-        expr = genoio.mac(min=args.mac_min, max=args.mac_max) | genoio.missing_rate(
-            max=args.missing_rate_max
-        )
+        expr = genoio.mac(min=args.mac_min, max=args.mac_max) | genoio.missing_rate(max=args.missing_rate_max)
     else:
         raise ValueError(f"unknown filter shape: {shape}")
     if args.filter_shape is None and args.predicate != "missing_rate" and args.missing_rate_max is not None:
@@ -268,6 +277,12 @@ def read_base_block_with_variants(args: argparse.Namespace) -> tuple[np.ndarray,
 
 
 def source_window_variant_ids(args: argparse.Namespace) -> list[str]:
+    """Return IDs from the first source/base-filter block.
+
+    Rust source-window filtering uses these IDs to force the public retained
+    window API to operate on the same source variants as NumPy. This only works
+    when source IDs are unique.
+    """
     try:
         _, variants = read_base_block_with_variants(args)
     except StopIteration:
@@ -282,20 +297,14 @@ def variant_ids_from_frame(variants: Any) -> list[str]:
 
 
 def read_numpy_source_window_postfiltered(args: argparse.Namespace) -> np.ndarray:
+    """Filter the first source/base-filter block in NumPy."""
     matrix = np.asarray(read_base_block(args))
-    mask = numpy_variant_mask(
-        matrix,
-        filter_shape=active_filter_shape(args),
-        maf_min=args.maf_min,
-        maf_max=args.maf_max,
-        mac_min=args.mac_min,
-        mac_max=args.mac_max,
-        missing_rate_max=args.missing_rate_max,
-    )
+    mask = numpy_variant_mask(matrix, **numpy_filter_kwargs(args))
     return matrix[:, mask]
 
 
 def read_numpy_retained_postfiltered(args: argparse.Namespace) -> np.ndarray:
+    """Read source blocks until NumPy has up to ``max_variants`` passing columns."""
     dataset = dataset_for_args(args)
     pieces: list[np.ndarray] = []
     empty: np.ndarray | None = None
@@ -308,15 +317,7 @@ def read_numpy_retained_postfiltered(args: argparse.Namespace) -> np.ndarray:
         matrix = np.asarray(block)
         if empty is None:
             empty = matrix[:, :0]
-        mask = numpy_variant_mask(
-            matrix,
-            filter_shape=active_filter_shape(args),
-            maf_min=args.maf_min,
-            maf_max=args.maf_max,
-            mac_min=args.mac_min,
-            mac_max=args.mac_max,
-            missing_rate_max=args.missing_rate_max,
-        )
+        mask = numpy_variant_mask(matrix, **numpy_filter_kwargs(args))
         filtered = matrix[:, mask]
         if filtered.shape[1] == 0:
             continue
@@ -343,6 +344,7 @@ def numpy_variant_mask(
     mac_max: int | None,
     missing_rate_max: float | None,
 ) -> np.ndarray:
+    """Return the NumPy mask for the requested benchmark filter shape."""
     shape = filter_shape or predicate
     if shape is None:
         raise ValueError("filter_shape is required")
@@ -401,9 +403,7 @@ def numpy_variant_mask(
         if maf_max is None:
             raise ValueError("maf_missing_rate_polymorphic filter shape requires maf_max")
         if missing_rate_max is None:
-            raise ValueError(
-                "maf_missing_rate_polymorphic filter shape requires missing_rate_max"
-            )
+            raise ValueError("maf_missing_rate_polymorphic filter shape requires missing_rate_max")
         called_alleles = 2.0 * called
         keep = called > 0
         keep &= allele_sum > 0.0
@@ -427,10 +427,7 @@ def numpy_variant_mask(
 
 
 def benchmark_scenario(scenario: str, args: argparse.Namespace) -> np.ndarray:
-    label = (
-        f"genoio_{args.source_format}_{active_filter_shape(args)}_"
-        f"{args.window_mode}_window_filter_{scenario}"
-    )
+    label = f"genoio_{args.source_format}_{active_filter_shape(args)}_{args.window_mode}_window_filter_{scenario}"
     if scenario == "rust":
         if args.window_mode == "source":
             variant_ids = source_window_variant_ids(args)
