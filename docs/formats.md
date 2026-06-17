@@ -6,7 +6,7 @@ dense dosages, pass `dosage="dosage"` to read those values instead.
 
 | Format | Inputs | Genotype reads | Haplotype reads | Notes |
 |---|---|---:|---:|---|
-| VCF/BCF | `.vcf`, `.vcf.gz`, `.bcf` | yes; dense `FORMAT/DS` dosage supported | phased hardcall `FORMAT/GT` records | Indexed region filters use `.tbi` or `.csi` when available. |
+| VCF/BCF | `.vcf`, `.vcf.gz`, `.vcf.bgz`, `.bcf` | yes; dense `FORMAT/DS` dosage supported | phased hardcall `FORMAT/GT` records | Indexed region filters use `.tbi` or `.csi` when available. |
 | PLINK1 | `.bed` + `.bim` + `.fam` | yes | no | Variant-major BED files are supported. |
 | PLINK2 | `.pgen` + `.pvar` or `.pvar.zst` + `.psam` | yes; dense unphased biallelic dosage supported | explicit phased hardcalls with `dosage="hardcall"`; dense explicit phased dosages with `dosage="dosage"` | Biallelic hard-call PGEN records are supported. Sparse PLINK2 hardcall haplotypes are supported; sparse PLINK2 dosage haplotypes are intentionally unsupported. |
 | BGEN | `.bgen` plus optional same-prefix `.sample` | dense `kind="geno", dosage="dosage"` only | dense BGEN v1.2+ Layout 2 phased biallelic diploid probabilities with `kind="haplo", dosage="dosage"` | Dosage-backed BGEN reads use expected A1 dosage values. Concrete region filters use a same-path `.bgen.bgi` index when present. |

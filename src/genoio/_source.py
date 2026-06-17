@@ -62,7 +62,7 @@ def resolve_vcf(path: str | Path) -> ResolvedSource:
 
     **Arguments:**
 
-    - `path`: `.vcf`, `.vcf.gz`, or `.bcf` path.
+    - `path`: `.vcf`, `.vcf.gz`, `.vcf.bgz`, or `.bcf` path.
 
     **Returns:**
 
@@ -150,7 +150,7 @@ def _append_suffix(prefix: Path, suffix: str) -> Path:
 
 
 def _detect_single_file_format(path: Path) -> SourceFormat | None:
-    if path.name.endswith(".vcf.gz") or path.suffix == ".vcf":
+    if path.name.endswith((".vcf.gz", ".vcf.bgz")) or path.suffix == ".vcf":
         return SourceFormat.VCF
     if path.suffix == ".bcf":
         return SourceFormat.BCF
@@ -175,10 +175,18 @@ def _resolve_single_file(path: Path, format: SourceFormat) -> ResolvedSource:
 
 def _resolve_plink(path: Path, format: SourceFormat) -> ResolvedSource:
     suffixes = _plink_suffixes(format)
-    if path.suffix and path.suffix not in suffixes.values() and not _is_compressed_pvar(path, format):
+    if _has_unknown_plink_suffix(path, format, suffixes):
+        if not path.exists():
+            return _resolve_plink_prefix(path, format)
         raise UnsupportedFormatError(f"source path {path} is not {format.value}")
     prefix = _prefix_for_plink_path(path, format)
     return _resolve_plink_prefix(prefix, format)
+
+
+def _has_unknown_plink_suffix(path: Path, format: SourceFormat, suffixes: Mapping[str, str]) -> bool:
+    if not path.suffix:
+        return False
+    return path.suffix not in suffixes.values() and not _is_compressed_pvar(path, format)
 
 
 def _prefix_for_plink_path(path: Path, format: SourceFormat) -> Path:
@@ -199,16 +207,28 @@ def _resolve_plink_prefix(prefix: Path, format: SourceFormat) -> ResolvedSource:
     members = _existing_members(prefix, suffixes)
     missing = sorted(set(suffixes) - set(members))
     if missing:
-        missing_paths = ", ".join(str(prefix.with_suffix(suffixes[key])) for key in missing)
-        raise MissingCompanionFileError(f"missing companion file(s): {missing_paths}")
+        missing_paths = ", ".join(str(_append_suffix(prefix, suffixes[key])) for key in missing)
+        raise MissingCompanionFileError(
+            f"missing companion file(s): {missing_paths}{_trailing_dot_prefix_hint(prefix)}"
+        )
     primary_key = "bed" if format is SourceFormat.PLINK1 else "pgen"
     return ResolvedSource(format=format, path=members[primary_key], members=members, prefix=prefix)
+
+
+def _trailing_dot_prefix_hint(prefix: Path) -> str:
+    if not prefix.name.endswith("."):
+        return ""
+    trimmed_name = prefix.name.rstrip(".")
+    if not trimmed_name:
+        return ""
+    trimmed_prefix = prefix.with_name(trimmed_name)
+    return f"; did you include an extra trailing '.' in the path? Use prefix {trimmed_prefix} instead of {prefix}"
 
 
 def _existing_members(prefix: Path, suffixes: Mapping[str, str]) -> dict[str, Path]:
     members: dict[str, Path] = {}
     for key, suffix in suffixes.items():
-        member_path = prefix.with_suffix(suffix)
+        member_path = _append_suffix(prefix, suffix)
         if key == "pvar" and not member_path.exists():
             compressed_member = Path(f"{member_path}.zst")
             if compressed_member.exists():
