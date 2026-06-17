@@ -10,15 +10,16 @@ samples on rows, variants on columns, and metadata aligned to returned matrices,
 blocks, or regions.
 
 ## Install
+To install the most recent release:
+
+```bash
+pip install genoio
+```
+
+Or the latest:
 
 ```bash
 pip install git+https://github.com/mancusolab/genoio.git
-```
-
-From a local checkout:
-
-```bash
-pip install .
 ```
 
 ## Documentation
