@@ -336,6 +336,49 @@ fn genotype_stats_only_filters_evaluate_without_variant_metadata() {
 }
 
 #[test]
+fn genotype_filter_plan_matches_genotype_stats_only_evaluation() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "maf", "params": {"min": 0.2, "max": 0.4}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.1}}
+    }))
+    .expect("filter IR should deserialize");
+    let plan = filter.genotype_filter_plan();
+
+    for stats in [
+        genoio_core::VariantStats {
+            af: Some(0.25),
+            maf: Some(0.25),
+            mac: Some(4.0),
+            missing_rate: 0.0,
+            n_called: 8,
+            polymorphic: true,
+        },
+        genoio_core::VariantStats {
+            af: Some(0.45),
+            maf: Some(0.45),
+            mac: Some(7.0),
+            missing_rate: 0.0,
+            n_called: 8,
+            polymorphic: true,
+        },
+        genoio_core::VariantStats {
+            af: Some(0.25),
+            maf: Some(0.25),
+            mac: Some(4.0),
+            missing_rate: 0.2,
+            n_called: 8,
+            polymorphic: true,
+        },
+    ] {
+        assert_eq!(
+            plan.evaluate_stats(&stats),
+            filter.evaluate_genotype_stats(&stats)
+        );
+    }
+}
+
+#[test]
 fn polymorphic_filters_compile_to_specialized_genotype_plan() {
     let plain = genoio_core::VariantFilter::from_json_value(serde_json::json!({
         "op": "predicate",

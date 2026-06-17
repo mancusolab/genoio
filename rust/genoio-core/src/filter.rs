@@ -79,52 +79,38 @@ impl GenotypeFilterConjunction {
     }
 
     fn is_empty(self) -> bool {
-        !self.polymorphic
-            && self.mac_min.is_none()
-            && self.mac_max.is_none()
-            && self.maf_min.is_none()
-            && self.maf_max.is_none()
-            && self.missing_rate_max.is_none()
+        !self.polymorphic && !self.has_mac() && !self.has_maf() && !self.has_missing_rate()
+    }
+
+    fn has_mac(self) -> bool {
+        self.mac_min.is_some() || self.mac_max.is_some()
+    }
+
+    fn has_maf(self) -> bool {
+        self.maf_min.is_some() || self.maf_max.is_some()
+    }
+
+    fn has_missing_rate(self) -> bool {
+        self.missing_rate_max.is_some()
     }
 
     fn into_plan(self) -> GenotypeFilterPlan {
-        if self.polymorphic
-            && self.mac_min.is_none()
-            && self.mac_max.is_none()
-            && self.maf_min.is_none()
-            && self.maf_max.is_none()
-            && self.missing_rate_max.is_none()
-        {
+        if self.polymorphic && !self.has_mac() && !self.has_maf() && !self.has_missing_rate() {
             return GenotypeFilterPlan::Polymorphic;
         }
-        if !self.polymorphic
-            && self.maf_min.is_none()
-            && self.maf_max.is_none()
-            && self.missing_rate_max.is_none()
-            && (self.mac_min.is_some() || self.mac_max.is_some())
-        {
+        if !self.polymorphic && self.has_mac() && !self.has_maf() && !self.has_missing_rate() {
             return GenotypeFilterPlan::MacRange {
                 min: self.mac_min,
                 max: self.mac_max,
             };
         }
-        if !self.polymorphic
-            && self.mac_min.is_none()
-            && self.mac_max.is_none()
-            && self.missing_rate_max.is_none()
-            && (self.maf_min.is_some() || self.maf_max.is_some())
-        {
+        if !self.polymorphic && !self.has_mac() && self.has_maf() && !self.has_missing_rate() {
             return GenotypeFilterPlan::MafRange {
                 min: self.maf_min,
                 max: self.maf_max,
             };
         }
-        if !self.polymorphic
-            && self.mac_min.is_none()
-            && self.mac_max.is_none()
-            && self.maf_min.is_none()
-            && self.maf_max.is_none()
-        {
+        if !self.polymorphic && !self.has_mac() && !self.has_maf() {
             if let Some(max) = self.missing_rate_max {
                 return GenotypeFilterPlan::MissingRateMax { max };
             }
@@ -136,14 +122,10 @@ impl GenotypeFilterConjunction {
         if self.polymorphic && !stats.polymorphic {
             return false;
         }
-        if (self.mac_min.is_some() || self.mac_max.is_some())
-            && !mac_in_range(stats, self.mac_min, self.mac_max)
-        {
+        if self.has_mac() && !mac_in_range(stats, self.mac_min, self.mac_max) {
             return false;
         }
-        if (self.maf_min.is_some() || self.maf_max.is_some())
-            && !maf_in_range(stats, self.maf_min, self.maf_max)
-        {
+        if self.has_maf() && !maf_in_range(stats, self.maf_min, self.maf_max) {
             return false;
         }
         if self
@@ -466,25 +448,10 @@ impl Expr {
     fn collect_genotype_conjunction(&self, plan: &mut GenotypeFilterConjunction) -> bool {
         match self {
             Self::AlwaysTrue | Self::AlwaysFalse => true,
-            Self::Predicate(Predicate::Polymorphic) => {
-                plan.polymorphic = true;
+            Self::Predicate(predicate) => {
+                predicate.collect_genotype_conjunction(plan);
                 true
             }
-            Self::Predicate(Predicate::Mac { min, max }) => {
-                plan.mac_min = max_option(plan.mac_min, *min);
-                plan.mac_max = min_option(plan.mac_max, *max);
-                true
-            }
-            Self::Predicate(Predicate::Maf { min, max }) => {
-                plan.maf_min = max_f32_option(plan.maf_min, *min);
-                plan.maf_max = min_f32_option(plan.maf_max, *max);
-                true
-            }
-            Self::Predicate(Predicate::MissingRate { max }) => {
-                plan.missing_rate_max = min_f32_option(plan.missing_rate_max, Some(*max));
-                true
-            }
-            Self::Predicate(predicate) => !predicate.requires_genotype_stats(),
             Self::And(left, right) => {
                 left.collect_genotype_conjunction(plan) && right.collect_genotype_conjunction(plan)
             }
@@ -764,10 +731,7 @@ impl Predicate {
     }
 
     fn requires_genotype_stats(&self) -> bool {
-        matches!(
-            self,
-            Self::Maf { .. } | Self::Mac { .. } | Self::MissingRate { .. } | Self::Polymorphic
-        )
+        self.genotype_filter_plan().is_some()
     }
 
     fn is_genotype_stats_only(&self) -> bool {
@@ -779,23 +743,51 @@ impl Predicate {
     }
 
     fn evaluate_from_stats(&self, stats: &VariantStats) -> Option<bool> {
+        self.genotype_filter_plan()
+            .and_then(|plan| plan.evaluate_stats(stats))
+    }
+
+    fn genotype_filter_plan(&self) -> Option<GenotypeFilterPlan> {
         match self {
-            Self::Maf { min, max } => Some(stats.maf.is_some_and(|maf| {
-                min.is_none_or(|threshold| maf >= f64::from(threshold))
-                    && max.is_none_or(|threshold| maf <= f64::from(threshold))
-            })),
-            Self::Mac { min, max } => Some(stats.mac.is_some_and(|mac| {
-                min.is_none_or(|threshold| mac >= f64::from(threshold))
-                    && max.is_none_or(|threshold| mac <= f64::from(threshold))
-            })),
-            Self::MissingRate { max } => Some(stats.missing_rate <= f64::from(*max)),
-            Self::Polymorphic => Some(stats.polymorphic),
+            Self::Maf { min, max } => Some(GenotypeFilterPlan::MafRange {
+                min: *min,
+                max: *max,
+            }),
+            Self::Mac { min, max } => Some(GenotypeFilterPlan::MacRange {
+                min: *min,
+                max: *max,
+            }),
+            Self::MissingRate { max } => Some(GenotypeFilterPlan::MissingRateMax { max: *max }),
+            Self::Polymorphic => Some(GenotypeFilterPlan::Polymorphic),
             Self::Chrom(_)
             | Self::Region { .. }
             | Self::IdIn(_)
             | Self::Snp
             | Self::Biallelic
             | Self::Qual { .. } => None,
+        }
+    }
+
+    fn collect_genotype_conjunction(&self, plan: &mut GenotypeFilterConjunction) {
+        match self {
+            Self::Polymorphic => plan.polymorphic = true,
+            Self::Mac { min, max } => {
+                plan.mac_min = max_option(plan.mac_min, *min);
+                plan.mac_max = min_option(plan.mac_max, *max);
+            }
+            Self::Maf { min, max } => {
+                plan.maf_min = max_f32_option(plan.maf_min, *min);
+                plan.maf_max = min_f32_option(plan.maf_max, *max);
+            }
+            Self::MissingRate { max } => {
+                plan.missing_rate_max = min_f32_option(plan.missing_rate_max, Some(*max));
+            }
+            Self::Chrom(_)
+            | Self::Region { .. }
+            | Self::IdIn(_)
+            | Self::Snp
+            | Self::Biallelic
+            | Self::Qual { .. } => {}
         }
     }
 
