@@ -336,6 +336,240 @@ fn genotype_stats_only_filters_evaluate_without_variant_metadata() {
 }
 
 #[test]
+fn genotype_filter_plan_matches_genotype_stats_only_evaluation() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "maf", "params": {"min": 0.2, "max": 0.4}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.1}}
+    }))
+    .expect("filter IR should deserialize");
+    let plan = filter.genotype_filter_plan();
+
+    for stats in [
+        genoio_core::VariantStats {
+            af: Some(0.25),
+            maf: Some(0.25),
+            mac: Some(4.0),
+            missing_rate: 0.0,
+            n_called: 8,
+            polymorphic: true,
+        },
+        genoio_core::VariantStats {
+            af: Some(0.45),
+            maf: Some(0.45),
+            mac: Some(7.0),
+            missing_rate: 0.0,
+            n_called: 8,
+            polymorphic: true,
+        },
+        genoio_core::VariantStats {
+            af: Some(0.25),
+            maf: Some(0.25),
+            mac: Some(4.0),
+            missing_rate: 0.2,
+            n_called: 8,
+            polymorphic: true,
+        },
+    ] {
+        assert_eq!(
+            plan.evaluate_stats(&stats),
+            filter.evaluate_genotype_stats(&stats)
+        );
+    }
+}
+
+#[test]
+fn polymorphic_filters_compile_to_specialized_genotype_plan() {
+    let plain = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "polymorphic",
+        "params": {}
+    }))
+    .expect("filter IR should deserialize");
+    let metadata_gated = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "biallelic", "params": {}},
+        "right": {"op": "predicate", "name": "polymorphic", "params": {}}
+    }))
+    .expect("filter IR should deserialize");
+    let conjoined = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "polymorphic", "params": {}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.1}}
+    }))
+    .expect("filter IR should deserialize");
+
+    assert_eq!(
+        plain.genotype_filter_plan(),
+        genoio_core::GenotypeFilterPlan::Polymorphic
+    );
+    assert_eq!(
+        metadata_gated.genotype_filter_plan(),
+        genoio_core::GenotypeFilterPlan::Polymorphic
+    );
+    assert_eq!(
+        conjoined.genotype_filter_plan(),
+        genoio_core::GenotypeFilterPlan::Conjunction(genoio_core::GenotypeFilterConjunction {
+            polymorphic: true,
+            mac_min: None,
+            mac_max: None,
+            maf_min: None,
+            maf_max: None,
+            missing_rate_max: Some(0.1),
+        })
+    );
+}
+
+#[test]
+fn range_filters_compile_to_specialized_genotype_plans() {
+    let stats = genoio_core::VariantStats {
+        af: Some(0.125),
+        maf: Some(0.125),
+        mac: Some(4.0),
+        missing_rate: 0.02,
+        n_called: 16,
+        polymorphic: true,
+    };
+
+    let mac_filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "mac",
+        "params": {"min": 2, "max": 8}
+    }))
+    .expect("mac filter should parse");
+    let mac_plan = mac_filter.genotype_filter_plan();
+    assert_eq!(
+        mac_plan,
+        genoio_core::GenotypeFilterPlan::MacRange {
+            min: Some(2),
+            max: Some(8)
+        }
+    );
+    assert_eq!(mac_plan.evaluate_stats(&stats), Some(true));
+
+    let maf_filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "chrom", "params": {"value": "1"}},
+        "right": {"op": "predicate", "name": "maf", "params": {"min": 0.1, "max": 0.2}}
+    }))
+    .expect("mixed metadata/maf filter should parse");
+    let maf_plan = maf_filter.genotype_filter_plan();
+    assert_eq!(
+        maf_plan,
+        genoio_core::GenotypeFilterPlan::MafRange {
+            min: Some(0.1),
+            max: Some(0.2)
+        }
+    );
+    assert_eq!(maf_plan.evaluate_stats(&stats), Some(true));
+
+    let missing_filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "missing_rate",
+        "params": {"max": 0.01}
+    }))
+    .expect("missing-rate filter should parse");
+    let missing_plan = missing_filter.genotype_filter_plan();
+    assert_eq!(
+        missing_plan,
+        genoio_core::GenotypeFilterPlan::MissingRateMax { max: 0.01 }
+    );
+    assert_eq!(missing_plan.evaluate_stats(&stats), Some(false));
+}
+
+#[test]
+fn conjunction_filters_compile_to_specialized_genotype_plan() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "mac", "params": {"min": 2}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.05}}
+    }))
+    .expect("conjoined genotype filter should parse");
+
+    let plan = filter.genotype_filter_plan();
+    assert_eq!(
+        plan,
+        genoio_core::GenotypeFilterPlan::Conjunction(genoio_core::GenotypeFilterConjunction {
+            polymorphic: false,
+            mac_min: Some(2),
+            mac_max: None,
+            maf_min: None,
+            maf_max: None,
+            missing_rate_max: Some(0.05),
+        })
+    );
+    assert_eq!(
+        plan.evaluate_stats(&genoio_core::VariantStats {
+            af: Some(0.125),
+            maf: Some(0.125),
+            mac: Some(4.0),
+            missing_rate: 0.02,
+            n_called: 16,
+            polymorphic: true,
+        }),
+        Some(true)
+    );
+    assert_eq!(
+        plan.evaluate_stats(&genoio_core::VariantStats {
+            af: Some(0.125),
+            maf: Some(0.125),
+            mac: Some(4.0),
+            missing_rate: 0.10,
+            n_called: 16,
+            polymorphic: true,
+        }),
+        Some(false)
+    );
+}
+
+#[test]
+fn unsupported_boolean_filters_keep_generic_genotype_plan() {
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "or",
+        "left": {"op": "predicate", "name": "mac", "params": {"min": 2}},
+        "right": {"op": "predicate", "name": "missing_rate", "params": {"max": 0.05}}
+    }))
+    .expect("or filter should parse");
+
+    let plan = filter.genotype_filter_plan();
+    assert_eq!(plan, genoio_core::GenotypeFilterPlan::Generic);
+    assert_eq!(
+        plan.evaluate_stats(&genoio_core::VariantStats {
+            af: Some(0.125),
+            maf: Some(0.125),
+            mac: Some(4.0),
+            missing_rate: 0.02,
+            n_called: 16,
+            polymorphic: true,
+        }),
+        None
+    );
+}
+
+#[test]
+fn dosage_values_detect_polymorphic_without_full_variant_stats() {
+    assert!(
+        genoio_core::is_dosage_polymorphic(&[0.0, 1.0, 0.0], &[false, false, false])
+            .expect("valid dosages should evaluate")
+    );
+    assert!(
+        !genoio_core::is_dosage_polymorphic(&[0.0, 0.0, 0.0], &[false, false, true])
+            .expect("valid dosages should evaluate")
+    );
+    assert!(
+        !genoio_core::is_dosage_polymorphic(&[2.0, 2.0], &[false, false])
+            .expect("valid dosages should evaluate")
+    );
+    assert!(!genoio_core::is_dosage_polymorphic(&[1.0], &[true])
+        .expect("missing dosages should not count"));
+    assert!(
+        genoio_core::is_dosage_polymorphic(&[0.1, 1.9], &[false, false])
+            .expect("fractional dosages should evaluate")
+    );
+    assert!(genoio_core::is_dosage_polymorphic(&[3.0], &[false]).is_err());
+}
+
+#[test]
 fn genotype_stats_only_detection_handles_boolean_composition() {
     let cases = [
         (

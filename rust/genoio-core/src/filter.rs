@@ -17,6 +17,141 @@ pub struct VariantFilter {
     expr: Expr,
 }
 
+/// Compiled genotype-dependent portion of a variant filter.
+///
+/// Backends use this to select a format-specific predicate kernel when the
+/// filter shape is simple enough to avoid constructing full `VariantStats`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GenotypeFilterPlan {
+    /// Use the generic `VariantStats` evaluation path.
+    Generic,
+    /// Retain variants with nonzero minor allele count.
+    Polymorphic,
+    /// Retain variants with minor allele count within a closed range.
+    MacRange { min: Option<u32>, max: Option<u32> },
+    /// Retain variants with minor allele frequency within a closed range.
+    MafRange { min: Option<f32>, max: Option<f32> },
+    /// Retain variants with missing rate no greater than `max`.
+    MissingRateMax { max: f32 },
+    /// Retain variants satisfying a conjunction of simple genotype predicates.
+    Conjunction(GenotypeFilterConjunction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenotypeFilterConjunction {
+    /// True when a nonzero reference and nonzero alternate allele are required.
+    pub polymorphic: bool,
+    /// Inclusive lower bound for minor allele count.
+    pub mac_min: Option<u32>,
+    /// Inclusive upper bound for minor allele count.
+    pub mac_max: Option<u32>,
+    /// Inclusive lower bound for minor allele frequency.
+    pub maf_min: Option<f32>,
+    /// Inclusive upper bound for minor allele frequency.
+    pub maf_max: Option<f32>,
+    /// Inclusive upper bound for missing-call rate.
+    pub missing_rate_max: Option<f32>,
+}
+
+impl GenotypeFilterPlan {
+    pub fn evaluate_stats(self, stats: &VariantStats) -> Option<bool> {
+        match self {
+            Self::Generic => None,
+            Self::Polymorphic => Some(stats.polymorphic),
+            Self::MacRange { min, max } => Some(mac_in_range(stats, min, max)),
+            Self::MafRange { min, max } => Some(maf_in_range(stats, min, max)),
+            Self::MissingRateMax { max } => Some(stats.missing_rate <= f64::from(max)),
+            Self::Conjunction(plan) => Some(plan.evaluate_stats(stats)),
+        }
+    }
+}
+
+impl GenotypeFilterConjunction {
+    fn empty() -> Self {
+        Self {
+            polymorphic: false,
+            mac_min: None,
+            mac_max: None,
+            maf_min: None,
+            maf_max: None,
+            missing_rate_max: None,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        !self.polymorphic && !self.has_mac() && !self.has_maf() && !self.has_missing_rate()
+    }
+
+    fn has_mac(self) -> bool {
+        self.mac_min.is_some() || self.mac_max.is_some()
+    }
+
+    fn has_maf(self) -> bool {
+        self.maf_min.is_some() || self.maf_max.is_some()
+    }
+
+    fn has_missing_rate(self) -> bool {
+        self.missing_rate_max.is_some()
+    }
+
+    fn into_plan(self) -> GenotypeFilterPlan {
+        if self.polymorphic && !self.has_mac() && !self.has_maf() && !self.has_missing_rate() {
+            return GenotypeFilterPlan::Polymorphic;
+        }
+        if !self.polymorphic && self.has_mac() && !self.has_maf() && !self.has_missing_rate() {
+            return GenotypeFilterPlan::MacRange {
+                min: self.mac_min,
+                max: self.mac_max,
+            };
+        }
+        if !self.polymorphic && !self.has_mac() && self.has_maf() && !self.has_missing_rate() {
+            return GenotypeFilterPlan::MafRange {
+                min: self.maf_min,
+                max: self.maf_max,
+            };
+        }
+        if !self.polymorphic && !self.has_mac() && !self.has_maf() {
+            if let Some(max) = self.missing_rate_max {
+                return GenotypeFilterPlan::MissingRateMax { max };
+            }
+        }
+        GenotypeFilterPlan::Conjunction(self)
+    }
+
+    fn evaluate_stats(self, stats: &VariantStats) -> bool {
+        if self.polymorphic && !stats.polymorphic {
+            return false;
+        }
+        if self.has_mac() && !mac_in_range(stats, self.mac_min, self.mac_max) {
+            return false;
+        }
+        if self.has_maf() && !maf_in_range(stats, self.maf_min, self.maf_max) {
+            return false;
+        }
+        if self
+            .missing_rate_max
+            .is_some_and(|max| stats.missing_rate > f64::from(max))
+        {
+            return false;
+        }
+        true
+    }
+}
+
+fn mac_in_range(stats: &VariantStats, min: Option<u32>, max: Option<u32>) -> bool {
+    stats.mac.is_some_and(|mac| {
+        min.is_none_or(|threshold| mac >= f64::from(threshold))
+            && max.is_none_or(|threshold| mac <= f64::from(threshold))
+    })
+}
+
+fn maf_in_range(stats: &VariantStats, min: Option<f32>, max: Option<f32>) -> bool {
+    stats.maf.is_some_and(|maf| {
+        min.is_none_or(|threshold| maf >= f64::from(threshold))
+            && max.is_none_or(|threshold| maf <= f64::from(threshold))
+    })
+}
+
 /// Metadata-only filter decision before genotype values are decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialFilterDecision {
@@ -170,6 +305,11 @@ impl VariantFilter {
             .then(|| self.expr.evaluate_genotype_stats(stats))
     }
 
+    /// Return a compiled plan for genotype-dependent filter evaluation.
+    pub fn genotype_filter_plan(&self) -> GenotypeFilterPlan {
+        self.expr.genotype_filter_plan()
+    }
+
     /// Return true when the expression contains any region predicate.
     pub fn has_region_predicate(&self) -> bool {
         self.expr.has_region_predicate()
@@ -293,6 +433,29 @@ impl Expr {
                 left.evaluate_genotype_stats(stats) || right.evaluate_genotype_stats(stats)
             }
             Self::Not(expr) => !expr.evaluate_genotype_stats(stats),
+        }
+    }
+
+    fn genotype_filter_plan(&self) -> GenotypeFilterPlan {
+        let mut conjunction = GenotypeFilterConjunction::empty();
+        if self.collect_genotype_conjunction(&mut conjunction) && !conjunction.is_empty() {
+            conjunction.into_plan()
+        } else {
+            GenotypeFilterPlan::Generic
+        }
+    }
+
+    fn collect_genotype_conjunction(&self, plan: &mut GenotypeFilterConjunction) -> bool {
+        match self {
+            Self::AlwaysTrue | Self::AlwaysFalse => true,
+            Self::Predicate(predicate) => {
+                predicate.collect_genotype_conjunction(plan);
+                true
+            }
+            Self::And(left, right) => {
+                left.collect_genotype_conjunction(plan) && right.collect_genotype_conjunction(plan)
+            }
+            Self::Or(_, _) | Self::Not(_) => false,
         }
     }
 
@@ -568,10 +731,7 @@ impl Predicate {
     }
 
     fn requires_genotype_stats(&self) -> bool {
-        matches!(
-            self,
-            Self::Maf { .. } | Self::Mac { .. } | Self::MissingRate { .. } | Self::Polymorphic
-        )
+        self.genotype_filter_plan().is_some()
     }
 
     fn is_genotype_stats_only(&self) -> bool {
@@ -583,23 +743,51 @@ impl Predicate {
     }
 
     fn evaluate_from_stats(&self, stats: &VariantStats) -> Option<bool> {
+        self.genotype_filter_plan()
+            .and_then(|plan| plan.evaluate_stats(stats))
+    }
+
+    fn genotype_filter_plan(&self) -> Option<GenotypeFilterPlan> {
         match self {
-            Self::Maf { min, max } => Some(stats.maf.is_some_and(|maf| {
-                min.is_none_or(|threshold| maf >= f64::from(threshold))
-                    && max.is_none_or(|threshold| maf <= f64::from(threshold))
-            })),
-            Self::Mac { min, max } => Some(stats.mac.is_some_and(|mac| {
-                min.is_none_or(|threshold| mac >= f64::from(threshold))
-                    && max.is_none_or(|threshold| mac <= f64::from(threshold))
-            })),
-            Self::MissingRate { max } => Some(stats.missing_rate <= f64::from(*max)),
-            Self::Polymorphic => Some(stats.polymorphic),
+            Self::Maf { min, max } => Some(GenotypeFilterPlan::MafRange {
+                min: *min,
+                max: *max,
+            }),
+            Self::Mac { min, max } => Some(GenotypeFilterPlan::MacRange {
+                min: *min,
+                max: *max,
+            }),
+            Self::MissingRate { max } => Some(GenotypeFilterPlan::MissingRateMax { max: *max }),
+            Self::Polymorphic => Some(GenotypeFilterPlan::Polymorphic),
             Self::Chrom(_)
             | Self::Region { .. }
             | Self::IdIn(_)
             | Self::Snp
             | Self::Biallelic
             | Self::Qual { .. } => None,
+        }
+    }
+
+    fn collect_genotype_conjunction(&self, plan: &mut GenotypeFilterConjunction) {
+        match self {
+            Self::Polymorphic => plan.polymorphic = true,
+            Self::Mac { min, max } => {
+                plan.mac_min = max_option(plan.mac_min, *min);
+                plan.mac_max = min_option(plan.mac_max, *max);
+            }
+            Self::Maf { min, max } => {
+                plan.maf_min = max_f32_option(plan.maf_min, *min);
+                plan.maf_max = min_f32_option(plan.maf_max, *max);
+            }
+            Self::MissingRate { max } => {
+                plan.missing_rate_max = min_f32_option(plan.missing_rate_max, Some(*max));
+            }
+            Self::Chrom(_)
+            | Self::Region { .. }
+            | Self::IdIn(_)
+            | Self::Snp
+            | Self::Biallelic
+            | Self::Qual { .. } => {}
         }
     }
 
@@ -860,6 +1048,36 @@ pub fn compute_dosage_variant_stats(
     }
 
     variant_stats_from_dosage_count(allele_count, called_count, missing_count)
+}
+
+/// Return true when called dosage values contain both alleles.
+pub fn is_dosage_polymorphic(values: &[f32], missing_mask: &[bool]) -> Result<bool, GenoioError> {
+    if values.len() != missing_mask.len() {
+        return Err(GenoioError::invalid_source(
+            "<filter>",
+            "variant values and missing mask lengths differ",
+        ));
+    }
+
+    let mut allele_count = 0.0_f64;
+    let mut called_count = 0_u64;
+    for (value, missing) in values.iter().zip(missing_mask) {
+        if *missing {
+            continue;
+        }
+        if !(0.0..=2.0).contains(value) {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                format!("dosage statistics require values in [0, 2]; observed {value}"),
+            ));
+        }
+        allele_count += f64::from(*value);
+        called_count += 1;
+        if allele_count > 0.0 && allele_count < 2.0 * called_count as f64 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Compute variant statistics from hard-call category counts.

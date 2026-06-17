@@ -1,6 +1,9 @@
 // pattern: Functional Core
 
-use genoio_core::{variant_stats_from_counts, GenoioError, VariantStats};
+use genoio_core::{
+    variant_stats_from_counts, GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan,
+    VariantFilter, VariantRecord, VariantStats,
+};
 
 use crate::error::Result;
 
@@ -10,6 +13,144 @@ pub(crate) const HARDCALL_BATCH_SIZE: usize = 64;
 pub(crate) struct PackedHardcalls {
     words: Vec<u64>,
     sample_ct: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct HardcallCounts {
+    hom_ref: u64,
+    het: u64,
+    hom_alt: u64,
+    missing: u64,
+}
+
+impl HardcallCounts {
+    fn evaluate_plan(self, plan: GenotypeFilterPlan) -> Result<Option<bool>> {
+        match plan {
+            GenotypeFilterPlan::Generic => Ok(None),
+            GenotypeFilterPlan::Polymorphic => Ok(Some(self.is_polymorphic()?)),
+            GenotypeFilterPlan::MacRange { min, max } => Ok(Some(self.mac_in_range(min, max)?)),
+            GenotypeFilterPlan::MafRange { min, max } => Ok(Some(self.maf_in_range(min, max)?)),
+            GenotypeFilterPlan::MissingRateMax { max } => {
+                Ok(Some(self.missing_rate() <= f64::from(max)))
+            }
+            GenotypeFilterPlan::Conjunction(plan) => Ok(Some(self.evaluate_conjunction(plan)?)),
+        }
+    }
+
+    fn evaluate_conjunction(self, plan: GenotypeFilterConjunction) -> Result<bool> {
+        if plan.polymorphic && !self.is_polymorphic()? {
+            return Ok(false);
+        }
+        if (plan.mac_min.is_some() || plan.mac_max.is_some())
+            && !self.mac_in_range(plan.mac_min, plan.mac_max)?
+        {
+            return Ok(false);
+        }
+        if (plan.maf_min.is_some() || plan.maf_max.is_some())
+            && !self.maf_in_range(plan.maf_min, plan.maf_max)?
+        {
+            return Ok(false);
+        }
+        if plan
+            .missing_rate_max
+            .is_some_and(|max| self.missing_rate() > f64::from(max))
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn called_count(self) -> Result<u64> {
+        self.hom_ref
+            .checked_add(self.het)
+            .and_then(|count| count.checked_add(self.hom_alt))
+            .ok_or_else(|| {
+                GenoioError::invalid_source(
+                    "<filter>",
+                    "called genotype count exceeds supported metadata range",
+                )
+            })
+    }
+
+    fn total_count(self) -> Result<u64> {
+        self.called_count()?
+            .checked_add(self.missing)
+            .ok_or_else(|| {
+                GenoioError::invalid_source(
+                    "<filter>",
+                    "genotype count exceeds supported metadata range",
+                )
+            })
+    }
+
+    fn allele_count(self) -> Result<Option<u64>> {
+        if self.called_count()? == 0 {
+            return Ok(None);
+        }
+        self.het
+            .checked_add(self.hom_alt.checked_mul(2).ok_or_else(|| {
+                GenoioError::invalid_source(
+                    "<filter>",
+                    "allele count exceeds supported metadata range",
+                )
+            })?)
+            .map(Some)
+            .ok_or_else(|| {
+                GenoioError::invalid_source(
+                    "<filter>",
+                    "allele count exceeds supported metadata range",
+                )
+            })
+    }
+
+    fn minor_allele_count(self) -> Result<Option<u32>> {
+        let Some(allele_count) = self.allele_count()? else {
+            return Ok(None);
+        };
+        let called_alleles = self.called_count()?.checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source("<filter>", "allele count exceeds supported metadata range")
+        })?;
+        let mac = allele_count.min(called_alleles - allele_count);
+        u32::try_from(mac).map(Some).map_err(|_| {
+            GenoioError::invalid_source(
+                "<filter>",
+                "minor allele count exceeds supported metadata range",
+            )
+        })
+    }
+
+    fn missing_rate(self) -> f64 {
+        let total = self.total_count().unwrap_or(0);
+        if total == 0 {
+            0.0
+        } else {
+            self.missing as f64 / total as f64
+        }
+    }
+
+    fn is_polymorphic(self) -> Result<bool> {
+        Ok(self.minor_allele_count()?.is_some_and(|mac| mac > 0))
+    }
+
+    fn mac_in_range(self, min: Option<u32>, max: Option<u32>) -> Result<bool> {
+        let Some(mac) = self.minor_allele_count()? else {
+            return Ok(false);
+        };
+        Ok(min.is_none_or(|threshold| mac >= threshold)
+            && max.is_none_or(|threshold| mac <= threshold))
+    }
+
+    fn maf_in_range(self, min: Option<f32>, max: Option<f32>) -> Result<bool> {
+        let Some(mac) = self.minor_allele_count()? else {
+            return Ok(false);
+        };
+        let called_alleles = self.called_count()?.checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source("<filter>", "allele count exceeds supported metadata range")
+        })?;
+        let maf = f64::from(mac) / called_alleles as f64;
+        Ok(min.is_none_or(|threshold| maf >= f64::from(threshold))
+            && max.is_none_or(|threshold| maf <= f64::from(threshold)))
+    }
 }
 
 impl PackedHardcalls {
@@ -109,10 +250,12 @@ impl PackedHardcalls {
     }
 
     pub(crate) fn stats_for_selected(&self, source_indices: &[usize]) -> Result<VariantStats> {
-        let mut hom_ref_count = 0_u64;
-        let mut het_count = 0_u64;
-        let mut hom_alt_count = 0_u64;
-        let mut missing_count = 0_u64;
+        let counts = self.counts_for_selected(source_indices)?;
+        variant_stats_from_counts(counts.hom_ref, counts.het, counts.hom_alt, counts.missing)
+    }
+
+    fn counts_for_selected(&self, source_indices: &[usize]) -> Result<HardcallCounts> {
+        let mut counts = HardcallCounts::default();
         for source_index in source_indices {
             if *source_index >= self.sample_ct {
                 return Err(GenoioError::invalid_source(
@@ -121,14 +264,14 @@ impl PackedHardcalls {
                 ));
             }
             match self.get(*source_index) {
-                0 => hom_ref_count += 1,
-                1 => het_count += 1,
-                2 => hom_alt_count += 1,
-                3 => missing_count += 1,
+                0 => counts.hom_ref += 1,
+                1 => counts.het += 1,
+                2 => counts.hom_alt += 1,
+                3 => counts.missing += 1,
                 _ => unreachable!("two-bit hard-call code should be masked"),
             }
         }
-        variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
+        Ok(counts)
     }
 
     pub(crate) fn stats_for_selection(
@@ -142,24 +285,103 @@ impl PackedHardcalls {
         self.stats_for_selected(source_indices)
     }
 
+    pub(crate) fn evaluate_filter_plan_for_selection(
+        &self,
+        plan: GenotypeFilterPlan,
+        source_indices: &[usize],
+        all_samples_selected: bool,
+    ) -> Result<Option<bool>> {
+        if matches!(plan, GenotypeFilterPlan::Generic) {
+            return Ok(None);
+        }
+        if matches!(plan, GenotypeFilterPlan::Polymorphic) {
+            return self
+                .is_polymorphic_for_selection(source_indices, all_samples_selected)
+                .map(Some);
+        }
+        let counts = if all_samples_selected {
+            self.counts_for_all()
+        } else {
+            self.counts_for_selected(source_indices)?
+        };
+        counts.evaluate_plan(plan)
+    }
+
+    pub(crate) fn is_polymorphic_for_selection(
+        &self,
+        source_indices: &[usize],
+        all_samples_selected: bool,
+    ) -> Result<bool> {
+        if all_samples_selected {
+            return Ok(self.is_polymorphic_for_all());
+        }
+        self.is_polymorphic_for_selected(source_indices)
+    }
+
+    fn is_polymorphic_for_selected(&self, source_indices: &[usize]) -> Result<bool> {
+        let mut has_ref = false;
+        let mut has_alt = false;
+        for source_index in source_indices {
+            if *source_index >= self.sample_ct {
+                return Err(GenoioError::invalid_source(
+                    "<hardcall>",
+                    "selected sample index is outside hard-call sample count",
+                ));
+            }
+            match self.get(*source_index) {
+                0 => has_ref = true,
+                1 => {
+                    has_ref = true;
+                    has_alt = true;
+                }
+                2 => has_alt = true,
+                3 => {}
+                _ => unreachable!("two-bit hard-call code should be masked"),
+            }
+            if has_ref && has_alt {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn is_polymorphic_for_all(&self) -> bool {
+        let mut has_ref = false;
+        let mut has_alt = false;
+        for (word_index, word) in self.words.iter().copied().enumerate() {
+            let valid_lanes = self.valid_lane_mask(word_index);
+            let low_bits = word & valid_lanes;
+            let high_bits = (word >> 1) & valid_lanes;
+
+            has_ref |= (!high_bits & valid_lanes) != 0;
+            has_alt |= ((low_bits ^ high_bits) & valid_lanes) != 0;
+            if has_ref && has_alt {
+                return true;
+            }
+        }
+        false
+    }
+
     fn stats_for_all(&self) -> Result<VariantStats> {
-        let mut hom_ref_count = 0_u64;
-        let mut het_count = 0_u64;
-        let mut hom_alt_count = 0_u64;
-        let mut missing_count = 0_u64;
+        let counts = self.counts_for_all();
+        variant_stats_from_counts(counts.hom_ref, counts.het, counts.hom_alt, counts.missing)
+    }
+
+    fn counts_for_all(&self) -> HardcallCounts {
+        let mut counts = HardcallCounts::default();
 
         for (word_index, word) in self.words.iter().copied().enumerate() {
             let valid_lanes = self.valid_lane_mask(word_index);
             let low_bits = word & valid_lanes;
             let high_bits = (word >> 1) & valid_lanes;
 
-            hom_ref_count += ((!low_bits & !high_bits) & valid_lanes).count_ones() as u64;
-            het_count += (low_bits & !high_bits & valid_lanes).count_ones() as u64;
-            hom_alt_count += (!low_bits & high_bits & valid_lanes).count_ones() as u64;
-            missing_count += (low_bits & high_bits & valid_lanes).count_ones() as u64;
+            counts.hom_ref += ((!low_bits & !high_bits) & valid_lanes).count_ones() as u64;
+            counts.het += (low_bits & !high_bits & valid_lanes).count_ones() as u64;
+            counts.hom_alt += (!low_bits & high_bits & valid_lanes).count_ones() as u64;
+            counts.missing += (low_bits & high_bits & valid_lanes).count_ones() as u64;
         }
 
-        variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
+        counts
     }
 
     fn valid_lane_mask(&self, word_index: usize) -> u64 {
@@ -194,6 +416,41 @@ impl PackedHardcalls {
             *last_word &= mask;
         }
     }
+}
+
+pub(crate) fn evaluate_packed_hardcall_filter(
+    packed: &PackedHardcalls,
+    source_indices: &[usize],
+    all_samples_selected: bool,
+    filter: &VariantFilter,
+    filter_plan: GenotypeFilterPlan,
+    variant: Option<&VariantRecord>,
+    require_stats: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    // Matrix-only reads can answer common genotype-stat filters from packed
+    // counts alone. Metadata output still asks for stats so they can be
+    // attached to retained variant rows.
+    if !require_stats {
+        if let Some(retain) = packed.evaluate_filter_plan_for_selection(
+            filter_plan,
+            source_indices,
+            all_samples_selected,
+        )? {
+            return Ok((retain, None));
+        }
+    }
+
+    let stats = packed.stats_for_selection(source_indices, all_samples_selected)?;
+    let retain = if let Some(variant) = variant {
+        filter.evaluate(variant, Some(&stats))
+    } else {
+        filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
+            GenoioError::internal_contract(
+                "genotype-stats-only fast path received metadata-dependent filter",
+            )
+        })?
+    };
+    Ok((retain, Some(stats)))
 }
 
 #[derive(Debug, Clone)]
@@ -457,6 +714,107 @@ mod tests {
 
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn packed_hardcalls_detects_polymorphic_for_selection() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(8);
+        for (sample_index, category) in [0, 0, 3, 0, 2, 3, 1, 0].into_iter().enumerate() {
+            packed.set(sample_index, category);
+        }
+
+        assert!(packed
+            .is_polymorphic_for_selection(&[0, 1, 2, 3, 4, 5, 6, 7], true)
+            .expect("valid all-sample selection should evaluate"));
+        assert!(packed
+            .is_polymorphic_for_selection(&[0, 4], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(packed
+            .is_polymorphic_for_selection(&[1, 6], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(!packed
+            .is_polymorphic_for_selection(&[0, 1, 3, 7], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(!packed
+            .is_polymorphic_for_selection(&[2, 5], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(packed.is_polymorphic_for_selection(&[8], false).is_err());
+    }
+
+    #[test]
+    fn packed_hardcalls_evaluate_compiled_filter_plans_for_selection() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(8);
+        for (sample_index, category) in [0, 1, 2, 3, 2, 0, 1, 3].into_iter().enumerate() {
+            packed.set(sample_index, category);
+        }
+
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::MacRange {
+                        min: Some(2),
+                        max: Some(8),
+                    },
+                    &[0, 1, 2, 3, 4, 5, 6, 7],
+                    true,
+                )
+                .expect("valid plan should evaluate"),
+            Some(true)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::MafRange {
+                        min: Some(0.4),
+                        max: Some(0.5),
+                    },
+                    &[0, 1, 2, 3, 4, 5, 6, 7],
+                    true,
+                )
+                .expect("valid plan should evaluate"),
+            Some(true)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::Conjunction(
+                        genoio_core::GenotypeFilterConjunction {
+                            polymorphic: true,
+                            mac_min: Some(2),
+                            mac_max: None,
+                            maf_min: None,
+                            maf_max: None,
+                            missing_rate_max: Some(0.20),
+                        },
+                    ),
+                    &[0, 1, 2, 3, 4, 5, 6, 7],
+                    true,
+                )
+                .expect("valid plan should evaluate"),
+            Some(false)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::MissingRateMax { max: 0.0 },
+                    &[0, 5],
+                    false,
+                )
+                .expect("valid selected plan should evaluate"),
+            Some(true)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::Generic,
+                    &[0, 1],
+                    false,
+                )
+                .expect("generic plan should fall back"),
+            None
+        );
     }
 
     #[test]

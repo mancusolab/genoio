@@ -135,22 +135,6 @@ fn validate_variant_major_len(
     Ok(())
 }
 
-pub(crate) fn empty_dense_matrix(
-    samples: Vec<SampleRecord>,
-    mut diagnostics: DenseDiagnostics,
-) -> Result<DenseGenotypeMatrix> {
-    diagnostics.retained_variants = 0;
-    DenseGenotypeMatrix::new(
-        samples.len(),
-        0,
-        Vec::new(),
-        Vec::new(),
-        samples,
-        Vec::new(),
-        diagnostics,
-    )
-}
-
 pub(crate) fn empty_sparse_matrix(
     samples: Vec<SampleRecord>,
     mut diagnostics: DenseDiagnostics,

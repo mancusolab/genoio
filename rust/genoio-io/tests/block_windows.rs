@@ -151,6 +151,7 @@ fn vcf_dense_window_stops_after_requested_retained_variants() {
         None,
         None,
         Some(VariantWindow { start: 0, len: 1 }),
+        false,
     )
     .expect("windowed vcf should stop before later invalid records");
 
@@ -209,6 +210,7 @@ fn vcf_dense_window_uses_retained_variant_order_after_filters() {
         None,
         Some(&filter),
         Some(VariantWindow { start: 1, len: 2 }),
+        false,
     )
     .expect("windowed vcf should decode");
 
@@ -240,6 +242,7 @@ fn vcf_dense_window_skips_pre_window_metadata_accepted_genotypes() {
         None,
         Some(&filter),
         Some(VariantWindow { start: 1, len: 1 }),
+        false,
     )
     .expect("windowed vcf should skip pre-window metadata-accepted genotypes");
 

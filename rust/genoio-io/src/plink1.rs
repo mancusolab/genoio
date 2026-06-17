@@ -7,13 +7,13 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order, DenseDiagnostics,
-    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
-    VariantWindow,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataOutput,
+    PartialFilterDecision, SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
-use crate::hardcall::{HardcallBatch, PackedHardcalls};
+use crate::hardcall::{evaluate_packed_hardcall_filter, HardcallBatch, PackedHardcalls};
 use crate::matrix::{
     empty_sparse_matrix, finish_dense_matrix, shrink_sample_major_width, DenseMatrixParts,
 };
@@ -209,6 +209,10 @@ fn read_plink1_dense_with_variants(
     );
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
+    let genotype_filter_plan = variant_filter.map_or(
+        GenotypeFilterPlan::Generic,
+        VariantFilter::genotype_filter_plan,
+    );
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
@@ -231,19 +235,22 @@ fn read_plink1_dense_with_variants(
             &mut decoder_state,
         )?;
 
-        let stats = if needs_genotype_decision {
-            Some(decoder_state.packed.stats_for_selection(
+        let mut stats = None;
+        if needs_genotype_decision {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, computed_stats) = evaluate_packed_hardcall_filter(
+                &decoder_state.packed,
                 &context.selection.source_indices,
                 context.all_samples_selected,
-            )?)
-        } else {
-            None
-        };
-        if needs_genotype_decision {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
+                filter,
+                genotype_filter_plan,
+                Some(&variant),
+                !matrix_only,
+            )?;
+            stats = computed_stats;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
@@ -418,6 +425,7 @@ fn read_plink1_dense_matrix_only_genotype_filter(
     let mut retention = RetainedVariantState::new(Some(window));
     let mut diagnostics = context.selection.diagnostics;
     let mut output_variant_count = 0_usize;
+    let genotype_filter_plan = filter.genotype_filter_plan();
 
     for _ in 0..context.n_source_variants {
         diagnostics.candidate_variants += 1;
@@ -429,18 +437,16 @@ fn read_plink1_dense_matrix_only_genotype_filter(
             &mut decoder_state,
         )?;
 
-        let stats = decoder_state.packed.stats_for_selection(
+        let (retain_variant, _) = evaluate_packed_hardcall_filter(
+            &decoder_state.packed,
             &context.selection.source_indices,
             context.all_samples_selected,
+            filter,
+            genotype_filter_plan,
+            None,
+            false,
         )?;
-        match retention.genotype_decision(
-            filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
-                GenoioError::internal_contract(
-                    "genotype-stats-only fast path received metadata-dependent filter",
-                )
-            })?,
-            &mut diagnostics,
-        ) {
+        match retention.genotype_decision(retain_variant, &mut diagnostics) {
             RetentionAction::Include => {
                 batch.push(&decoder_state.packed);
                 output_variant_count += 1;
@@ -548,6 +554,10 @@ pub fn read_plink1_sparse_windowed(
     let mut decoder_state =
         Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
     let mut retention = RetainedVariantState::new(variant_window);
+    let genotype_filter_plan = variant_filter.map_or(
+        GenotypeFilterPlan::Generic,
+        VariantFilter::genotype_filter_plan,
+    );
     for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
@@ -569,20 +579,22 @@ pub fn read_plink1_sparse_windowed(
             n_source_samples,
             &mut decoder_state,
         )?;
-        let stats = if needs_genotype_decision {
-            Some(
-                decoder_state
-                    .packed
-                    .stats_for_selection(&selection.source_indices, all_samples_selected)?,
-            )
-        } else {
-            None
-        };
+        let mut stats = None;
         if needs_genotype_decision {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, computed_stats) = evaluate_packed_hardcall_filter(
+                &decoder_state.packed,
+                &selection.source_indices,
+                all_samples_selected,
+                filter,
+                genotype_filter_plan,
+                Some(&variant),
+                true,
+            )?;
+            stats = computed_stats;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,

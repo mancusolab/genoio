@@ -462,6 +462,24 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
     assert isinstance(result["missing_mask"], np.ndarray)
     assert result["missing_mask"].dtype == np.bool_
 
+    metadata_result = api._rust.read_dense(
+        dataset.source.format.value,
+        members,
+        {
+            "samples": None,
+            "variants": None,
+            "variant_window": None,
+            "dosage": "hardcall",
+            "return_samples": True,
+            "return_variants": True,
+            "matrix_only": True,
+        },
+    )
+
+    assert metadata_result["shape"] == (2, 2)
+    assert metadata_result["samples"]["iid"] == []
+    assert metadata_result["variants"]["id"] == []
+
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):
     import genoio

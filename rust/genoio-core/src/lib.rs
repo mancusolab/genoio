@@ -31,7 +31,8 @@ pub use dense::{
 pub use error::GenoioError;
 pub use filter::{
     attach_variant_stats, compute_dosage_variant_stats, compute_variant_stats,
-    variant_stats_from_counts, PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats,
+    is_dosage_polymorphic, variant_stats_from_counts, GenotypeFilterConjunction,
+    GenotypeFilterPlan, PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats,
     VariantWindow,
 };
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};

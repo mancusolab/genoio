@@ -79,6 +79,25 @@ fn phased_vcf_haplotype_dense_counts_a1_by_sample_haplotype_rows() {
 }
 
 #[test]
+fn phased_vcf_haplotype_dense_matrix_only_omits_metadata() {
+    let dir = unique_dir("vcf-haplo-dense-matrix-only");
+    let path = dir.join("phased.vcf");
+    fs::write(&path, phased_vcf()).expect("fixture should be written");
+
+    let haplotypes = genoio_io::read_vcf_haplotypes_dense_windowed(&path, None, None, None, true)
+        .expect("matrix-only haplotypes should decode");
+
+    assert_eq!(haplotypes.n_samples, 4);
+    assert_eq!(haplotypes.n_variants, 2);
+    assert_eq!(
+        haplotypes.values,
+        vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    );
+    assert!(haplotypes.samples.is_empty());
+    assert!(haplotypes.variants.is_empty());
+}
+
+#[test]
 fn filtered_haplotype_samples_preserve_source_sample_index() {
     let dir = unique_dir("vcf-haplo-filtered-samples");
     let path = dir.join("phased.vcf");
@@ -138,13 +157,14 @@ fn threaded_haplotype_reads_match_unthreaded_reads() {
     let path = dir.join("phased.vcf");
     fs::write(&path, phased_vcf()).expect("fixture should be written");
 
-    let dense = genoio_io::read_vcf_haplotypes_dense_windowed(&path, None, None, None)
+    let dense = genoio_io::read_vcf_haplotypes_dense_windowed(&path, None, None, None, false)
         .expect("unthreaded dense haplotypes should decode");
     let threaded_dense = genoio_io::read_vcf_haplotypes_dense_windowed_with_threads(
         &path,
         None,
         None,
         None,
+        false,
         Some(2),
     )
     .expect("threaded dense haplotypes should decode");

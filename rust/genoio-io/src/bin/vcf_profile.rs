@@ -64,6 +64,7 @@ fn run() -> Result<(), String> {
                     args.samples.as_deref(),
                     filter_ref,
                     window,
+                    false,
                     args.threads,
                 )
                 .map_err(|error| format!("failed to read dense VCF: {error}"))?;
@@ -80,6 +81,7 @@ fn run() -> Result<(), String> {
                     args.samples.as_deref(),
                     filter_ref,
                     window,
+                    false,
                     args.threads,
                 )
                 .map_err(|error| format!("failed to read VCF dosage: {error}"))?;
@@ -112,6 +114,7 @@ fn run() -> Result<(), String> {
                     args.samples.as_deref(),
                     filter_ref,
                     window,
+                    false,
                     args.threads,
                 )
                 .map_err(|error| format!("failed to read dense haplotype VCF: {error}"))?;

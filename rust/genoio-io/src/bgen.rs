@@ -12,9 +12,10 @@ use crate::matrix::{
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 use crate::Result;
 use genoio_core::{
-    attach_variant_stats, compute_dosage_variant_stats, select_samples_source_order,
-    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    SampleRecord, SourceCapabilities, VariantFilter, VariantWindow,
+    attach_variant_stats, compute_dosage_variant_stats, is_dosage_polymorphic,
+    select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
+    GenotypeFilterConjunction, GenotypeFilterPlan, MetadataOutput, PartialFilterDecision,
+    SampleRecord, SourceCapabilities, VariantFilter, VariantRecord, VariantStats, VariantWindow,
 };
 
 mod decode;
@@ -32,6 +33,166 @@ use header::{
     BgenHeader,
 };
 use index::{indexed_region_records, validate_index_record_consumed, BgenIndexRecord};
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DosageFilterCounts {
+    allele_count: f64,
+    called_count: u64,
+    missing_count: u64,
+}
+
+impl DosageFilterCounts {
+    fn evaluate_plan(self, plan: GenotypeFilterPlan) -> Result<Option<bool>> {
+        match plan {
+            GenotypeFilterPlan::Generic => Ok(None),
+            GenotypeFilterPlan::Polymorphic => Ok(Some(self.is_polymorphic()?)),
+            GenotypeFilterPlan::MacRange { min, max } => Ok(Some(self.mac_in_range(min, max)?)),
+            GenotypeFilterPlan::MafRange { min, max } => Ok(Some(self.maf_in_range(min, max)?)),
+            GenotypeFilterPlan::MissingRateMax { max } => {
+                Ok(Some(self.missing_rate()? <= f64::from(max)))
+            }
+            GenotypeFilterPlan::Conjunction(plan) => Ok(Some(self.evaluate_conjunction(plan)?)),
+        }
+    }
+
+    fn evaluate_conjunction(self, plan: GenotypeFilterConjunction) -> Result<bool> {
+        if plan.polymorphic && !self.is_polymorphic()? {
+            return Ok(false);
+        }
+        if (plan.mac_min.is_some() || plan.mac_max.is_some())
+            && !self.mac_in_range(plan.mac_min, plan.mac_max)?
+        {
+            return Ok(false);
+        }
+        if (plan.maf_min.is_some() || plan.maf_max.is_some())
+            && !self.maf_in_range(plan.maf_min, plan.maf_max)?
+        {
+            return Ok(false);
+        }
+        if let Some(max) = plan.missing_rate_max {
+            if self.missing_rate()? > f64::from(max) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn called_alleles(self) -> Result<Option<f64>> {
+        if self.called_count == 0 {
+            return Ok(None);
+        }
+        let called_count = u32::try_from(self.called_count).map_err(|_| {
+            GenoioError::invalid_source(
+                "<filter>",
+                "called genotype count exceeds supported metadata range",
+            )
+        })?;
+        Ok(Some(2.0 * f64::from(called_count)))
+    }
+
+    fn total_count(self) -> Result<u64> {
+        self.called_count
+            .checked_add(self.missing_count)
+            .ok_or_else(|| {
+                GenoioError::invalid_source(
+                    "<filter>",
+                    "genotype count exceeds supported metadata range",
+                )
+            })
+    }
+
+    fn minor_allele_count(self) -> Result<Option<f64>> {
+        let Some(called_alleles) = self.called_alleles()? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.allele_count.min(called_alleles - self.allele_count),
+        ))
+    }
+
+    fn missing_rate(self) -> Result<f64> {
+        let total = self.total_count()?;
+        if total == 0 {
+            Ok(0.0)
+        } else {
+            Ok(self.missing_count as f64 / total as f64)
+        }
+    }
+
+    fn is_polymorphic(self) -> Result<bool> {
+        Ok(self.minor_allele_count()?.is_some_and(|mac| mac > 0.0))
+    }
+
+    fn mac_in_range(self, min: Option<u32>, max: Option<u32>) -> Result<bool> {
+        let Some(mac) = self.minor_allele_count()? else {
+            return Ok(false);
+        };
+        Ok(min.is_none_or(|threshold| mac >= f64::from(threshold))
+            && max.is_none_or(|threshold| mac <= f64::from(threshold)))
+    }
+
+    fn maf_in_range(self, min: Option<f32>, max: Option<f32>) -> Result<bool> {
+        let Some(mac) = self.minor_allele_count()? else {
+            return Ok(false);
+        };
+        let Some(called_alleles) = self.called_alleles()? else {
+            return Ok(false);
+        };
+        let maf = mac / called_alleles;
+        Ok(min.is_none_or(|threshold| maf >= f64::from(threshold))
+            && max.is_none_or(|threshold| maf <= f64::from(threshold)))
+    }
+}
+
+fn dosage_counts_for_filter(values: &[f32], missing: &[bool]) -> Result<DosageFilterCounts> {
+    if values.len() != missing.len() {
+        return Err(GenoioError::invalid_source(
+            "<filter>",
+            "variant values and missing mask lengths differ",
+        ));
+    }
+
+    let mut counts = DosageFilterCounts::default();
+    for (value, is_missing) in values.iter().zip(missing) {
+        if *is_missing {
+            counts.missing_count += 1;
+            continue;
+        }
+        if !(0.0..=2.0).contains(value) {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                format!("dosage statistics require values in [0, 2]; observed {value}"),
+            ));
+        }
+        counts.allele_count += f64::from(*value);
+        counts.called_count += 1;
+    }
+    Ok(counts)
+}
+
+fn evaluate_dosage_filter(
+    values: &[f32],
+    missing: &[bool],
+    filter: &VariantFilter,
+    variant: &VariantRecord,
+    require_stats: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    let plan = filter.genotype_filter_plan();
+    if !require_stats {
+        // Matrix-only reads only need the retain/drop decision. The caller has
+        // already run metadata partial evaluation, so compiled genotype plans
+        // can bypass `VariantStats` construction for common dosage predicates.
+        if matches!(plan, GenotypeFilterPlan::Polymorphic) {
+            return Ok((is_dosage_polymorphic(values, missing)?, None));
+        }
+        if let Some(retain) = dosage_counts_for_filter(values, missing)?.evaluate_plan(plan)? {
+            return Ok((retain, None));
+        }
+    }
+
+    let stats = compute_dosage_variant_stats(values, missing)?;
+    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
+}
 
 /// Read BGEN sample and variant metadata without returning dosages.
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
@@ -177,21 +338,27 @@ pub fn read_bgen_dosage_dense_windowed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_values,
                     &decode_buffers.selected_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => continue,
                     RetentionAction::Stop => {
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -333,21 +500,27 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_collapsed_values,
                     &decode_buffers.selected_collapsed_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => continue,
                     RetentionAction::Stop => {
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -485,14 +658,18 @@ fn read_bgen_dosage_dense_indexed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_values,
                     &decode_buffers.selected_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => {
                         validate_index_record_consumed(reader, bgen, index_record)?;
@@ -503,7 +680,9 @@ fn read_bgen_dosage_dense_indexed(
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -615,14 +794,18 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                     &selection.source_indices,
                     &mut decode_buffers,
                 )?;
-                let stats = compute_dosage_variant_stats(
+                let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_collapsed_values,
                     &decode_buffers.selected_collapsed_missing,
+                    variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?,
+                    &variant,
+                    !matrix_only,
                 )?;
-                match retention.genotype_decision(
-                    variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                    &mut diagnostics,
-                ) {
+                match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
                     RetentionAction::Skip => {
                         validate_index_record_consumed(reader, bgen, index_record)?;
@@ -633,7 +816,9 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                         break;
                     }
                 }
-                attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
             }
         }
 
@@ -669,4 +854,143 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         },
         matrix_only,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genoio_core::GenotypeFilterConjunction;
+    use serde_json::json;
+
+    fn test_variant() -> VariantRecord {
+        VariantRecord {
+            chrom: "1".to_string(),
+            pos: 10,
+            id: "rs1".to_string(),
+            a0: "A".to_string(),
+            a1: "G".to_string(),
+            ref_allele: Some("A".to_string()),
+            alt_allele: Some("G".to_string()),
+            source_a0: "A".to_string(),
+            source_a1: "G".to_string(),
+            flipped: false,
+            qual: None,
+            af: None,
+            maf: None,
+            mac: None,
+            missing_rate: None,
+            n_called: None,
+        }
+    }
+
+    fn genotype_filter(name: &str, params: serde_json::Value) -> VariantFilter {
+        VariantFilter::from_json_value(json!({
+            "op": "predicate",
+            "name": name,
+            "params": params,
+        }))
+        .unwrap()
+    }
+
+    fn dosage_fixture() -> ([f32; 4], [bool; 4]) {
+        ([0.0, 1.0, 2.0, 2.0], [false, false, false, true])
+    }
+
+    #[test]
+    fn dosage_filter_plan_evaluates_mac_maf_and_missing_rate() {
+        let (values, missing) = dosage_fixture();
+        let counts = dosage_counts_for_filter(&values, &missing).unwrap();
+
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MacRange {
+                    min: Some(3),
+                    max: Some(3),
+                })
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MafRange {
+                    min: Some(0.49),
+                    max: Some(0.51),
+                })
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MissingRateMax { max: 0.20 })
+                .unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn dosage_filter_plan_evaluates_conjunctions() {
+        let (values, missing) = dosage_fixture();
+        let counts = dosage_counts_for_filter(&values, &missing).unwrap();
+
+        let passing = GenotypeFilterConjunction {
+            polymorphic: true,
+            mac_min: Some(2),
+            mac_max: Some(4),
+            maf_min: Some(0.4),
+            maf_max: Some(0.6),
+            missing_rate_max: Some(0.3),
+        };
+        let failing = GenotypeFilterConjunction {
+            missing_rate_max: Some(0.2),
+            ..passing
+        };
+
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::Conjunction(passing))
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::Conjunction(failing))
+                .unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn matrix_only_dosage_filter_returns_decision_without_stats() {
+        let (values, missing) = dosage_fixture();
+        let filter = genotype_filter("maf", json!({ "min": 0.49, "max": 0.51 }));
+
+        let (retain, stats) =
+            evaluate_dosage_filter(&values, &missing, &filter, &test_variant(), false).unwrap();
+
+        assert!(retain);
+        assert_eq!(stats, None);
+    }
+
+    #[test]
+    fn metadata_output_dosage_filter_keeps_stats() {
+        let (values, missing) = dosage_fixture();
+        let filter = genotype_filter("maf", json!({ "min": 0.49, "max": 0.51 }));
+
+        let (retain, stats) =
+            evaluate_dosage_filter(&values, &missing, &filter, &test_variant(), true).unwrap();
+
+        assert!(retain);
+        assert_eq!(stats.unwrap().missing_rate, 0.25);
+    }
+
+    #[test]
+    fn dosage_filter_counts_match_variant_stats_thresholds() {
+        let (values, missing) = dosage_fixture();
+        let counts = dosage_counts_for_filter(&values, &missing).unwrap();
+        let stats = compute_dosage_variant_stats(&values, &missing).unwrap();
+
+        assert_eq!(counts.is_polymorphic().unwrap(), stats.polymorphic);
+        assert_eq!(counts.missing_rate().unwrap(), stats.missing_rate);
+        assert_eq!(counts.minor_allele_count().unwrap(), stats.mac);
+    }
 }
