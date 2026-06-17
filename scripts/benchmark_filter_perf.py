@@ -110,17 +110,6 @@ def active_filter_shape(args: argparse.Namespace) -> str:
     return args.filter_shape or args.predicate
 
 
-def numpy_filter_kwargs(args: argparse.Namespace) -> dict[str, object]:
-    return {
-        "filter_shape": active_filter_shape(args),
-        "maf_min": args.maf_min,
-        "maf_max": args.maf_max,
-        "mac_min": args.mac_min,
-        "mac_max": args.mac_max,
-        "missing_rate_max": args.missing_rate_max,
-    }
-
-
 def read_options(args: argparse.Namespace) -> dict[str, object]:
     dosage = "dosage" if args.dosage == "auto" and args.source_format == "bgen" else args.dosage
     options: dict[str, object] = {
@@ -299,7 +288,7 @@ def variant_ids_from_frame(variants: Any) -> list[str]:
 def read_numpy_source_window_postfiltered(args: argparse.Namespace) -> np.ndarray:
     """Filter the first source/base-filter block in NumPy."""
     matrix = np.asarray(read_base_block(args))
-    mask = numpy_variant_mask(matrix, **numpy_filter_kwargs(args))
+    mask = numpy_variant_mask_for_args(matrix, args)
     return matrix[:, mask]
 
 
@@ -317,7 +306,7 @@ def read_numpy_retained_postfiltered(args: argparse.Namespace) -> np.ndarray:
         matrix = np.asarray(block)
         if empty is None:
             empty = matrix[:, :0]
-        mask = numpy_variant_mask(matrix, **numpy_filter_kwargs(args))
+        mask = numpy_variant_mask_for_args(matrix, args)
         filtered = matrix[:, mask]
         if filtered.shape[1] == 0:
             continue
@@ -331,6 +320,18 @@ def read_numpy_retained_postfiltered(args: argparse.Namespace) -> np.ndarray:
     if empty is not None:
         return empty
     return np.empty((0, 0), dtype=np.float32)
+
+
+def numpy_variant_mask_for_args(matrix: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    return numpy_variant_mask(
+        matrix,
+        filter_shape=active_filter_shape(args),
+        maf_min=args.maf_min,
+        maf_max=args.maf_max,
+        mac_min=args.mac_min,
+        mac_max=args.mac_max,
+        missing_rate_max=args.missing_rate_max,
+    )
 
 
 def numpy_variant_mask(
