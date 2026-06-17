@@ -452,6 +452,20 @@ impl<'a> DecodedDosageVariant<'a> {
         values: &mut Vec<f32>,
         missing: &mut Vec<bool>,
     ) -> Result<()> {
+        if self.header.phase == BgenPhase::Unphased && self.header.bit_depth == 8 {
+            // UKB-style BGEN stores two one-byte probabilities per non-missing
+            // diploid sample. Decode that common case directly and leave
+            // arbitrary bit depths on the generic bit reader.
+            return decode_selected_unphased_8bit_a1_dosages(
+                path,
+                &self.header.sample_ploidies,
+                self.packed_probabilities,
+                source_indices,
+                values,
+                missing,
+            );
+        }
+
         values.clear();
         missing.clear();
         values.reserve(source_indices.len());
@@ -554,6 +568,77 @@ impl<'a> DecodedDosageVariant<'a> {
 
         Ok(())
     }
+}
+
+fn decode_selected_unphased_8bit_a1_dosages(
+    path: &Path,
+    ploidies: &[u8],
+    packed_probabilities: &[u8],
+    source_indices: &[usize],
+    values: &mut Vec<f32>,
+    missing: &mut Vec<bool>,
+) -> Result<()> {
+    values.clear();
+    missing.clear();
+    values.reserve(source_indices.len());
+    missing.reserve(source_indices.len());
+    debug_assert!(source_indices
+        .windows(2)
+        .all(|window| window[0] < window[1]));
+
+    let mut selected_cursor = 0_usize;
+    let mut probability_cursor = 0_usize;
+    for (sample_index, &ploidy_byte) in ploidies.iter().enumerate() {
+        if selected_cursor == source_indices.len() {
+            break;
+        }
+        let is_selected = source_indices[selected_cursor] == sample_index;
+        let is_missing = ploidy_byte & 0b1000_0000 != 0;
+        if is_missing {
+            if is_selected {
+                values.push(0.0);
+                missing.push(true);
+                selected_cursor += 1;
+            }
+            continue;
+        }
+
+        let Some((&p_aa, &p_ab)) = packed_probabilities
+            .get(probability_cursor)
+            .zip(packed_probabilities.get(probability_cursor + 1))
+        else {
+            return Err(GenoioError::invalid_source(
+                path,
+                "bgen packed probability bytes are truncated",
+            ));
+        };
+        probability_cursor += 2;
+
+        if is_selected {
+            values.push(unphased_8bit_a1_dosage(path, p_aa, p_ab)?);
+            missing.push(false);
+            selected_cursor += 1;
+        }
+    }
+    debug_assert_eq!(selected_cursor, source_indices.len());
+    Ok(())
+}
+
+fn unphased_8bit_a1_dosage(path: &Path, p_aa: u8, p_ab: u8) -> Result<f32> {
+    let p_aa = u16::from(p_aa);
+    let p_ab = u16::from(p_ab);
+    if p_aa + p_ab > 255 {
+        return Err(GenoioError::invalid_source(
+            path,
+            "bgen malformed probability values produce invalid a1 dosage",
+        ));
+    }
+    // Match the generic decoder's f32 operation order so exact matrix parity is
+    // stable even though the fast path validates with integers first.
+    let p_aa = f32::from(p_aa) / 255.0;
+    let p_ab = f32::from(p_ab) / 255.0;
+    let p_bb = 1.0 - p_aa - p_ab;
+    Ok((p_ab + 2.0 * p_bb).clamp(0.0, 2.0))
 }
 
 struct LittleEndianBitReader<'a> {
@@ -885,6 +970,45 @@ mod tests {
         let error = decoded
             .decode_source_order(Path::new("test.bgen"), &mut values, &mut missing)
             .expect_err("impossible probabilities should fail");
+
+        assert!(error.to_string().contains("malformed probability"));
+    }
+
+    #[test]
+    fn unphased_8bit_fast_path_decodes_selected_dosages() {
+        let ploidies = [2, 0b1000_0010, 2, 2];
+        let packed = [255, 0, 0, 255, 64, 64];
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+
+        decode_selected_unphased_8bit_a1_dosages(
+            Path::new("test.bgen"),
+            &ploidies,
+            &packed,
+            &[1, 3],
+            &mut values,
+            &mut missing,
+        )
+        .expect("8-bit fast path should decode");
+
+        assert_eq!(missing, vec![true, false]);
+        assert_eq!(values[0], 0.0);
+        assert!((values[1] - expected_dosage(8, 64, 64)).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn unphased_8bit_fast_path_rejects_impossible_probability_sum() {
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        let error = decode_selected_unphased_8bit_a1_dosages(
+            Path::new("test.bgen"),
+            &[2],
+            &[200, 100],
+            &[0],
+            &mut values,
+            &mut missing,
+        )
+        .expect_err("impossible probabilities should fail");
 
         assert!(error.to_string().contains("malformed probability"));
     }
