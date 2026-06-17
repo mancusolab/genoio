@@ -32,6 +32,19 @@ def test_vcf_does_not_resolve_same_stem_plink_prefix(tmp_path):
         genoio.vcf(source_path)
 
 
+def test_vcf_bgz_extension_resolves_as_vcf(tmp_path):
+    import genoio
+
+    source_path = tmp_path / "cohort.vcf.bgz"
+    source_path.touch()
+
+    dataset = genoio.vcf(source_path)
+
+    assert dataset.source.format.value == "vcf"
+    assert dataset.source.path == source_path
+    assert dataset.source.members == {"vcf": source_path}
+
+
 def test_bgen_member_path_resolves_bgen_source(tmp_path):
     import genoio
 
@@ -171,6 +184,44 @@ def test_bfile_member_path_resolves_shared_prefix(tmp_path):
     assert set(dataset.source.members) == {"bed", "bim", "fam"}
 
 
+def test_bfile_member_path_preserves_dotted_prefix(tmp_path):
+    import genoio
+
+    for suffix in (".bed", ".bim", ".fam"):
+        (tmp_path / f"cohort.dedup{suffix}").touch()
+
+    dataset = genoio.bfile(tmp_path / "cohort.dedup.bed")
+
+    assert dataset.source.prefix == tmp_path / "cohort.dedup"
+    assert dataset.source.members["bed"] == tmp_path / "cohort.dedup.bed"
+    assert dataset.source.members["bim"] == tmp_path / "cohort.dedup.bim"
+    assert dataset.source.members["fam"] == tmp_path / "cohort.dedup.fam"
+
+
+def test_bfile_prefix_path_preserves_dotted_prefix(tmp_path):
+    import genoio
+
+    for suffix in (".bed", ".bim", ".fam"):
+        (tmp_path / f"cohort.dedup{suffix}").touch()
+
+    dataset = genoio.bfile(tmp_path / "cohort.dedup")
+
+    assert dataset.source.prefix == tmp_path / "cohort.dedup"
+    assert dataset.source.members["bed"] == tmp_path / "cohort.dedup.bed"
+    assert dataset.source.members["bim"] == tmp_path / "cohort.dedup.bim"
+    assert dataset.source.members["fam"] == tmp_path / "cohort.dedup.fam"
+
+
+def test_bfile_trailing_dot_prefix_reports_likely_typo(tmp_path):
+    import genoio
+
+    for suffix in (".bed", ".bim", ".fam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    with pytest.raises(genoio.MissingCompanionFileError, match="extra trailing"):
+        genoio.bfile(tmp_path / "cohort.")
+
+
 def test_bfile_rejects_non_bfile_member_path(tmp_path):
     import genoio
 
@@ -202,6 +253,44 @@ def test_pfile_member_path_resolves_shared_prefix(tmp_path):
     assert dataset.source.format.value == "plink2"
     assert dataset.source.prefix == tmp_path / "cohort"
     assert set(dataset.source.members) == {"pgen", "pvar", "psam"}
+
+
+def test_pfile_member_path_preserves_dotted_prefix_with_compressed_pvar(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar.zst", ".psam"):
+        (tmp_path / f"cohort.dedup{suffix}").touch()
+
+    dataset = genoio.pfile(tmp_path / "cohort.dedup.pgen")
+
+    assert dataset.source.prefix == tmp_path / "cohort.dedup"
+    assert dataset.source.members["pgen"] == tmp_path / "cohort.dedup.pgen"
+    assert dataset.source.members["pvar"] == tmp_path / "cohort.dedup.pvar.zst"
+    assert dataset.source.members["psam"] == tmp_path / "cohort.dedup.psam"
+
+
+def test_pfile_prefix_path_preserves_dotted_prefix_with_compressed_pvar(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar.zst", ".psam"):
+        (tmp_path / f"cohort.dedup{suffix}").touch()
+
+    dataset = genoio.pfile(tmp_path / "cohort.dedup")
+
+    assert dataset.source.prefix == tmp_path / "cohort.dedup"
+    assert dataset.source.members["pgen"] == tmp_path / "cohort.dedup.pgen"
+    assert dataset.source.members["pvar"] == tmp_path / "cohort.dedup.pvar.zst"
+    assert dataset.source.members["psam"] == tmp_path / "cohort.dedup.psam"
+
+
+def test_pfile_trailing_dot_prefix_reports_likely_typo(tmp_path):
+    import genoio
+
+    for suffix in (".pgen", ".pvar", ".psam"):
+        (tmp_path / f"cohort{suffix}").touch()
+
+    with pytest.raises(genoio.MissingCompanionFileError, match="extra trailing"):
+        genoio.pfile(tmp_path / "cohort.")
 
 
 def test_pfile_resolves_compressed_pvar_when_uncompressed_is_absent(tmp_path):

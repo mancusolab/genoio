@@ -734,7 +734,7 @@ def vcf(path: str | Path) -> Dataset:
 
     **Arguments:**
 
-    - `path`: `.vcf`, `.vcf.gz`, or `.bcf` path.
+    - `path`: `.vcf`, `.vcf.gz`, `.vcf.bgz`, or `.bcf` path.
 
     **Returns:**
 
