@@ -150,7 +150,10 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
             "missing_rate": [0.0, 1.0 / 3.0, 0.0, 1.0],
         }
     )
-    expected_frame = (
+    # Some ty/Polars stub combinations type LazyFrame.collect() as a union even
+    # though this eager query returns a DataFrame here.
+    expected_frame = cast(  # ty: ignore[redundant-cast]
+        pl.DataFrame,
         source.lazy()
         .filter(
             (pl.col("ref").str.len_chars() == 1)
@@ -159,7 +162,7 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
             & (pl.col("missing_rate") <= 0.5)
         )
         .select("id")
-        .collect()
+        .collect(),
     )
     expected_ids = expected_frame.get_column("id").to_list()
 
