@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-flate2 = "1"
+# BGEN payloads are commonly zlib-compressed; zlib-ng keeps decompression off
+# the pure-Rust miniz path for the main BGEN hot loop.
+flate2 = { version = "1", default-features = false, features = ["zlib-ng-compat"] }
 genoio-core = { path = "../genoio-core" }
 rust-htslib = { version = "1.0.0", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }

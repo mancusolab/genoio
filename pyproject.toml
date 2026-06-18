@@ -39,6 +39,7 @@ Issues = "https://github.com/mancusolab/genoio/issues"
 
 [project.optional-dependencies]
 dev = [
+    "bgen>=1.9.10",
     "maturin>=1.10,<2",
     "pre-commit>=3",
     "pytest>=8",
@@ -79,6 +80,7 @@ python-version = "3.11"
 
 [tool.ty.analysis]
 allowed-unresolved-imports = [
+    "bgen",
     "bgen_reader",
     "cbgen",
     "cyvcf2",

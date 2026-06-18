@@ -57,6 +57,22 @@ def test_parse_args_accepts_scenario_and_preserves_existing_options(monkeypatch)
     assert args.no_compare is True
 
 
+def test_parse_args_accepts_bgen_backend(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_bgen.py",
+            "--backend",
+            "bgen",
+        ],
+    )
+
+    args = benchmark_bgen.parse_args()
+
+    assert args.backend == "bgen"
+
+
 def test_haplotype_kind_dispatches_genoio_without_bgen_reader_comparison(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
@@ -168,6 +184,62 @@ def test_matrix_only_scenario_compares_bgen_reader(monkeypatch) -> None:
     assert "comparison" in output
 
 
+def test_matrix_only_scenario_compares_bgen_package(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_bgen.py",
+            "--scenario",
+            "matrix-only",
+            "--backend",
+            "all",
+            "--max-variants",
+            "3",
+            "--repeats",
+            "1",
+        ],
+    )
+    monkeypatch.setattr(benchmark_bgen, "read_genoio_matrix_only", lambda prefix, max_variants, kind: _matrix(1.0))
+    monkeypatch.setattr(benchmark_bgen, "read_bgen_reader_expected_dosage", lambda prefix, max_variants: _matrix(1.0))
+    monkeypatch.setattr(benchmark_bgen, "read_bgen_package_matrix_only", lambda prefix, max_variants: _matrix(1.0))
+
+    output = _capture_stdout(benchmark_bgen.main)
+    assert "genoio_bgen_matrix_only" in output
+    assert "bgen_reader_expected_dosage" in output
+    assert "bgen_package_alt_dosage" in output
+    assert output.count("comparison") == 2
+
+
+def test_haplotype_kind_skips_bgen_package(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_bgen.py",
+            "--scenario",
+            "matrix-only",
+            "--kind",
+            "haplo",
+            "--backend",
+            "bgen",
+            "--max-variants",
+            "3",
+            "--repeats",
+            "1",
+        ],
+    )
+
+    output = _capture_stdout(benchmark_bgen.main)
+    assert "skipped bgen package comparison for haplo matrix-only" in output
+
+
 def test_expected_dosage_weights_support_unphased_and_phased_probability_shapes() -> None:
     np.testing.assert_array_equal(benchmark_bgen._expected_dosage_weights(3), np.array([0.0, 1.0, 2.0]))
     np.testing.assert_array_equal(benchmark_bgen._expected_dosage_weights(4), np.array([0.0, 1.0, 0.0, 1.0]))
+
+
+def test_dosage_maf_ignores_missing_values() -> None:
+    dosage = np.array([0.0, 1.0, 2.0, np.nan], dtype=np.float32)
+
+    assert benchmark_bgen._dosage_maf(dosage) == 0.5

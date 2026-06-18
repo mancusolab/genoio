@@ -118,6 +118,53 @@ pub(crate) fn shrink_sample_major_width<T: Copy>(
     values.truncate(n_samples * new_width);
 }
 
+/// Write a variant-major vector into one column of preallocated sample-major
+/// dense buffers.
+pub(crate) fn write_sample_major_variant_slot(
+    values: &mut [f32],
+    missing_mask: &mut [bool],
+    n_samples: usize,
+    row_width: usize,
+    variant_index: usize,
+    variant_values: &[f32],
+    variant_missing: &[bool],
+) -> Result<()> {
+    if variant_values.len() != n_samples {
+        return Err(GenoioError::internal_contract(format!(
+            "variant value count {} does not match sample count {n_samples}",
+            variant_values.len(),
+        )));
+    }
+    if variant_missing.len() != n_samples {
+        return Err(GenoioError::internal_contract(format!(
+            "variant missing count {} does not match sample count {n_samples}",
+            variant_missing.len(),
+        )));
+    }
+    let expected_len = n_samples.checked_mul(row_width).ok_or_else(|| {
+        GenoioError::internal_contract("sample-major dense matrix shape is out of range")
+    })?;
+    if values.len() != expected_len || missing_mask.len() != expected_len {
+        return Err(GenoioError::internal_contract(
+            "sample-major dense buffers do not match declared shape",
+        ));
+    }
+    if variant_index >= row_width {
+        return Err(GenoioError::internal_contract(
+            "sample-major variant index is outside row width",
+        ));
+    }
+
+    // Readers accept variants one at a time; this fills the corresponding
+    // column in each preallocated sample row without a later full transpose.
+    for sample_index in 0..n_samples {
+        let target_index = sample_index * row_width + variant_index;
+        values[target_index] = variant_values[sample_index];
+        missing_mask[target_index] = variant_missing[sample_index];
+    }
+    Ok(())
+}
+
 fn validate_variant_major_len(
     field: &str,
     actual_len: usize,
@@ -244,5 +291,25 @@ mod tests {
         assert!(error
             .to_string()
             .contains("variant-major dense missing mask length 5 does not match shape 2 x 2"));
+    }
+
+    #[test]
+    fn write_sample_major_variant_slot_writes_one_column_per_sample() {
+        let mut values = vec![0.0; 6];
+        let mut missing = vec![false; 6];
+
+        write_sample_major_variant_slot(
+            &mut values,
+            &mut missing,
+            2,
+            3,
+            1,
+            &[4.0, 5.0],
+            &[false, true],
+        )
+        .expect("column write should succeed");
+
+        assert_eq!(values, vec![0.0, 4.0, 0.0, 0.0, 5.0, 0.0]);
+        assert_eq!(missing, vec![false, false, false, false, true, false]);
     }
 }

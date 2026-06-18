@@ -105,12 +105,30 @@ fn write_layout2_variant_identifying_data(
     pos: u32,
     alleles: &[&str],
 ) -> io::Result<()> {
+    write_layout2_variant_identifying_data_with_raw_id(
+        writer,
+        id.as_bytes(),
+        rsid,
+        chrom,
+        pos,
+        alleles,
+    )
+}
+
+fn write_layout2_variant_identifying_data_with_raw_id(
+    writer: &mut impl Write,
+    id: &[u8],
+    rsid: &str,
+    chrom: &str,
+    pos: u32,
+    alleles: &[&str],
+) -> io::Result<()> {
     writer.write_all(
         &u16::try_from(id.len())
             .expect("variant id length should fit u16")
             .to_le_bytes(),
     )?;
-    writer.write_all(id.as_bytes())?;
+    writer.write_all(id)?;
     writer.write_all(
         &u16::try_from(rsid.len())
             .expect("variant rsid length should fit u16")
@@ -1609,6 +1627,36 @@ fn bgen_dosage_dense_matrix_only_omits_metadata() {
         ]
     );
     assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+}
+
+#[test]
+fn bgen_dosage_dense_matrix_only_skips_unneeded_metadata_strings() {
+    let dir = unique_dir("bgen-dosage-matrix-only-skip-metadata-strings");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data_with_raw_id(
+            writer,
+            &[0xff],
+            "rs1",
+            "1",
+            10,
+            &["A", "G"],
+        )
+        .expect("variant identifying data should write");
+        write_layout2_dosage_probability_block(writer, 8, &[Some((204, 26)), Some((51, 128))])
+            .expect("dosage probability block should write");
+    });
+
+    let dense = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, true)
+        .expect("matrix-only bgen dosage should not decode metadata strings");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 1);
+    assert!(dense.variants.is_empty());
+    assert_eq!(
+        dense.values,
+        vec![expected_dosage(8, 204, 26), expected_dosage(8, 51, 128)]
+    );
 }
 
 #[test]

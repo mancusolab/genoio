@@ -5,6 +5,9 @@ __pycache__/
 *.py[cod]
 *.so
 
+reports/
+
+.idea/
 .plans/
 data
 build/

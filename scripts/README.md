@@ -51,6 +51,7 @@ index when present.
 ```bash
 python scripts/benchmark_bgen.py --scenario all --max-variants 1000 --repeats 5
 python scripts/benchmark_bgen.py --scenario matrix-only --backend both --max-variants 1000 --repeats 5
+python scripts/benchmark_bgen.py --scenario matrix-only --backend all --max-variants 1000 --repeats 5
 python scripts/benchmark_bgen.py --scenario indexed-region --region 22:20000000-21000000 --max-variants 1000 --repeats 5
 python scripts/benchmark_bgen.py --kind haplo --scenario matrix-only --backend genoio --max-variants 1000
 ```
@@ -59,9 +60,10 @@ The BGEN `--backend both` comparison computes expected dosage through
 `bgen_reader`/`cbgen` and checks matrix parity with `genoio`. The comparison
 path reads probabilities variant-by-variant because the high-level
 `bgen_reader.read(slice(...))` path can fail on mixed-width BGEN probability
-records. Haplotype scenarios skip `bgen_reader` comparison because this script
-does not reshape phased probabilities into haplotype rows for the comparison
-backend.
+records. Use `--backend bgen` or `--backend all` to compare against the
+optional Cython/C++ `bgen` package, which reads per-variant `alt_dosage`.
+Haplotype scenarios skip comparison backends because this script does not
+reshape phased probabilities into haplotype rows for those backends.
 
 `pgenlib` must be importable for the PLINK2 comparison backend. If it is built in the symlinked PLINK repository but not installed, pass:
 

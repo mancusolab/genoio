@@ -13,7 +13,7 @@ use crate::Result;
 use super::decode::skip_layout2_probability_block;
 use super::io::{
     read_exact_vec, read_len_prefixed_string_u16, read_len_prefixed_string_u32, read_u16_le,
-    read_u32_le, skip_exact,
+    read_u32_le, skip_exact, skip_len_prefixed_string_u16, skip_len_prefixed_string_u32,
 };
 
 const BGEN_MAGIC: &[u8; 4] = b"bgen";
@@ -355,4 +355,24 @@ pub(super) fn read_layout2_variant_identifying_data(
         missing_rate: None,
         n_called: None,
     })
+}
+
+pub(super) fn skip_layout2_variant_identifying_data(
+    reader: &mut impl Read,
+    path: &Path,
+) -> Result<()> {
+    skip_len_prefixed_string_u16(reader, path)?;
+    skip_len_prefixed_string_u16(reader, path)?;
+    skip_len_prefixed_string_u16(reader, path)?;
+    skip_exact(reader, path, 4)?;
+    let allele_count = read_u16_le(reader, path)?;
+    if allele_count != 2 {
+        return Err(GenoioError::unsupported(
+            "unsupported bgen multiallelic variant metadata; only biallelic records are supported",
+        ));
+    }
+    for _ in 0..allele_count {
+        skip_len_prefixed_string_u32(reader, path)?;
+    }
+    Ok(())
 }
