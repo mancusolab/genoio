@@ -45,6 +45,11 @@ pub(super) fn read_len_prefixed_string_u16(
     read_utf8_string(reader, path, label, len)
 }
 
+pub(super) fn skip_len_prefixed_string_u16(reader: &mut impl Read, path: &Path) -> Result<()> {
+    let len = u64::from(read_u16_le(reader, path)?);
+    skip_exact(reader, path, len)
+}
+
 pub(super) fn read_len_prefixed_string_u32(
     reader: &mut impl Read,
     path: &Path,
@@ -54,6 +59,11 @@ pub(super) fn read_len_prefixed_string_u32(
         GenoioError::invalid_source(path, format!("bgen {label} length is out of range"))
     })?;
     read_utf8_string(reader, path, label, len)
+}
+
+pub(super) fn skip_len_prefixed_string_u32(reader: &mut impl Read, path: &Path) -> Result<()> {
+    let len = u64::from(read_u32_le(reader, path)?);
+    skip_exact(reader, path, len)
 }
 
 fn read_utf8_string(
@@ -94,15 +104,4 @@ pub(super) fn read_u32_le(reader: &mut impl Read, path: &Path) -> Result<u32> {
             source,
         })?;
     Ok(u32::from_le_bytes(bytes))
-}
-
-pub(super) fn read_u8(reader: &mut impl Read, path: &Path) -> Result<u8> {
-    let mut byte = [0_u8; 1];
-    reader
-        .read_exact(&mut byte)
-        .map_err(|source| GenoioError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(byte[0])
 }

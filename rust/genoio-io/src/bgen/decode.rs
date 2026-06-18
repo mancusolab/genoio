@@ -3,6 +3,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use flate2::read::ZlibDecoder;
 use genoio_core::GenoioError;
@@ -10,7 +11,7 @@ use genoio_core::GenoioError;
 use crate::Result;
 
 use super::header::BgenCompression;
-use super::io::{read_u16_le, read_u32_le, read_u8, skip_exact};
+use super::io::{read_u32_le, skip_exact};
 
 const DOSAGE_TOLERANCE: f32 = 1.0e-6;
 
@@ -97,9 +98,18 @@ pub(super) fn try_decode_buffered_dosage_values_into_sample_major_slot(
     if decoded.header.phase != BgenPhase::Unphased || decoded.header.bit_depth != 8 {
         return Ok(false);
     }
+    if !decoded.header.has_missing {
+        decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
+            bgen,
+            decoded.packed_probabilities,
+            source_indices,
+            slot,
+        )?;
+        return Ok(true);
+    }
     decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
         bgen,
-        &decoded.header.sample_ploidies,
+        decoded.header.sample_ploidies,
         decoded.packed_probabilities,
         source_indices,
         slot,
@@ -249,22 +259,24 @@ pub(super) fn skip_layout2_probability_payload(
 }
 
 #[derive(Debug, Clone)]
-struct Layout2ProbabilityHeader {
+struct Layout2ProbabilityHeader<'a> {
     sample_count: u32,
     allele_count: u16,
     min_ploidy: u8,
     max_ploidy: u8,
-    sample_ploidies: Vec<u8>,
+    // Borrow ploidy bytes from the payload to avoid one allocation per variant.
+    sample_ploidies: &'a [u8],
     non_missing_sample_count: u32,
+    has_missing: bool,
     phase: BgenPhase,
     bit_depth: u8,
     byte_len: usize,
 }
 
-impl Layout2ProbabilityHeader {
+impl<'a> Layout2ProbabilityHeader<'a> {
     fn decode(
         path: &Path,
-        payload: &[u8],
+        payload: &'a [u8],
         expected_sample_count: u32,
         variant_allele_count: u16,
     ) -> Result<Self> {
@@ -276,8 +288,9 @@ impl Layout2ProbabilityHeader {
             ));
         }
 
-        let reader = &mut &payload[..fixed_header_length];
-        let sample_count = read_u32_le(reader, path)?;
+        let sample_count = u32::from_le_bytes(payload[0..4].try_into().map_err(|_| {
+            GenoioError::invalid_source(path, "bgen probability sample count is truncated")
+        })?);
         if sample_count != expected_sample_count {
             return Err(GenoioError::invalid_source(
                 path,
@@ -285,7 +298,9 @@ impl Layout2ProbabilityHeader {
             ));
         }
 
-        let allele_count = read_u16_le(reader, path)?;
+        let allele_count = u16::from_le_bytes(payload[4..6].try_into().map_err(|_| {
+            GenoioError::invalid_source(path, "bgen probability allele count is truncated")
+        })?);
         if allele_count != variant_allele_count {
             return Err(GenoioError::invalid_source(
                 path,
@@ -298,8 +313,8 @@ impl Layout2ProbabilityHeader {
             ));
         }
 
-        let min_ploidy = read_u8(reader, path)?;
-        let max_ploidy = read_u8(reader, path)?;
+        let min_ploidy = payload[6];
+        let max_ploidy = payload[7];
         if min_ploidy != 2 || max_ploidy != 2 {
             return Err(GenoioError::unsupported(
                 "unsupported bgen variable-ploidy probability block; only diploid records are supported",
@@ -308,12 +323,13 @@ impl Layout2ProbabilityHeader {
 
         let sample_count_usize = usize::try_from(expected_sample_count)
             .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
-        let mut sample_ploidies = Vec::with_capacity(sample_count_usize);
+        let sample_ploidies = &payload[8..8 + sample_count_usize];
         let mut non_missing_sample_count = 0_u32;
-        for _ in 0..expected_sample_count {
-            let ploidy_byte = read_u8(reader, path)?;
+        let mut has_missing = false;
+        for &ploidy_byte in sample_ploidies {
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             let ploidy = ploidy_byte & 0b0011_1111;
+            has_missing |= is_missing;
             if !is_missing {
                 if ploidy != 2 {
                     return Err(GenoioError::unsupported(
@@ -328,12 +344,11 @@ impl Layout2ProbabilityHeader {
                         )
                     })?;
             }
-            sample_ploidies.push(ploidy_byte);
         }
 
-        let phase = BgenPhase::from_raw(path, read_u8(reader, path)?)?;
+        let phase = BgenPhase::from_raw(path, payload[8 + sample_count_usize])?;
 
-        let bit_depth = read_u8(reader, path)?;
+        let bit_depth = payload[9 + sample_count_usize];
         if !(1..=32).contains(&bit_depth) {
             return Err(GenoioError::unsupported(
                 "unsupported bgen probability bit depth; expected 1..=32",
@@ -347,6 +362,7 @@ impl Layout2ProbabilityHeader {
             max_ploidy,
             sample_ploidies,
             non_missing_sample_count,
+            has_missing,
             phase,
             bit_depth,
             byte_len: fixed_header_length,
@@ -388,7 +404,7 @@ impl Layout2ProbabilityHeader {
 
 #[derive(Debug, Clone)]
 struct DecodedDosageVariant<'a> {
-    header: Layout2ProbabilityHeader,
+    header: Layout2ProbabilityHeader<'a>,
     packed_probabilities: &'a [u8],
 }
 
@@ -454,7 +470,7 @@ impl<'a> DecodedDosageVariant<'a> {
         missing.reserve(sample_count);
 
         let mut bit_reader = LittleEndianBitReader::new(self.packed_probabilities);
-        for &ploidy_byte in &self.header.sample_ploidies {
+        for &ploidy_byte in self.header.sample_ploidies {
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
                 values.push(0.0);
@@ -486,13 +502,27 @@ impl<'a> DecodedDosageVariant<'a> {
         values: &mut Vec<f32>,
         missing: &mut Vec<bool>,
     ) -> Result<()> {
+        if self.header.phase == BgenPhase::Unphased
+            && self.header.bit_depth == 8
+            && !self.header.has_missing
+        {
+            // With no missing samples, two packed probability bytes map
+            // directly to each source sample index.
+            return decode_selected_called_unphased_8bit_a1_dosages(
+                path,
+                self.packed_probabilities,
+                source_indices,
+                values,
+                missing,
+            );
+        }
         if self.header.phase == BgenPhase::Unphased && self.header.bit_depth == 8 {
             // UKB-style BGEN stores two one-byte probabilities per non-missing
             // diploid sample. Decode that common case directly and leave
             // arbitrary bit depths on the generic bit reader.
             return decode_selected_unphased_8bit_a1_dosages(
                 path,
-                &self.header.sample_ploidies,
+                self.header.sample_ploidies,
                 self.packed_probabilities,
                 source_indices,
                 values,
@@ -658,6 +688,39 @@ fn decode_selected_unphased_8bit_a1_dosages(
     Ok(())
 }
 
+fn decode_selected_called_unphased_8bit_a1_dosages(
+    path: &Path,
+    packed_probabilities: &[u8],
+    source_indices: &[usize],
+    values: &mut Vec<f32>,
+    missing: &mut Vec<bool>,
+) -> Result<()> {
+    values.clear();
+    missing.clear();
+    values.reserve(source_indices.len());
+    missing.reserve(source_indices.len());
+    let lut = unphased_8bit_a1_dosage_lut();
+
+    for &source_index in source_indices {
+        let probability_cursor = source_index.checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen sample probability offset is out of range")
+        })?;
+        let Some((&p_aa, &p_ab)) = packed_probabilities
+            .get(probability_cursor)
+            .zip(packed_probabilities.get(probability_cursor + 1))
+        else {
+            return Err(GenoioError::invalid_source(
+                path,
+                "bgen packed probability bytes are truncated",
+            ));
+        };
+        values.push(unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, lut)?);
+        missing.push(false);
+    }
+
+    Ok(())
+}
+
 fn decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
     path: &Path,
     ploidies: &[u8],
@@ -668,22 +731,8 @@ fn decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
     debug_assert!(source_indices
         .windows(2)
         .all(|window| window[0] < window[1]));
-    let expected_len = source_indices
-        .len()
-        .checked_mul(slot.row_width)
-        .ok_or_else(|| {
-            GenoioError::internal_contract("sample-major dense matrix shape is out of range")
-        })?;
-    if slot.values.len() != expected_len || slot.missing_mask.len() != expected_len {
-        return Err(GenoioError::internal_contract(
-            "sample-major dense buffers do not match declared shape",
-        ));
-    }
-    if slot.variant_index >= slot.row_width {
-        return Err(GenoioError::internal_contract(
-            "sample-major variant index is outside row width",
-        ));
-    }
+    validate_sample_major_slot_shape(source_indices.len(), slot)?;
+    let lut = unphased_8bit_a1_dosage_lut();
 
     let mut selected_cursor = 0_usize;
     let mut probability_cursor = 0_usize;
@@ -716,7 +765,7 @@ fn decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
 
         if is_selected {
             let target_index = selected_cursor * slot.row_width + slot.variant_index;
-            slot.values[target_index] = unphased_8bit_a1_dosage(path, p_aa, p_ab)?;
+            slot.values[target_index] = unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, lut)?;
             slot.missing_mask[target_index] = false;
             selected_cursor += 1;
         }
@@ -725,21 +774,94 @@ fn decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
     Ok(())
 }
 
+fn decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
+    path: &Path,
+    packed_probabilities: &[u8],
+    source_indices: &[usize],
+    slot: &mut SampleMajorSlotMut<'_>,
+) -> Result<()> {
+    validate_sample_major_slot_shape(source_indices.len(), slot)?;
+    let lut = unphased_8bit_a1_dosage_lut();
+
+    for (selected_cursor, &source_index) in source_indices.iter().enumerate() {
+        let probability_cursor = source_index.checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen sample probability offset is out of range")
+        })?;
+        let Some((&p_aa, &p_ab)) = packed_probabilities
+            .get(probability_cursor)
+            .zip(packed_probabilities.get(probability_cursor + 1))
+        else {
+            return Err(GenoioError::invalid_source(
+                path,
+                "bgen packed probability bytes are truncated",
+            ));
+        };
+        let target_index = selected_cursor * slot.row_width + slot.variant_index;
+        slot.values[target_index] = unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, lut)?;
+        slot.missing_mask[target_index] = false;
+    }
+
+    Ok(())
+}
+
+fn validate_sample_major_slot_shape(
+    selected_sample_count: usize,
+    slot: &SampleMajorSlotMut<'_>,
+) -> Result<()> {
+    let expected_len = selected_sample_count
+        .checked_mul(slot.row_width)
+        .ok_or_else(|| {
+            GenoioError::internal_contract("sample-major dense matrix shape is out of range")
+        })?;
+    if slot.values.len() != expected_len || slot.missing_mask.len() != expected_len {
+        return Err(GenoioError::internal_contract(
+            "sample-major dense buffers do not match declared shape",
+        ));
+    }
+    if slot.variant_index >= slot.row_width {
+        return Err(GenoioError::internal_contract(
+            "sample-major variant index is outside row width",
+        ));
+    }
+    Ok(())
+}
+
 fn unphased_8bit_a1_dosage(path: &Path, p_aa: u8, p_ab: u8) -> Result<f32> {
-    let p_aa = u16::from(p_aa);
-    let p_ab = u16::from(p_ab);
-    if p_aa + p_ab > 255 {
+    unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, unphased_8bit_a1_dosage_lut())
+}
+
+fn unphased_8bit_a1_dosage_from_lut(
+    path: &Path,
+    p_aa: u8,
+    p_ab: u8,
+    lut: &[f32; 65_536],
+) -> Result<f32> {
+    if u16::from(p_aa) + u16::from(p_ab) > 255 {
         return Err(GenoioError::invalid_source(
             path,
             "bgen malformed probability values produce invalid a1 dosage",
         ));
     }
-    // Match the generic decoder's f32 operation order so exact matrix parity is
-    // stable even though the fast path validates with integers first.
-    let p_aa = f32::from(p_aa) / 255.0;
-    let p_ab = f32::from(p_ab) / 255.0;
-    let p_bb = 1.0 - p_aa - p_ab;
-    Ok((p_ab + 2.0 * p_bb).clamp(0.0, 2.0))
+    Ok(lut[usize::from(p_aa) << 8 | usize::from(p_ab)])
+}
+
+fn unphased_8bit_a1_dosage_lut() -> &'static [f32; 65_536] {
+    static LUT: OnceLock<[f32; 65_536]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut values = [0.0_f32; 65_536];
+        for p_aa in 0..=255_u16 {
+            for p_ab in 0..=255_u16 {
+                // Keep the same f32 operation order as the generic decoder so
+                // existing exact-parity tests remain stable.
+                let p_aa_f = f32::from(p_aa) / 255.0;
+                let p_ab_f = f32::from(p_ab) / 255.0;
+                let p_bb = 1.0 - p_aa_f - p_ab_f;
+                values[usize::from(p_aa) << 8 | usize::from(p_ab)] =
+                    (p_ab_f + 2.0 * p_bb).clamp(0.0, 2.0);
+            }
+        }
+        values
+    })
 }
 
 struct LittleEndianBitReader<'a> {

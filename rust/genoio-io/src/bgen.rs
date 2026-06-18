@@ -2,7 +2,7 @@
 //! BGEN reader orchestration and matrix assembly.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::matrix::{
@@ -23,6 +23,8 @@ mod header;
 mod index;
 mod io;
 
+const BGEN_READER_BUFFER_SIZE: usize = 1 << 20;
+
 use decode::{
     decode_buffered_dosage_values, decode_buffered_haplotype_values,
     read_layout2_probability_payload_into, skip_layout2_probability_payload,
@@ -31,7 +33,7 @@ use decode::{
 };
 use header::{
     read_bgen_samples, read_layout2_variant_identifying_data, read_layout2_variant_metadata,
-    BgenHeader,
+    skip_layout2_variant_identifying_data, BgenHeader,
 };
 use index::{indexed_region_records, validate_index_record_consumed, BgenIndexRecord};
 
@@ -197,10 +199,7 @@ fn evaluate_dosage_filter(
 
 /// Read BGEN sample and variant metadata without returning dosages.
 pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
-    let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
-        path: bgen.to_path_buf(),
-        source,
-    })?;
+    let mut reader = open_bgen_reader(bgen)?;
     let header = BgenHeader::read_from(&mut reader, bgen)?;
     header.validate(bgen)?;
 
@@ -246,10 +245,7 @@ pub fn read_bgen_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
-        path: bgen.to_path_buf(),
-        source,
-    })?;
+    let mut reader = open_bgen_reader(bgen)?;
     let header = BgenHeader::read_from(&mut reader, bgen)?;
     header.validate(bgen)?;
     let all_samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
@@ -282,6 +278,19 @@ pub fn read_bgen_dosage_dense_windowed(
             matrix_only,
         };
         return read_bgen_dosage_dense_indexed(context, &index_records);
+    }
+    if matrix_only && variant_filter.is_none() {
+        // Matrix-only reads do not expose variant strings or positions. Skipping
+        // those bytes preserves the same matrix contract while avoiding string
+        // allocation and UTF-8 validation on the hot path.
+        return read_bgen_dosage_dense_matrix_only_unfiltered(
+            &mut reader,
+            bgen,
+            &header,
+            selection,
+            diagnostics,
+            variant_window,
+        );
     }
 
     reader
@@ -406,6 +415,106 @@ pub fn read_bgen_dosage_dense_windowed(
     )
 }
 
+fn open_bgen_reader(bgen: &Path) -> Result<BufReader<File>> {
+    let file = File::open(bgen).map_err(|source| GenoioError::Io {
+        path: bgen.to_path_buf(),
+        source,
+    })?;
+    Ok(BufReader::with_capacity(BGEN_READER_BUFFER_SIZE, file))
+}
+
+/// Read a matrix-only BGEN block without materializing unused variant metadata.
+fn read_bgen_dosage_dense_matrix_only_unfiltered(
+    reader: &mut BufReader<File>,
+    bgen: &Path,
+    header: &BgenHeader,
+    selection: DenseSampleSelection,
+    mut diagnostics: genoio_core::DenseDiagnostics,
+    variant_window: Option<VariantWindow>,
+) -> Result<DenseGenotypeMatrix> {
+    reader
+        .seek(SeekFrom::Start(u64::from(header.offset) + 4))
+        .map_err(|source| GenoioError::Io {
+            path: bgen.to_path_buf(),
+            source,
+        })?;
+
+    let header_variant_count = usize::try_from(header.variant_count)
+        .map_err(|_| GenoioError::invalid_source(bgen, "bgen variant count is out of range"))?;
+    let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
+        window.len.min(header_variant_count)
+    });
+    let n_samples = selection.samples.len();
+    let (mut values, mut missing_mask) = sample_major_buffers(n_samples, output_variant_capacity)?;
+    let mut decode_buffers = DosageDecodeBuffers::default();
+    let mut retention = RetainedVariantState::new(variant_window);
+    let mut output_variant_count = 0_usize;
+
+    for _ in 0..header.variant_count {
+        if retention.window_is_satisfied() {
+            break;
+        }
+        match retention.metadata_decision(PartialFilterDecision::Accept, &mut diagnostics) {
+            MetadataRetentionAction::Include => {
+                skip_layout2_variant_identifying_data(reader, bgen)?;
+                read_layout2_probability_payload_into(
+                    reader,
+                    bgen,
+                    header.flags.compression,
+                    &mut decode_buffers.payload,
+                    &mut decode_buffers.compressed_payload,
+                )?;
+                write_dosage_slot(
+                    BgenDosageSlotWrite {
+                        bgen,
+                        sample_count: header.sample_count,
+                        source_indices: &selection.source_indices,
+                        buffers: &mut decode_buffers,
+                        values: &mut values,
+                        missing_mask: &mut missing_mask,
+                        row_width: output_variant_capacity,
+                        variant_index: output_variant_count,
+                    },
+                    false,
+                )?;
+                output_variant_count += 1;
+            }
+            MetadataRetentionAction::Skip => {
+                skip_layout2_variant_identifying_data(reader, bgen)?;
+                skip_layout2_probability_payload(reader, bgen, header.flags.compression)?;
+            }
+            MetadataRetentionAction::Stop => break,
+            MetadataRetentionAction::DecodeGenotypes => {
+                return Err(GenoioError::internal_contract(
+                    "unfiltered bgen matrix-only path requested genotype filtering",
+                ));
+            }
+        }
+    }
+
+    let n_variants = output_variant_count;
+    diagnostics.retained_variants = n_variants;
+    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        n_variants,
+    );
+    finish_dense_matrix(
+        DenseMatrixParts {
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            samples: selection.samples,
+            variants: Vec::new(),
+            diagnostics,
+        },
+        true,
+    )
+}
+
 /// Read retained BGEN biallelic diploid phased dosages as dense haplotype rows.
 pub fn read_bgen_haplotypes_dosage_dense_windowed(
     bgen: &Path,
@@ -415,10 +524,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut reader = File::open(bgen).map_err(|source| GenoioError::Io {
-        path: bgen.to_path_buf(),
-        source,
-    })?;
+    let mut reader = open_bgen_reader(bgen)?;
     let header = BgenHeader::read_from(&mut reader, bgen)?;
     header.validate(bgen)?;
     let all_samples = read_bgen_samples(&mut reader, bgen, sample, &header)?;
@@ -647,7 +753,7 @@ fn write_dosage_slot(
 }
 
 struct BgenIndexedReadContext<'a> {
-    reader: &'a mut File,
+    reader: &'a mut BufReader<File>,
     bgen: &'a Path,
     header: &'a BgenHeader,
     selection: DenseSampleSelection,

@@ -1,7 +1,6 @@
 // pattern: Imperative Shell
 //! Query same-path `.bgi` indexes for BGEN region pushdown.
 
-use std::fs::File;
 use std::io::Seek;
 use std::path::{Path, PathBuf};
 
@@ -95,7 +94,7 @@ fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<B
 }
 
 pub(super) fn validate_index_record_consumed(
-    reader: &mut File,
+    reader: &mut impl Seek,
     bgen: &Path,
     index_record: &BgenIndexRecord,
 ) -> Result<()> {
