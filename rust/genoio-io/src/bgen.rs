@@ -6,8 +6,8 @@ use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
 use crate::matrix::{
-    finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
-    VariantMajorDenseParts,
+    finish_dense_matrix, finish_variant_major_dense_matrix, shrink_sample_major_width,
+    write_sample_major_variant_slot, DenseMatrixParts, VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 use crate::Result;
@@ -25,8 +25,9 @@ mod io;
 
 use decode::{
     decode_buffered_dosage_values, decode_buffered_haplotype_values,
-    read_layout2_probability_payload_into, skip_layout2_probability_payload, DosageDecodeBuffers,
-    HaplotypeDecodeBuffers,
+    read_layout2_probability_payload_into, skip_layout2_probability_payload,
+    try_decode_buffered_dosage_values_into_sample_major_slot, DosageDecodeBuffers,
+    HaplotypeDecodeBuffers, SampleMajorSlotMut,
 };
 use header::{
     read_bgen_samples, read_layout2_variant_identifying_data, read_layout2_variant_metadata,
@@ -295,11 +296,9 @@ pub fn read_bgen_dosage_dense_windowed(
     let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
         window.len.min(header_variant_count)
     });
+    let n_samples = selection.samples.len();
+    let (mut values, mut missing_mask) = sample_major_buffers(n_samples, output_variant_capacity)?;
     let mut variants = Vec::with_capacity(output_variant_capacity);
-    let mut variant_major_values =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut variant_major_missing =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut decode_buffers = DosageDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
@@ -362,34 +361,43 @@ pub fn read_bgen_dosage_dense_windowed(
             }
         }
 
-        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
-            decode_buffered_dosage_values(
+        write_dosage_slot(
+            BgenDosageSlotWrite {
                 bgen,
-                header.sample_count,
-                &selection.source_indices,
-                &mut decode_buffers,
-            )?;
-        }
+                sample_count: header.sample_count,
+                source_indices: &selection.source_indices,
+                buffers: &mut decode_buffers,
+                values: &mut values,
+                missing_mask: &mut missing_mask,
+                row_width: output_variant_capacity,
+                variant_index: output_variant_count,
+            },
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
+        )?;
         if !matrix_only {
             variants.push(variant);
         }
-        variant_major_values.extend_from_slice(&decode_buffers.selected_values);
-        variant_major_missing.extend_from_slice(&decode_buffers.selected_missing);
         output_variant_count += 1;
         if retention.window_is_satisfied() {
             break;
         }
     }
 
-    let n_samples = selection.samples.len();
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
+    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        n_variants,
+    );
+    finish_dense_matrix(
+        DenseMatrixParts {
             n_samples,
             n_variants,
-            variant_major_values,
-            variant_major_missing,
+            values,
+            missing_mask,
             samples: selection.samples,
             variants,
             diagnostics,
@@ -573,6 +581,71 @@ fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Ve
     haplotype_samples
 }
 
+fn sample_major_buffers(n_samples: usize, n_variants: usize) -> Result<(Vec<f32>, Vec<bool>)> {
+    let len = n_samples.checked_mul(n_variants).ok_or_else(|| {
+        GenoioError::internal_contract("sample-major dense matrix shape is out of range")
+    })?;
+    Ok((vec![0.0; len], vec![false; len]))
+}
+
+struct BgenDosageSlotWrite<'a> {
+    bgen: &'a Path,
+    sample_count: u32,
+    source_indices: &'a [usize],
+    buffers: &'a mut DosageDecodeBuffers,
+    values: &'a mut [f32],
+    missing_mask: &'a mut [bool],
+    row_width: usize,
+    variant_index: usize,
+}
+
+fn write_dosage_slot(
+    request: BgenDosageSlotWrite<'_>,
+    already_decoded_for_filter: bool,
+) -> Result<()> {
+    let BgenDosageSlotWrite {
+        bgen,
+        sample_count,
+        source_indices,
+        buffers,
+        values,
+        missing_mask,
+        row_width,
+        variant_index,
+    } = request;
+
+    if !already_decoded_for_filter {
+        let mut slot = SampleMajorSlotMut {
+            values,
+            missing_mask,
+            row_width,
+            variant_index,
+        };
+        // UKB-like unphased 8-bit records can fill the final matrix slot
+        // directly. Other BGEN shapes fall back to the generic selected decode.
+        if try_decode_buffered_dosage_values_into_sample_major_slot(
+            bgen,
+            sample_count,
+            source_indices,
+            buffers,
+            &mut slot,
+        )? {
+            return Ok(());
+        }
+        decode_buffered_dosage_values(bgen, sample_count, source_indices, buffers)?;
+    }
+
+    write_sample_major_variant_slot(
+        values,
+        missing_mask,
+        source_indices.len(),
+        row_width,
+        variant_index,
+        &buffers.selected_values,
+        &buffers.selected_missing,
+    )
+}
+
 struct BgenIndexedReadContext<'a> {
     reader: &'a mut File,
     bgen: &'a Path,
@@ -601,11 +674,9 @@ fn read_bgen_dosage_dense_indexed(
     let output_variant_capacity = variant_window.map_or(index_records.len(), |window| {
         window.len.min(index_records.len())
     });
+    let n_samples = selection.samples.len();
+    let (mut values, mut missing_mask) = sample_major_buffers(n_samples, output_variant_capacity)?;
     let mut variants = Vec::with_capacity(output_variant_capacity);
-    let mut variant_major_values =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut variant_major_missing =
-        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
     let mut decode_buffers = DosageDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
@@ -686,32 +757,41 @@ fn read_bgen_dosage_dense_indexed(
             }
         }
 
-        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
-            decode_buffered_dosage_values(
+        write_dosage_slot(
+            BgenDosageSlotWrite {
                 bgen,
-                header.sample_count,
-                &selection.source_indices,
-                &mut decode_buffers,
-            )?;
-        }
+                sample_count: header.sample_count,
+                source_indices: &selection.source_indices,
+                buffers: &mut decode_buffers,
+                values: &mut values,
+                missing_mask: &mut missing_mask,
+                row_width: output_variant_capacity,
+                variant_index: output_variant_count,
+            },
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
+        )?;
         validate_index_record_consumed(reader, bgen, index_record)?;
         if !matrix_only {
             variants.push(variant);
         }
-        variant_major_values.extend_from_slice(&decode_buffers.selected_values);
-        variant_major_missing.extend_from_slice(&decode_buffers.selected_missing);
         output_variant_count += 1;
     }
 
-    let n_samples = selection.samples.len();
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
+    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
+    shrink_sample_major_width(
+        &mut missing_mask,
+        n_samples,
+        output_variant_capacity,
+        n_variants,
+    );
+    finish_dense_matrix(
+        DenseMatrixParts {
             n_samples,
             n_variants,
-            variant_major_values,
-            variant_major_missing,
+            values,
+            missing_mask,
             samples: selection.samples,
             variants,
             diagnostics,
