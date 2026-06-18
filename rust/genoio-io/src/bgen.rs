@@ -28,8 +28,9 @@ const BGEN_READER_BUFFER_SIZE: usize = 1 << 20;
 use decode::{
     decode_buffered_dosage_values, decode_buffered_haplotype_values,
     read_layout2_probability_payload_into, skip_layout2_probability_payload,
-    try_decode_buffered_dosage_values_into_sample_major_slot, DosageDecodeBuffers,
-    HaplotypeDecodeBuffers, SampleMajorSlotMut,
+    try_decode_buffered_dosage_values_into_sample_major_slot,
+    try_decode_buffered_dosage_values_with_counts, DosageDecodeBuffers, HaplotypeDecodeBuffers,
+    SampleMajorSlotMut,
 };
 use header::{
     read_bgen_samples, read_layout2_variant_identifying_data, read_layout2_variant_metadata,
@@ -45,6 +46,11 @@ struct DosageFilterCounts {
 }
 
 impl DosageFilterCounts {
+    fn record_called_dosage(&mut self, value: f32) {
+        self.allele_count += f64::from(value);
+        self.called_count += 1;
+    }
+
     fn evaluate_plan(self, plan: GenotypeFilterPlan) -> Result<Option<bool>> {
         match plan {
             GenotypeFilterPlan::Generic => Ok(None),
@@ -167,8 +173,7 @@ fn dosage_counts_for_filter(values: &[f32], missing: &[bool]) -> Result<DosageFi
                 format!("dosage statistics require values in [0, 2]; observed {value}"),
             ));
         }
-        counts.allele_count += f64::from(*value);
-        counts.called_count += 1;
+        counts.record_called_dosage(*value);
     }
     Ok(counts)
 }
@@ -195,6 +200,40 @@ fn evaluate_dosage_filter(
 
     let stats = compute_dosage_variant_stats(values, missing)?;
     Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
+}
+
+fn decode_and_evaluate_dosage_filter(
+    bgen: &Path,
+    sample_count: u32,
+    source_indices: &[usize],
+    buffers: &mut DosageDecodeBuffers,
+    filter: &VariantFilter,
+    variant: &VariantRecord,
+    matrix_only: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    let fast_counts = if matrix_only {
+        // Matrix-only genotype filters only need a retain/drop decision. For
+        // common fully-called phased BGENs, decode once into scratch while
+        // accumulating counts and reuse that scratch if the variant is kept.
+        try_decode_buffered_dosage_values_with_counts(bgen, sample_count, source_indices, buffers)?
+    } else {
+        None
+    };
+    if fast_counts.is_none() {
+        decode_buffered_dosage_values(bgen, sample_count, source_indices, buffers)?;
+    }
+    if let Some(counts) = fast_counts {
+        if let Some(retain) = counts.evaluate_plan(filter.genotype_filter_plan())? {
+            return Ok((retain, None));
+        }
+    }
+    evaluate_dosage_filter(
+        &buffers.selected_values,
+        &buffers.selected_missing,
+        filter,
+        variant,
+        !matrix_only,
+    )
 }
 
 /// Read BGEN sample and variant metadata without returning dosages.
@@ -340,22 +379,17 @@ pub fn read_bgen_dosage_dense_windowed(
                     &mut decode_buffers.payload,
                     &mut decode_buffers.compressed_payload,
                 )?;
-                decode_buffered_dosage_values(
+                let filter = variant_filter.ok_or_else(|| {
+                    GenoioError::internal_contract("genotype decision requires a variant filter")
+                })?;
+                let (retain_variant, stats) = decode_and_evaluate_dosage_filter(
                     bgen,
                     header.sample_count,
                     &selection.source_indices,
                     &mut decode_buffers,
-                )?;
-                let (retain_variant, stats) = evaluate_dosage_filter(
-                    &decode_buffers.selected_values,
-                    &decode_buffers.selected_missing,
-                    variant_filter.ok_or_else(|| {
-                        GenoioError::internal_contract(
-                            "genotype decision requires a variant filter",
-                        )
-                    })?,
+                    filter,
                     &variant,
-                    !matrix_only,
+                    matrix_only,
                 )?;
                 match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}
@@ -829,22 +863,17 @@ fn read_bgen_dosage_dense_indexed(
                     &mut decode_buffers.payload,
                     &mut decode_buffers.compressed_payload,
                 )?;
-                decode_buffered_dosage_values(
+                let filter = variant_filter.ok_or_else(|| {
+                    GenoioError::internal_contract("genotype decision requires a variant filter")
+                })?;
+                let (retain_variant, stats) = decode_and_evaluate_dosage_filter(
                     bgen,
                     header.sample_count,
                     &selection.source_indices,
                     &mut decode_buffers,
-                )?;
-                let (retain_variant, stats) = evaluate_dosage_filter(
-                    &decode_buffers.selected_values,
-                    &decode_buffers.selected_missing,
-                    variant_filter.ok_or_else(|| {
-                        GenoioError::internal_contract(
-                            "genotype decision requires a variant filter",
-                        )
-                    })?,
+                    filter,
                     &variant,
-                    !matrix_only,
+                    matrix_only,
                 )?;
                 match retention.genotype_decision(retain_variant, &mut diagnostics) {
                     RetentionAction::Include => {}

@@ -12,8 +12,12 @@ use crate::Result;
 
 use super::header::BgenCompression;
 use super::io::{read_u32_le, skip_exact};
+use super::DosageFilterCounts;
 
 const DOSAGE_TOLERANCE: f32 = 1.0e-6;
+const UNPHASED_8_BIT_DEPTH: u8 = 8;
+const PHASED_16_BIT_DEPTH: u8 = 16;
+const PHASED_16_BYTES_PER_SAMPLE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BgenPhase {
@@ -95,17 +99,33 @@ pub(super) fn try_decode_buffered_dosage_values_into_sample_major_slot(
 ) -> Result<bool> {
     let decoded = DecodedDosageVariant::decode(bgen, &buffers.payload, sample_count, 2)?;
     decoded.debug_assert_supported_subset();
-    if decoded.header.phase != BgenPhase::Unphased || decoded.header.bit_depth != 8 {
-        return Ok(false);
-    }
     if !decoded.header.has_missing {
-        decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
-            bgen,
-            decoded.packed_probabilities,
-            source_indices,
-            slot,
-        )?;
-        return Ok(true);
+        match (decoded.header.phase, decoded.header.bit_depth) {
+            (BgenPhase::Unphased, UNPHASED_8_BIT_DEPTH) => {
+                decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
+                    bgen,
+                    decoded.packed_probabilities,
+                    source_indices,
+                    slot,
+                )?;
+                return Ok(true);
+            }
+            (BgenPhase::Phased, PHASED_16_BIT_DEPTH) => {
+                decode_selected_called_phased_16bit_a1_dosages_into_sample_major_slot(
+                    bgen,
+                    decoded.packed_probabilities,
+                    source_indices,
+                    slot,
+                )?;
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    if decoded.header.phase != BgenPhase::Unphased
+        || decoded.header.bit_depth != UNPHASED_8_BIT_DEPTH
+    {
+        return Ok(false);
     }
     decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
         bgen,
@@ -115,6 +135,32 @@ pub(super) fn try_decode_buffered_dosage_values_into_sample_major_slot(
         slot,
     )?;
     Ok(true)
+}
+
+/// Try a genotype-filter hot path that decodes and accumulates simple dosage
+/// counts in one pass. Returns `None` for shapes that need the generic decoder.
+pub(super) fn try_decode_buffered_dosage_values_with_counts(
+    bgen: &Path,
+    sample_count: u32,
+    source_indices: &[usize],
+    buffers: &mut DosageDecodeBuffers,
+) -> Result<Option<DosageFilterCounts>> {
+    let decoded = DecodedDosageVariant::decode(bgen, &buffers.payload, sample_count, 2)?;
+    decoded.debug_assert_supported_subset();
+    if decoded.header.phase == BgenPhase::Phased
+        && decoded.header.bit_depth == PHASED_16_BIT_DEPTH
+        && !decoded.header.has_missing
+    {
+        let counts = decode_selected_called_phased_16bit_a1_dosages_with_counts(
+            bgen,
+            decoded.packed_probabilities,
+            source_indices,
+            &mut buffers.selected_values,
+            &mut buffers.selected_missing,
+        )?;
+        return Ok(Some(counts));
+    }
+    Ok(None)
 }
 
 pub(super) fn decode_buffered_haplotype_values(
@@ -516,7 +562,22 @@ impl<'a> DecodedDosageVariant<'a> {
                 missing,
             );
         }
-        if self.header.phase == BgenPhase::Unphased && self.header.bit_depth == 8 {
+        if self.header.phase == BgenPhase::Phased
+            && self.header.bit_depth == PHASED_16_BIT_DEPTH
+            && !self.header.has_missing
+        {
+            // Common imputed BGENs are phased, 16-bit, and fully called.
+            // Decode that byte-aligned shape without the generic bit reader.
+            return decode_selected_called_phased_16bit_a1_dosages(
+                path,
+                self.packed_probabilities,
+                source_indices,
+                values,
+                missing,
+            );
+        }
+        if self.header.phase == BgenPhase::Unphased && self.header.bit_depth == UNPHASED_8_BIT_DEPTH
+        {
             // UKB-style BGEN stores two one-byte probabilities per non-missing
             // diploid sample. Decode that common case directly and leave
             // arbitrary bit depths on the generic bit reader.
@@ -804,6 +865,99 @@ fn decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
     Ok(())
 }
 
+fn decode_selected_called_phased_16bit_a1_dosages(
+    path: &Path,
+    packed_probabilities: &[u8],
+    source_indices: &[usize],
+    values: &mut Vec<f32>,
+    missing: &mut Vec<bool>,
+) -> Result<()> {
+    values.clear();
+    missing.clear();
+    values.reserve(source_indices.len());
+    missing.reserve(source_indices.len());
+
+    for &source_index in source_indices {
+        let (first, second) = phased_16bit_raw_pair(path, packed_probabilities, source_index)?;
+        values.push(decode_phased_16bit_a1_dosage(first, second));
+        missing.push(false);
+    }
+
+    Ok(())
+}
+
+fn decode_selected_called_phased_16bit_a1_dosages_with_counts(
+    path: &Path,
+    packed_probabilities: &[u8],
+    source_indices: &[usize],
+    values: &mut Vec<f32>,
+    missing: &mut Vec<bool>,
+) -> Result<DosageFilterCounts> {
+    values.clear();
+    missing.clear();
+    values.reserve(source_indices.len());
+    missing.reserve(source_indices.len());
+    let mut counts = DosageFilterCounts::default();
+
+    for &source_index in source_indices {
+        let (first, second) = phased_16bit_raw_pair(path, packed_probabilities, source_index)?;
+        let dosage = decode_phased_16bit_a1_dosage(first, second);
+        counts.record_called_dosage(dosage);
+        values.push(dosage);
+        missing.push(false);
+    }
+
+    Ok(counts)
+}
+
+fn decode_selected_called_phased_16bit_a1_dosages_into_sample_major_slot(
+    path: &Path,
+    packed_probabilities: &[u8],
+    source_indices: &[usize],
+    slot: &mut SampleMajorSlotMut<'_>,
+) -> Result<()> {
+    validate_sample_major_slot_shape(source_indices.len(), slot)?;
+
+    for (selected_cursor, &source_index) in source_indices.iter().enumerate() {
+        let (first, second) = phased_16bit_raw_pair(path, packed_probabilities, source_index)?;
+        let target_index = selected_cursor * slot.row_width + slot.variant_index;
+        slot.values[target_index] = decode_phased_16bit_a1_dosage(first, second);
+        slot.missing_mask[target_index] = false;
+    }
+
+    Ok(())
+}
+
+fn phased_16bit_raw_pair(
+    path: &Path,
+    packed_probabilities: &[u8],
+    source_index: usize,
+) -> Result<(u16, u16)> {
+    let probability_cursor = source_index
+        .checked_mul(PHASED_16_BYTES_PER_SAMPLE)
+        .ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen sample probability offset is out of range")
+        })?;
+    let probability_end = probability_cursor
+        .checked_add(PHASED_16_BYTES_PER_SAMPLE)
+        .ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen sample probability offset is out of range")
+        })?;
+    let bytes = packed_probabilities
+        .get(probability_cursor..probability_end)
+        .ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen packed probability bytes are truncated")
+        })?;
+    Ok((
+        u16::from_le_bytes([bytes[0], bytes[1]]),
+        u16::from_le_bytes([bytes[2], bytes[3]]),
+    ))
+}
+
+fn decode_phased_16bit_a1_dosage(first: u16, second: u16) -> f32 {
+    decode_phased_a1_dosage(PHASED_16_BIT_DEPTH, u32::from(first), u32::from(second))
+}
+
 fn validate_sample_major_slot_shape(
     selected_sample_count: usize,
     slot: &SampleMajorSlotMut<'_>,
@@ -1056,6 +1210,12 @@ fn validate_decompressed_probability_block_len(
 mod tests {
     use super::*;
 
+    const TEST_PHASED16_PACKED: [u8; 12] = [0, 0, 255, 255, 0, 128, 0, 64, 255, 255, 255, 255];
+
+    fn test_phased16_mid_dosage() -> f32 {
+        decode_phased_16bit_a1_dosage(32768, 16384)
+    }
+
     fn layout2_payload(
         bit_depth: u8,
         ploidies: &[u8],
@@ -1262,6 +1422,72 @@ mod tests {
         .expect_err("impossible probabilities should fail");
 
         assert!(error.to_string().contains("malformed probability"));
+    }
+
+    #[test]
+    fn phased_16bit_fast_path_decodes_selected_dosages() {
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+
+        decode_selected_called_phased_16bit_a1_dosages(
+            Path::new("test.bgen"),
+            &TEST_PHASED16_PACKED,
+            &[1, 2],
+            &mut values,
+            &mut missing,
+        )
+        .expect("16-bit phased fast path should decode");
+
+        assert_eq!(missing, vec![false, false]);
+        assert!((values[0] - test_phased16_mid_dosage()).abs() <= f32::EPSILON);
+        assert_eq!(values[1], 0.0);
+    }
+
+    #[test]
+    fn phased_16bit_fast_path_decodes_selected_dosages_and_counts() {
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+
+        let counts = decode_selected_called_phased_16bit_a1_dosages_with_counts(
+            Path::new("test.bgen"),
+            &TEST_PHASED16_PACKED,
+            &[0, 1],
+            &mut values,
+            &mut missing,
+        )
+        .expect("16-bit phased fast path should decode and count");
+
+        assert_eq!(missing, vec![false, false]);
+        assert_eq!(values[0], 1.0);
+        assert!((values[1] - test_phased16_mid_dosage()).abs() <= f32::EPSILON);
+        assert_eq!(counts.called_count, 2);
+        assert_eq!(counts.missing_count, 0);
+        assert!((counts.allele_count - f64::from(values[0] + values[1])).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn phased_16bit_fast_path_writes_sample_major_slot() {
+        let mut values = vec![0.0; 6];
+        let mut missing = vec![true; 6];
+
+        decode_selected_called_phased_16bit_a1_dosages_into_sample_major_slot(
+            Path::new("test.bgen"),
+            &TEST_PHASED16_PACKED,
+            &[1, 2],
+            &mut SampleMajorSlotMut {
+                values: &mut values,
+                missing_mask: &mut missing,
+                row_width: 3,
+                variant_index: 1,
+            },
+        )
+        .expect("16-bit phased fast path should decode into sample-major slot");
+
+        assert_eq!(
+            values,
+            vec![0.0, test_phased16_mid_dosage(), 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(missing, vec![true, false, true, true, false, true]);
     }
 
     #[test]
