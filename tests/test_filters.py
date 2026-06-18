@@ -150,17 +150,12 @@ def test_variants_accepts_composed_filter_and_matches_polars_numpy_reference(tmp
             "missing_rate": [0.0, 1.0 / 3.0, 0.0, 1.0],
         }
     )
-    expected_frame = (
-        source.lazy()
-        .filter(
-            (pl.col("ref").str.len_chars() == 1)
-            & (pl.col("alt").str.len_chars() == 1)
-            & (pl.col("maf") >= 0.1)
-            & (pl.col("missing_rate") <= 0.5)
-        )
-        .select("id")
-        .collect()
-    )
+    expected_frame = source.filter(
+        (pl.col("ref").str.len_chars() == 1)
+        & (pl.col("alt").str.len_chars() == 1)
+        & (pl.col("maf") >= 0.1)
+        & (pl.col("missing_rate") <= 0.5)
+    ).select("id")
     expected_ids = expected_frame.get_column("id").to_list()
 
     assert variants["id"].to_list() == expected_ids == ["rs1"]
