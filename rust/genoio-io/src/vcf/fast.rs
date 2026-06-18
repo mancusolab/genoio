@@ -11,17 +11,18 @@ use std::path::Path;
 use flate2::read::MultiGzDecoder;
 use genoio_core::{
     select_samples_source_order, DenseGenotypeMatrix, GenoioError, PartialFilterDecision,
-    VariantFilter, VariantWindow,
+    SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
 use crate::error::Result;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
-use self::gt::{decode_gt_record, GtDecodeBuffers};
+use self::gt::{decode_gt_record, GtDecodeBuffers, GtStatsMode};
 use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, FastDenseOutput};
 use self::record::variant_record_from_record;
+use self::sparse::read_sparse_records;
 
 use super::is_compressed_vcf;
 
@@ -29,6 +30,7 @@ mod gt;
 mod header;
 mod output;
 mod record;
+mod sparse;
 
 const VCF_FAST_BUFFER_SIZE: usize = 1 << 20;
 
@@ -62,14 +64,39 @@ pub(super) fn try_read_vcf_dense(
     .map(Some)
 }
 
+pub(super) fn try_read_vcf_sparse(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<Option<SparseGenotypeMatrix>> {
+    if !is_fast_vcf_supported(path, variant_filter, threads) {
+        return Ok(None);
+    }
+
+    let mut reader = open_lazy_reader(path)?;
+    let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+
+    read_sparse_records(path, variant_filter, variant_window, selection, &mut reader).map(Some)
+}
+
 fn is_fast_dense_supported(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> bool {
-    matrix_only
-        && is_compressed_vcf(path)
+    matrix_only && is_fast_vcf_supported(path, variant_filter, threads)
+}
+
+fn is_fast_vcf_supported(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+    threads: Option<usize>,
+) -> bool {
+    is_compressed_vcf(path)
         && threads.is_none()
         && !variant_filter.is_some_and(VariantFilter::has_region_predicate)
 }
@@ -121,11 +148,19 @@ fn read_dense_records<R: std::io::BufRead>(
             MetadataRetentionAction::Stop => break,
         }
 
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         // `record.samples()` borrows noodles' reusable record buffer, so decode
         // selected GTs completely before the next `read_record` call.
-        decode_gt_record(path, &record, &selection.source_indices, &mut decoded)?;
-        let stats = if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
-            decoded.stats
+        decode_gt_record(
+            path,
+            &record,
+            &selection.source_indices,
+            GtStatsMode::from_needed(needs_genotype_decision),
+            &mut decoded,
+        )?;
+        let stats = if needs_genotype_decision {
+            decoded.stats()
         } else {
             None
         };

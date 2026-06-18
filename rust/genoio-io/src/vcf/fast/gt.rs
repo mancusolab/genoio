@@ -12,9 +12,9 @@ use noodles_vcf as noodles;
 use crate::error::Result;
 
 pub(super) struct GtDecodeBuffers {
-    pub(super) values: Vec<f32>,
-    pub(super) missing: Vec<bool>,
-    pub(super) stats: Option<VariantStats>,
+    values: Vec<f32>,
+    missing: Vec<bool>,
+    stats: Option<VariantStats>,
 }
 
 impl GtDecodeBuffers {
@@ -32,12 +32,45 @@ impl GtDecodeBuffers {
         self.missing.clear();
         self.stats = None;
     }
+
+    pub(super) fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    pub(super) fn values_mut(&mut self) -> &mut [f32] {
+        &mut self.values
+    }
+
+    pub(super) fn missing(&self) -> &[bool] {
+        &self.missing
+    }
+
+    pub(super) fn stats(&self) -> Option<VariantStats> {
+        self.stats
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GtStatsMode {
+    Skip,
+    Compute,
+}
+
+impl GtStatsMode {
+    pub(super) const fn from_needed(needed: bool) -> Self {
+        if needed {
+            Self::Compute
+        } else {
+            Self::Skip
+        }
+    }
 }
 
 pub(super) fn decode_gt_record(
     path: &Path,
     record: &noodles::Record,
     source_indices: &[usize],
+    stats_mode: GtStatsMode,
     output: &mut GtDecodeBuffers,
 ) -> Result<()> {
     output.clear();
@@ -57,24 +90,33 @@ pub(super) fn decode_gt_record(
         )
     })?;
 
-    let mut counts = GtCounts::default();
-    scan_selected_gt(sample_fields, gt_index, source_indices, &mut |call| {
-        counts.record(call);
-        output.values.push(call.value);
-        output.missing.push(call.is_missing);
-    })
-    .map_err(|reason| {
-        GenoioError::invalid_source(
-            path,
-            format!(
-                "vcf record {} has unsupported GT: {reason}",
-                record_location()
-            ),
-        )
-    })?;
-
-    output.stats = Some(counts.variant_stats()?);
+    match stats_mode {
+        GtStatsMode::Compute => {
+            let mut counts = GtCounts::default();
+            scan_selected_gt(sample_fields, gt_index, source_indices, &mut |call| {
+                counts.record(call);
+                output.values.push(call.value);
+                output.missing.push(call.is_missing);
+            })
+            .map_err(|reason| gt_error(path, &record_location(), reason))?;
+            output.stats = Some(counts.variant_stats()?);
+        }
+        GtStatsMode::Skip => {
+            scan_selected_gt(sample_fields, gt_index, source_indices, &mut |call| {
+                output.values.push(call.value);
+                output.missing.push(call.is_missing);
+            })
+            .map_err(|reason| gt_error(path, &record_location(), reason))?;
+        }
+    }
     Ok(())
+}
+
+fn gt_error(path: &Path, record_location: &str, reason: &str) -> GenoioError {
+    GenoioError::invalid_source(
+        path,
+        format!("vcf record {record_location} has unsupported GT: {reason}"),
+    )
 }
 
 fn record_pos(record: &noodles::Record) -> usize {

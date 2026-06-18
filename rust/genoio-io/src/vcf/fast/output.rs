@@ -82,14 +82,14 @@ impl FastDenseOutput {
                 *n_samples,
                 *row_width,
                 variant_index,
-                &decoded.values,
-                &decoded.missing,
+                decoded.values(),
+                decoded.missing(),
             ),
             Self::VariantMajor {
                 values, missing, ..
             } => {
-                values.extend_from_slice(&decoded.values);
-                missing.extend_from_slice(&decoded.missing);
+                values.extend_from_slice(decoded.values());
+                missing.extend_from_slice(decoded.missing());
                 Ok(())
             }
         }
