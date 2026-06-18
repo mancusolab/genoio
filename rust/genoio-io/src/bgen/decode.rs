@@ -37,10 +37,19 @@ impl BgenPhase {
     }
 }
 
+/// Reused scratch space for BGEN probability payload I/O.
+///
+/// Keeping compressed and decompressed buffers together makes call sites pass a
+/// single owner while preserving allocation reuse across variants.
 #[derive(Default)]
-pub(super) struct DosageDecodeBuffers {
+pub(super) struct ProbabilityPayloadBuffers {
     pub(super) payload: Vec<u8>,
     pub(super) compressed_payload: Vec<u8>,
+}
+
+#[derive(Default)]
+pub(super) struct DosageDecodeBuffers {
+    pub(super) probability: ProbabilityPayloadBuffers,
     pub(super) selected_values: Vec<f32>,
     pub(super) selected_missing: Vec<bool>,
 }
@@ -56,8 +65,7 @@ pub(super) struct SampleMajorSlotMut<'a> {
 
 #[derive(Default)]
 pub(super) struct HaplotypeDecodeBuffers {
-    pub(super) payload: Vec<u8>,
-    pub(super) compressed_payload: Vec<u8>,
+    pub(super) probability: ProbabilityPayloadBuffers,
     pub(super) selected_haplotype_values: Vec<f32>,
     pub(super) selected_haplotype_missing: Vec<bool>,
     pub(super) selected_collapsed_values: Vec<f32>,
@@ -71,12 +79,12 @@ pub(super) fn decode_buffered_dosage_values(
     buffers: &mut DosageDecodeBuffers,
 ) -> Result<()> {
     let DosageDecodeBuffers {
-        payload,
+        probability,
         selected_values,
         selected_missing,
         ..
     } = buffers;
-    let decoded = DecodedDosageVariant::decode(bgen, payload, sample_count, 2)?;
+    let decoded = DecodedDosageVariant::decode(bgen, &probability.payload, sample_count, 2)?;
     decoded.debug_assert_supported_subset();
     decoded.decode_selected_source_order(
         bgen,
@@ -97,7 +105,8 @@ pub(super) fn try_decode_buffered_dosage_values_into_sample_major_slot(
     buffers: &mut DosageDecodeBuffers,
     slot: &mut SampleMajorSlotMut<'_>,
 ) -> Result<bool> {
-    let decoded = DecodedDosageVariant::decode(bgen, &buffers.payload, sample_count, 2)?;
+    let decoded =
+        DecodedDosageVariant::decode(bgen, &buffers.probability.payload, sample_count, 2)?;
     decoded.debug_assert_supported_subset();
     if !decoded.header.has_missing {
         match (decoded.header.phase, decoded.header.bit_depth) {
@@ -145,7 +154,8 @@ pub(super) fn try_decode_buffered_dosage_values_with_counts(
     source_indices: &[usize],
     buffers: &mut DosageDecodeBuffers,
 ) -> Result<Option<DosageFilterCounts>> {
-    let decoded = DecodedDosageVariant::decode(bgen, &buffers.payload, sample_count, 2)?;
+    let decoded =
+        DecodedDosageVariant::decode(bgen, &buffers.probability.payload, sample_count, 2)?;
     decoded.debug_assert_supported_subset();
     if decoded.header.phase == BgenPhase::Phased
         && decoded.header.bit_depth == PHASED_16_BIT_DEPTH
@@ -170,14 +180,14 @@ pub(super) fn decode_buffered_haplotype_values(
     buffers: &mut HaplotypeDecodeBuffers,
 ) -> Result<()> {
     let HaplotypeDecodeBuffers {
-        payload,
+        probability,
         selected_haplotype_values,
         selected_haplotype_missing,
         selected_collapsed_values,
         selected_collapsed_missing,
         ..
     } = buffers;
-    let decoded = DecodedDosageVariant::decode(bgen, payload, sample_count, 2)?;
+    let decoded = DecodedDosageVariant::decode(bgen, &probability.payload, sample_count, 2)?;
     decoded.debug_assert_supported_subset();
     decoded.decode_selected_phased_haplotypes_source_order(
         bgen,
@@ -212,24 +222,16 @@ fn read_layout2_probability_payload(
     path: &Path,
     compression: BgenCompression,
 ) -> Result<Vec<u8>> {
-    let mut payload = Vec::new();
-    let mut compressed_payload = Vec::new();
-    read_layout2_probability_payload_into(
-        reader,
-        path,
-        compression,
-        &mut payload,
-        &mut compressed_payload,
-    )?;
-    Ok(payload)
+    let mut buffers = ProbabilityPayloadBuffers::default();
+    read_layout2_probability_payload_into(reader, path, compression, &mut buffers)?;
+    Ok(buffers.payload)
 }
 
 pub(super) fn read_layout2_probability_payload_into(
     reader: &mut impl Read,
     path: &Path,
     compression: BgenCompression,
-    payload: &mut Vec<u8>,
-    compressed_payload: &mut Vec<u8>,
+    buffers: &mut ProbabilityPayloadBuffers,
 ) -> Result<()> {
     let block_length = read_u32_le(reader, path)?;
     match compression {
@@ -240,10 +242,10 @@ pub(super) fn read_layout2_probability_payload_into(
                     "bgen uncompressed probability block is out of range",
                 )
             })?;
-            payload.clear();
-            payload.resize(payload_length, 0);
+            buffers.payload.clear();
+            buffers.payload.resize(payload_length, 0);
             reader
-                .read_exact(payload)
+                .read_exact(&mut buffers.payload)
                 .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
@@ -264,10 +266,12 @@ pub(super) fn read_layout2_probability_payload_into(
                     "bgen compressed probability block is out of range",
                 )
             })?;
-            compressed_payload.clear();
-            compressed_payload.resize(compressed_payload_length, 0);
+            buffers.compressed_payload.clear();
+            buffers
+                .compressed_payload
+                .resize(compressed_payload_length, 0);
             reader
-                .read_exact(compressed_payload)
+                .read_exact(&mut buffers.compressed_payload)
                 .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
@@ -275,9 +279,9 @@ pub(super) fn read_layout2_probability_payload_into(
             decompress_probability_block_into(
                 path,
                 compression,
-                compressed_payload,
+                &buffers.compressed_payload,
                 decompressed_block_length,
-                payload,
+                &mut buffers.payload,
             )
         }
         BgenCompression::Reserved => Err(GenoioError::invalid_source(
