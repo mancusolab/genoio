@@ -132,8 +132,8 @@ fn write_compressed_unindexed_vcf(path: &Path) {
 }
 
 #[test]
-fn indexed_vcf_region_dosage_uses_permissive_fast_path() {
-    let dir = unique_dir("vcf-filter-indexed-dosage-fast");
+fn indexed_vcf_region_dosage_uses_permissive_text_backend() {
+    let dir = unique_dir("vcf-filter-indexed-dosage-text");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,
@@ -155,7 +155,7 @@ fn indexed_vcf_region_dosage_uses_permissive_fast_path() {
     .expect("filter should parse");
 
     let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None, false)
-        .expect("indexed dosage VCF should decode through permissive fast path");
+        .expect("indexed dosage VCF should decode through permissive text backend");
 
     assert_eq!(
         dense
@@ -169,8 +169,8 @@ fn indexed_vcf_region_dosage_uses_permissive_fast_path() {
 }
 
 #[test]
-fn indexed_vcf_region_sparse_uses_permissive_fast_path() {
-    let dir = unique_dir("vcf-filter-indexed-sparse-fast");
+fn indexed_vcf_region_sparse_uses_permissive_text_backend() {
+    let dir = unique_dir("vcf-filter-indexed-sparse-text");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,
@@ -191,7 +191,7 @@ fn indexed_vcf_region_sparse_uses_permissive_fast_path() {
     .expect("filter should parse");
 
     let sparse = genoio_io::read_vcf_sparse(&path, None, Some(&filter))
-        .expect("indexed sparse VCF should decode through permissive fast path");
+        .expect("indexed sparse VCF should decode through permissive text backend");
 
     assert_eq!(
         sparse
@@ -206,8 +206,8 @@ fn indexed_vcf_region_sparse_uses_permissive_fast_path() {
 }
 
 #[test]
-fn indexed_vcf_region_haplotypes_use_permissive_fast_path() {
-    let dir = unique_dir("vcf-filter-indexed-haplo-fast");
+fn indexed_vcf_region_haplotypes_use_permissive_text_backend() {
+    let dir = unique_dir("vcf-filter-indexed-haplo-text");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,
@@ -228,9 +228,9 @@ fn indexed_vcf_region_haplotypes_use_permissive_fast_path() {
     .expect("filter should parse");
 
     let dense = genoio_io::read_vcf_haplotypes_dense(&path, None, Some(&filter))
-        .expect("indexed haplotype dense VCF should decode through permissive fast path");
+        .expect("indexed haplotype dense VCF should decode through permissive text backend");
     let sparse = genoio_io::read_vcf_haplotypes_sparse(&path, None, Some(&filter))
-        .expect("indexed haplotype sparse VCF should decode through permissive fast path");
+        .expect("indexed haplotype sparse VCF should decode through permissive text backend");
 
     assert_eq!(
         dense
@@ -323,7 +323,7 @@ fn indexed_vcf_region_filter_fetches_exact_start_and_end_positions() {
 
 #[test]
 fn indexed_vcf_region_uses_tabix_reference_names() {
-    let dir = unique_dir("vcf-filter-indexed-fast-region");
+    let dir = unique_dir("vcf-filter-indexed-text-region");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,
@@ -363,8 +363,8 @@ fn indexed_vcf_region_uses_tabix_reference_names() {
 }
 
 #[test]
-fn threaded_indexed_vcf_region_uses_permissive_fast_path_for_all_outputs() {
-    let dir = unique_dir("vcf-filter-threaded-indexed-fast-region");
+fn threaded_indexed_vcf_region_uses_permissive_text_backend_for_all_outputs() {
+    let dir = unique_dir("vcf-filter-threaded-indexed-text-region");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,
@@ -392,7 +392,7 @@ fn threaded_indexed_vcf_region_uses_permissive_fast_path_for_all_outputs() {
         false,
         Some(2),
     )
-    .expect("threaded indexed VCF should decode through permissive fast path");
+    .expect("threaded indexed VCF should decode through permissive text backend");
     let dosage = genoio_io::read_vcf_dosage_dense_windowed_with_threads(
         &path,
         None,
@@ -401,10 +401,10 @@ fn threaded_indexed_vcf_region_uses_permissive_fast_path_for_all_outputs() {
         false,
         Some(2),
     )
-    .expect("threaded indexed DS VCF should decode through permissive fast path");
+    .expect("threaded indexed DS VCF should decode through permissive text backend");
     let sparse =
         genoio_io::read_vcf_sparse_windowed_with_threads(&path, None, Some(&filter), None, Some(2))
-            .expect("threaded indexed sparse VCF should decode through permissive fast path");
+            .expect("threaded indexed sparse VCF should decode through permissive text backend");
     let haplotypes = genoio_io::read_vcf_haplotypes_dense_windowed_with_threads(
         &path,
         None,
@@ -413,7 +413,7 @@ fn threaded_indexed_vcf_region_uses_permissive_fast_path_for_all_outputs() {
         false,
         Some(2),
     )
-    .expect("threaded indexed haplotype VCF should decode through permissive fast path");
+    .expect("threaded indexed haplotype VCF should decode through permissive text backend");
     let sparse_haplotypes = genoio_io::read_vcf_haplotypes_sparse_windowed_with_threads(
         &path,
         None,
@@ -421,7 +421,7 @@ fn threaded_indexed_vcf_region_uses_permissive_fast_path_for_all_outputs() {
         None,
         Some(2),
     )
-    .expect("threaded indexed sparse haplotype VCF should decode through permissive fast path");
+    .expect("threaded indexed sparse haplotype VCF should decode through permissive text backend");
 
     assert_eq!(
         dense
@@ -584,7 +584,7 @@ fn indexed_vcf_region_sample_filter_preserves_source_order() {
 
 #[test]
 fn indexed_vcf_region_uses_permissive_header_scan() {
-    let dir = unique_dir("vcf-filter-indexed-header-fast");
+    let dir = unique_dir("vcf-filter-indexed-header-text");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,

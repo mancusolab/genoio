@@ -68,8 +68,8 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
 }
 
 #[test]
-fn plain_vcf_dense_uses_permissive_fast_header_path() {
-    let dir = unique_dir("vcf-dense-fast-plain");
+fn plain_vcf_dense_uses_permissive_text_header_path() {
+    let dir = unique_dir("vcf-dense-text-plain");
     let path = dir.join("tiny.vcf");
     write_file(
         &path,
@@ -83,7 +83,7 @@ fn plain_vcf_dense_uses_permissive_fast_header_path() {
     let samples = vec!["S3".to_string(), "S1".to_string()];
 
     let dense = genoio_io::read_vcf_dense(&path, Some(&samples), None)
-        .expect("plain VCF should decode through the permissive fast path");
+        .expect("plain VCF should decode through the permissive text backend");
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
@@ -100,8 +100,8 @@ fn plain_vcf_dense_uses_permissive_fast_header_path() {
 }
 
 #[test]
-fn plain_vcf_always_false_filter_uses_fast_empty_path() {
-    let dir = unique_dir("vcf-dense-fast-plain-empty");
+fn plain_vcf_always_false_filter_uses_text_empty_path() {
+    let dir = unique_dir("vcf-dense-text-plain-empty");
     let path = dir.join("tiny.vcf");
     write_file(
         &path,
@@ -190,8 +190,8 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
 }
 
 #[test]
-fn compressed_vcf_dosage_dense_uses_fast_path_semantics() {
-    let dir = unique_dir("vcf-dosage-fast-compressed");
+fn compressed_vcf_dosage_dense_uses_text_backend_semantics() {
+    let dir = unique_dir("vcf-dosage-text-compressed");
     let path = dir.join("dosage.vcf.gz");
     write_bgzf_file(
         &path,
@@ -231,11 +231,11 @@ fn compressed_vcf_dosage_dense_uses_fast_path_semantics() {
 }
 
 #[test]
-fn threaded_compressed_vcf_dosage_uses_fast_path_semantics() {
-    let dir = unique_dir("vcf-dosage-threaded-fast-compressed");
+fn threaded_compressed_vcf_dosage_uses_text_backend_semantics() {
+    let dir = unique_dir("vcf-dosage-threaded-text-compressed");
     let path = dir.join("dosage.vcf.gz");
     // The malformed FORMAT header is intentional: it proves threaded compressed
-    // reads still use the permissive noodles fast path.
+    // reads still use the permissive noodles text backend.
     write_bgzf_file(
         &path,
         "\
@@ -256,7 +256,7 @@ fn threaded_compressed_vcf_dosage_uses_fast_path_semantics() {
         false,
         Some(2),
     )
-    .expect("threaded compressed dosage VCF should decode through noodles fast path");
+    .expect("threaded compressed dosage VCF should decode through noodles text backend");
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
@@ -328,7 +328,7 @@ fn compressed_vcf_dosage_rejects_invalid_ds_values() {
     ];
 
     for (format_and_sample, expected) in cases {
-        let dir = unique_dir("vcf-dosage-fast-invalid");
+        let dir = unique_dir("vcf-dosage-text-invalid");
         let path = dir.join("dosage.vcf.gz");
         write_bgzf_file(
             &path,
@@ -353,8 +353,8 @@ fn compressed_vcf_dosage_rejects_invalid_ds_values() {
 }
 
 #[test]
-fn compressed_vcf_matrix_only_uses_fast_path_semantics() {
-    let dir = unique_dir("vcf-dense-fast-compressed");
+fn compressed_vcf_matrix_only_uses_text_backend_semantics() {
+    let dir = unique_dir("vcf-dense-text-compressed");
     let path = dir.join("tiny.vcf.gz");
     write_bgzf_file(
         &path,
@@ -394,8 +394,8 @@ fn compressed_vcf_matrix_only_uses_fast_path_semantics() {
 }
 
 #[test]
-fn compressed_vcf_dense_with_metadata_uses_fast_path_semantics() {
-    let dir = unique_dir("vcf-dense-fast-metadata");
+fn compressed_vcf_dense_with_metadata_uses_text_backend_semantics() {
+    let dir = unique_dir("vcf-dense-text-metadata");
     let path = dir.join("tiny.vcf.gz");
     write_bgzf_file(
         &path,

@@ -118,8 +118,8 @@ fn phased_vcf_haplotype_dense_matrix_only_omits_metadata() {
 }
 
 #[test]
-fn compressed_vcf_haplotype_dense_uses_fast_path_semantics() {
-    let dir = unique_dir("vcf-haplo-dense-fast-compressed");
+fn compressed_vcf_haplotype_dense_uses_text_backend_semantics() {
+    let dir = unique_dir("vcf-haplo-dense-text-compressed");
     let path = dir.join("phased.vcf.gz");
     write_bgzf_file(
         &path,
@@ -239,7 +239,7 @@ fn phased_vcf_haplotype_sparse_flips_common_alt_allele() {
 
 #[test]
 fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
-    let dir = unique_dir("vcf-haplo-sparse-fast-compressed");
+    let dir = unique_dir("vcf-haplo-sparse-text-compressed");
     let path = dir.join("phased.vcf.gz");
     write_bgzf_file(
         &path,
