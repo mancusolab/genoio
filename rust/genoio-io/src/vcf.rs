@@ -112,6 +112,17 @@ pub fn read_vcf_dense_windowed_with_threads(
     // is a concrete safe region and the compressed source has an index.
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
+            if let Some(matrix) = fast::try_read_vcf_dense_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+                matrix_only,
+                threads,
+            )? {
+                return Ok(matrix);
+            }
             return read_indexed_vcf_dense(
                 path,
                 requested_samples,

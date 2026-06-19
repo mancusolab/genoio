@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rust_htslib::bcf::record::GenotypeAllele;
@@ -54,9 +55,25 @@ fn write_indexed_vcf(path: &Path) {
         }
     }
 
-    let index_path = PathBuf::from(format!("{}.tbi", path.to_string_lossy()));
+    build_tabix_index(path);
+}
+
+fn write_bgzf_file(path: &Path, contents: &str) {
+    let file = fs::File::create(path).expect("test fixture should be created");
+    let mut writer = noodles_bgzf::io::Writer::new(file);
+    writer
+        .write_all(contents.as_bytes())
+        .expect("test fixture should be compressed");
+}
+
+fn build_tabix_index(path: &Path) {
+    let index_path = tabix_index_path(path);
     bcf::index::build(path, Some(index_path.as_path()), 1, bcf::index::Type::Tbx)
         .expect("tabix index should build");
+}
+
+fn tabix_index_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tbi", path.to_string_lossy()))
 }
 
 fn write_compressed_unindexed_vcf(path: &Path) {
@@ -160,6 +177,159 @@ fn indexed_vcf_region_filter_fetches_exact_start_and_end_positions() {
         vec![("rs20", 20), ("rs30", 30)]
     );
     assert_eq!(dense.diagnostics.candidate_variants, 2);
+}
+
+#[test]
+fn indexed_vcf_region_uses_tabix_reference_names() {
+    let dir = unique_dir("vcf-filter-indexed-fast-region");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/0
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1
+1\t21\tbad_outside_region\tA\tG\t.\tPASS\t.\tGT\t0/3
+1\t30\trs30\tA\tG\t.\tPASS\t.\tGT\t1/1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let dense =
+        genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("indexed VCF should decode");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| (variant.id.as_str(), variant.pos))
+            .collect::<Vec<_>>(),
+        vec![("rs20", 20)]
+    );
+    assert_eq!(dense.values, vec![1.0]);
+    assert_eq!(dense.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn indexed_vcf_region_absent_contig_returns_empty_dense_matrix() {
+    let dir = unique_dir("vcf-filter-indexed-absent-contig");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/0
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "2:1-10"}
+    }))
+    .expect("filter should parse");
+
+    let dense =
+        genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("indexed VCF should decode");
+
+    assert_eq!(dense.n_samples, 1);
+    assert_eq!(dense.n_variants, 0);
+    assert!(dense.values.is_empty());
+    assert!(dense.variants.is_empty());
+}
+
+#[test]
+fn indexed_vcf_region_sample_filter_preserves_source_order() {
+    let dir = unique_dir("vcf-filter-indexed-samples");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1\t0/0\t1/1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:10-20"}
+    }))
+    .expect("filter should parse");
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense = genoio_io::read_vcf_dense(&path, Some(&samples), Some(&filter))
+        .expect("indexed VCF should decode");
+
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs10", "rs20"]
+    );
+    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 2.0]);
+}
+
+#[test]
+fn indexed_vcf_region_falls_back_when_noodles_rejects_header() {
+    let dir = unique_dir("vcf-filter-indexed-header-fallback");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/0
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let dense =
+        genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("indexed VCF should decode");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(dense.values, vec![1.0]);
 }
 
 #[test]

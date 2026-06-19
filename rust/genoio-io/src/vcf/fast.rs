@@ -8,16 +8,21 @@
 // Reason: This performance path keeps reader setup close to decode routing so
 // buffer ownership and htslib fallback boundaries stay explicit.
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flate2::read::MultiGzDecoder;
 use genoio_core::{
     compute_dosage_variant_stats, select_samples_source_order, DenseGenotypeMatrix,
-    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision, RegionPredicate,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
+use noodles_bgzf as bgzf;
+use noodles_core::{Position, Region};
+use noodles_csi::{self as csi, BinningIndex};
+use noodles_tabix as tabix;
 use noodles_vcf as noodles;
 
 use crate::error::Result;
@@ -47,11 +52,18 @@ const VCF_FAST_BUFFER_SIZE: usize = 1 << 20;
 
 type FastVcfReader = noodles::io::Reader<BufReader<MultiGzDecoder<File>>>;
 type PlainVcfReader = noodles::io::Reader<BufReader<File>>;
+type IndexChunk = csi::binning_index::index::reference_sequence::bin::Chunk;
 
 struct FastVcfInput {
     reader: FastVcfReader,
     source_sample_count: usize,
     selection: DenseSampleSelection,
+}
+
+#[derive(Clone, Copy)]
+struct DenseReadSource<'a> {
+    sample_count: usize,
+    region: Option<&'a RegionPredicate>,
 }
 
 pub(super) fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
@@ -90,7 +102,55 @@ pub(super) fn try_read_vcf_dense(
         variant_filter,
         variant_window,
         matrix_only,
-        source_sample_count,
+        DenseReadSource {
+            sample_count: source_sample_count,
+            region: None,
+        },
+        &selection,
+        &mut reader,
+    )
+    .map(Some)
+}
+
+pub(super) fn try_read_vcf_dense_indexed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    region: &RegionPredicate,
+    matrix_only: bool,
+    threads: Option<usize>,
+) -> Result<Option<DenseGenotypeMatrix>> {
+    if !is_fast_indexed_vcf_supported(path, threads) {
+        return Ok(None);
+    }
+
+    let chunks = index_chunks_for_region(path, region)?;
+    let mut bgzf_reader = open_bgzf_reader(path)?;
+    let Ok(all_samples) = read_sample_records_from_header(path, &mut bgzf_reader) else {
+        return Ok(None);
+    };
+    let source_sample_count = all_samples.len();
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+
+    let Some(chunks) = chunks else {
+        return empty_dense_from_selection(selection, matrix_only).map(Some);
+    };
+
+    // Query chunks directly rather than using noodles' strict IndexedReader.
+    // The fast path only needs the #CHROM line, and real VCFs can have header
+    // records that htslib accepts but noodles' full header parser rejects.
+    let query = csi::io::Query::new(&mut bgzf_reader, chunks);
+    let mut reader = noodles::io::Reader::new(query);
+    read_dense_records(
+        path,
+        variant_filter,
+        variant_window,
+        matrix_only,
+        DenseReadSource {
+            sample_count: source_sample_count,
+            region: Some(region),
+        },
         &selection,
         &mut reader,
     )
@@ -207,6 +267,10 @@ fn is_fast_vcf_supported(
         && !variant_filter.is_some_and(VariantFilter::has_region_predicate)
 }
 
+fn is_fast_indexed_vcf_supported(path: &Path, threads: Option<usize>) -> bool {
+    is_compressed_vcf(path) && threads.is_none()
+}
+
 fn open_fast_vcf_input(path: &Path, requested_samples: Option<&[String]>) -> Result<FastVcfInput> {
     let mut reader = open_lazy_reader(path)?;
     let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
@@ -217,6 +281,95 @@ fn open_fast_vcf_input(path: &Path, requested_samples: Option<&[String]>) -> Res
         source_sample_count,
         selection,
     })
+}
+
+fn noodles_region_from_predicate(path: &Path, region: &RegionPredicate) -> Result<Region> {
+    let start = position_from_u32(path, region.start, "start")?;
+    let end = position_from_u32(path, region.end, "end")?;
+    Ok(Region::new(region.chrom.as_str(), start..=end))
+}
+
+fn position_from_u32(path: &Path, value: u32, label: &str) -> Result<Position> {
+    let value = usize::try_from(value).map_err(|_| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf region {label} coordinate is out of range"),
+        )
+    })?;
+    Position::try_from(value).map_err(|error| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf region {label} coordinate is invalid: {error}"),
+        )
+    })
+}
+
+fn empty_dense_from_selection(
+    selection: DenseSampleSelection,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    let mut diagnostics = selection.diagnostics;
+    diagnostics.retained_variants = 0;
+    FastDenseOutput::new(selection.samples.len(), 0, false).finish(
+        0,
+        selection.samples,
+        Vec::new(),
+        diagnostics,
+        matrix_only,
+    )
+}
+
+fn variant_in_region(variant: &genoio_core::VariantRecord, region: &RegionPredicate) -> bool {
+    variant.chrom == region.chrom && variant.pos >= region.start && variant.pos <= region.end
+}
+
+fn open_bgzf_reader(path: &Path) -> Result<bgzf::io::Reader<File>> {
+    File::open(path)
+        .map(bgzf::io::Reader::new)
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))
+}
+
+fn index_chunks_for_region(
+    path: &Path,
+    region: &RegionPredicate,
+) -> Result<Option<Vec<IndexChunk>>> {
+    let index = read_associated_index(path).map_err(|error| {
+        GenoioError::invalid_source(path, format!("vcf index read error: {error}"))
+    })?;
+    let region = noodles_region_from_predicate(path, region)?;
+    let Some(header) = index.header() else {
+        return Ok(None);
+    };
+    let Some(reference_sequence_id) = header
+        .reference_sequence_names()
+        .get_index_of(region.name())
+    else {
+        return Ok(None);
+    };
+    index
+        .query(reference_sequence_id, region.interval())
+        .map(Some)
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf index query error: {error}"))
+        })
+}
+
+fn read_associated_index(path: &Path) -> std::io::Result<Box<dyn BinningIndex>> {
+    match tabix::fs::read(companion_index_path(path, "tbi")) {
+        Ok(index) => Ok(Box::new(index)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            csi::fs::read(companion_index_path(path, "csi"))
+                .map(|index| Box::new(index) as Box<dyn BinningIndex>)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn companion_index_path(path: &Path, extension: &str) -> PathBuf {
+    let mut raw = OsString::from(path);
+    raw.push(".");
+    raw.push(extension);
+    PathBuf::from(raw)
 }
 
 fn open_lazy_reader(path: &Path) -> Result<FastVcfReader> {
@@ -274,7 +427,7 @@ fn read_dense_records<R: BufRead>(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-    source_sample_count: usize,
+    source: DenseReadSource<'_>,
     selection: &genoio_core::DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -283,7 +436,7 @@ fn read_dense_records<R: BufRead>(
     let output_variant_capacity = variant_window.map_or(0, |window| window.len);
     let direct_sample_major = matrix_only
         && variant_window.is_some()
-        && can_write_sample_major_directly(selection, source_sample_count, variant_filter);
+        && can_write_sample_major_directly(selection, source.sample_count, variant_filter);
     let mut output = FastDenseOutput::new(n_samples, output_variant_capacity, direct_sample_major);
     let mut output_variant_count = 0;
     let mut variants = Vec::with_capacity(if matrix_only {
@@ -307,6 +460,15 @@ fn read_dense_records<R: BufRead>(
         }
 
         let mut variant = variant_record_from_record(path, &record)?;
+        // Tabix/CSI chunks can include neighboring records from the same BGZF
+        // block. Keep the fast path's exact region contract independent of the
+        // lower-level chunk boundaries.
+        if source
+            .region
+            .is_some_and(|region| !variant_in_region(&variant, region))
+        {
+            continue;
+        }
         let partial_decision = variant_filter
             .map(|filter| filter.partial_decision(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
