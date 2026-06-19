@@ -1,8 +1,9 @@
 //! Narrow VCF fast path built on noodles lazy records.
 //!
-//! This module is intentionally conservative: it accelerates full-scan metadata
-//! and GT reads for common text VCFs, and lets the htslib path remain the
-//! correctness path for BCF, indexed, threaded, and unsupported operations.
+//! This module is intentionally conservative: it accelerates common text VCF
+//! scans and keeps htslib as the correctness path for BCF and unsupported
+//! operations. Threaded compressed VCF reads use noodles' BGZF block
+//! decompression; record parsing remains ordered and single-consumer.
 
 // pattern: Mixed (unavoidable)
 // Reason: This performance path keeps reader setup close to decode routing so
@@ -11,6 +12,7 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 
 use flate2::read::MultiGzDecoder;
@@ -52,6 +54,7 @@ mod sparse;
 const VCF_FAST_BUFFER_SIZE: usize = 1 << 20;
 
 type CompressedVcfReader = noodles::io::Reader<BufReader<MultiGzDecoder<File>>>;
+type ThreadedCompressedVcfReader = noodles::io::Reader<bgzf::io::MultithreadedReader<File>>;
 type PlainVcfReader = noodles::io::Reader<BufReader<File>>;
 type IndexChunk = csi::binning_index::index::reference_sequence::bin::Chunk;
 
@@ -65,6 +68,7 @@ struct FastVcfInput<R> {
 // underlying reader type instead of paying through `dyn BufRead`.
 enum FastVcfSource {
     Compressed(FastVcfInput<BufReader<MultiGzDecoder<File>>>),
+    ThreadedCompressed(FastVcfInput<bgzf::io::MultithreadedReader<File>>),
     Plain(FastVcfInput<BufReader<File>>),
 }
 
@@ -78,6 +82,9 @@ impl FastVcfSource {
     ) -> Result<DenseGenotypeMatrix> {
         match self {
             Self::Compressed(input) => {
+                read_dense_from_input(path, variant_filter, variant_window, matrix_only, input)
+            }
+            Self::ThreadedCompressed(input) => {
                 read_dense_from_input(path, variant_filter, variant_window, matrix_only, input)
             }
             Self::Plain(input) => {
@@ -95,6 +102,13 @@ impl FastVcfSource {
     ) -> Result<DenseGenotypeMatrix> {
         match self {
             Self::Compressed(input) => read_dosage_dense_from_input(
+                path,
+                variant_filter,
+                variant_window,
+                matrix_only,
+                input,
+            ),
+            Self::ThreadedCompressed(input) => read_dosage_dense_from_input(
                 path,
                 variant_filter,
                 variant_window,
@@ -126,6 +140,13 @@ impl FastVcfSource {
                 matrix_only,
                 input,
             ),
+            Self::ThreadedCompressed(input) => read_haplotype_dense_from_input(
+                path,
+                variant_filter,
+                variant_window,
+                matrix_only,
+                input,
+            ),
             Self::Plain(input) => read_haplotype_dense_from_input(
                 path,
                 variant_filter,
@@ -146,6 +167,9 @@ impl FastVcfSource {
             Self::Compressed(input) => {
                 read_sparse_from_input(path, variant_filter, variant_window, input)
             }
+            Self::ThreadedCompressed(input) => {
+                read_sparse_from_input(path, variant_filter, variant_window, input)
+            }
             Self::Plain(input) => {
                 read_sparse_from_input(path, variant_filter, variant_window, input)
             }
@@ -162,6 +186,9 @@ impl FastVcfSource {
             Self::Compressed(input) => {
                 read_haplotype_sparse_from_input(path, variant_filter, variant_window, input)
             }
+            Self::ThreadedCompressed(input) => {
+                read_haplotype_sparse_from_input(path, variant_filter, variant_window, input)
+            }
             Self::Plain(input) => {
                 read_haplotype_sparse_from_input(path, variant_filter, variant_window, input)
             }
@@ -171,6 +198,7 @@ impl FastVcfSource {
     fn into_selection(self) -> DenseSampleSelection {
         match self {
             Self::Compressed(input) => input.selection,
+            Self::ThreadedCompressed(input) => input.selection,
             Self::Plain(input) => input.selection,
         }
     }
@@ -207,7 +235,7 @@ pub(super) fn try_read_vcf_dense(
         return Ok(None);
     }
 
-    open_fast_vcf_input(path, requested_samples)?
+    open_fast_vcf_input(path, requested_samples, threads)?
         .read_dense(path, variant_filter, variant_window, matrix_only)
         .map(Some)
 }
@@ -221,7 +249,7 @@ pub(super) fn try_empty_vcf_dense(
     if !is_fast_empty_supported(path, threads) {
         return Ok(None);
     }
-    let selection = open_fast_sample_selection(path, requested_samples)?;
+    let selection = open_fast_sample_selection(path, requested_samples, threads)?;
     empty_dense_from_selection(selection, matrix_only).map(Some)
 }
 
@@ -233,7 +261,7 @@ pub(super) fn try_empty_vcf_sparse(
     if !is_fast_empty_supported(path, threads) {
         return Ok(None);
     }
-    let selection = open_fast_sample_selection(path, requested_samples)?;
+    let selection = open_fast_sample_selection(path, requested_samples, threads)?;
     empty_sparse_from_selection(selection).map(Some)
 }
 
@@ -246,7 +274,7 @@ pub(super) fn try_empty_vcf_haplotypes_dense(
     if !is_fast_empty_supported(path, threads) {
         return Ok(None);
     }
-    let selection = open_fast_sample_selection(path, requested_samples)?;
+    let selection = open_fast_sample_selection(path, requested_samples, threads)?;
     empty_haplotype_dense_from_selection(selection, matrix_only).map(Some)
 }
 
@@ -258,7 +286,7 @@ pub(super) fn try_empty_vcf_haplotypes_sparse(
     if !is_fast_empty_supported(path, threads) {
         return Ok(None);
     }
-    let selection = open_fast_sample_selection(path, requested_samples)?;
+    let selection = open_fast_sample_selection(path, requested_samples, threads)?;
     empty_haplotype_sparse_from_selection(selection).map(Some)
 }
 
@@ -345,7 +373,7 @@ pub(super) fn try_read_vcf_dosage_dense(
         return Ok(None);
     }
 
-    open_fast_vcf_input(path, requested_samples)?
+    open_fast_vcf_input(path, requested_samples, threads)?
         .read_dosage_dense(path, variant_filter, variant_window, matrix_only)
         .map(Some)
 }
@@ -385,7 +413,7 @@ pub(super) fn try_read_vcf_haplotypes_dense(
         return Ok(None);
     }
 
-    open_fast_vcf_input(path, requested_samples)?
+    open_fast_vcf_input(path, requested_samples, threads)?
         .read_haplotype_dense(path, variant_filter, variant_window, matrix_only)
         .map(Some)
 }
@@ -423,7 +451,7 @@ pub(super) fn try_read_vcf_sparse(
         return Ok(None);
     }
 
-    open_fast_vcf_input(path, requested_samples)?
+    open_fast_vcf_input(path, requested_samples, threads)?
         .read_sparse(path, variant_filter, variant_window)
         .map(Some)
 }
@@ -453,7 +481,7 @@ pub(super) fn try_read_vcf_haplotypes_sparse(
         return Ok(None);
     }
 
-    open_fast_vcf_input(path, requested_samples)?
+    open_fast_vcf_input(path, requested_samples, threads)?
         .read_haplotype_sparse(path, variant_filter, variant_window)
         .map(Some)
 }
@@ -478,7 +506,7 @@ fn is_fast_vcf_supported(
     threads: Option<usize>,
 ) -> bool {
     !is_bcf_path(path)
-        && threads.is_none()
+        && fast_path_supports_threads(path, threads)
         && !variant_filter.is_some_and(VariantFilter::has_region_predicate)
 }
 
@@ -487,13 +515,35 @@ fn is_fast_indexed_vcf_supported(path: &Path, threads: Option<usize>) -> bool {
 }
 
 fn is_fast_empty_supported(path: &Path, threads: Option<usize>) -> bool {
-    !is_bcf_path(path) && threads.is_none()
+    !is_bcf_path(path) && fast_path_supports_threads(path, threads)
 }
 
-fn open_fast_vcf_input(path: &Path, requested_samples: Option<&[String]>) -> Result<FastVcfSource> {
+fn fast_path_supports_threads(path: &Path, threads: Option<usize>) -> bool {
+    // Noodles only gives us threaded BGZF decompression. Plain text with an
+    // explicit thread count stays on the htslib compatibility path.
+    threads.is_none() || is_compressed_vcf(path)
+}
+
+fn open_fast_vcf_input(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    threads: Option<usize>,
+) -> Result<FastVcfSource> {
     if is_compressed_vcf(path) {
-        open_fast_vcf_input_from_reader(path, requested_samples, open_compressed_reader(path)?)
-            .map(FastVcfSource::Compressed)
+        match threads {
+            Some(threads) => open_fast_vcf_input_from_reader(
+                path,
+                requested_samples,
+                open_threaded_compressed_reader(path, threads)?,
+            )
+            .map(FastVcfSource::ThreadedCompressed),
+            None => open_fast_vcf_input_from_reader(
+                path,
+                requested_samples,
+                open_compressed_reader(path)?,
+            )
+            .map(FastVcfSource::Compressed),
+        }
     } else {
         open_fast_vcf_input_from_reader(path, requested_samples, open_plain_reader(path)?)
             .map(FastVcfSource::Plain)
@@ -523,8 +573,9 @@ fn open_fast_vcf_input_from_reader<R: BufRead>(
 fn open_fast_sample_selection(
     path: &Path,
     requested_samples: Option<&[String]>,
+    threads: Option<usize>,
 ) -> Result<DenseSampleSelection> {
-    Ok(open_fast_vcf_input(path, requested_samples)?.into_selection())
+    Ok(open_fast_vcf_input(path, requested_samples, threads)?.into_selection())
 }
 
 fn noodles_region_from_predicate(path: &Path, region: &RegionPredicate) -> Result<Region> {
@@ -656,6 +707,21 @@ fn open_compressed_reader(path: &Path) -> Result<CompressedVcfReader> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
     let reader = BufReader::with_capacity(VCF_FAST_BUFFER_SIZE, MultiGzDecoder::new(file));
+    Ok(noodles::io::Reader::new(reader))
+}
+
+fn open_threaded_compressed_reader(
+    path: &Path,
+    threads: usize,
+) -> Result<ThreadedCompressedVcfReader> {
+    let worker_count = NonZero::new(threads).ok_or_else(|| {
+        GenoioError::invalid_source(path, "vcf thread count must be greater than zero")
+    })?;
+    let file = File::open(path)
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
+    // Noodles threads BGZF block inflation only; the VCF parser still consumes
+    // records in order, preserving the existing fast-path decode semantics.
+    let reader = bgzf::io::MultithreadedReader::with_worker_count(worker_count, file);
     Ok(noodles::io::Reader::new(reader))
 }
 

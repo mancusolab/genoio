@@ -231,6 +231,71 @@ fn compressed_vcf_dosage_dense_uses_fast_path_semantics() {
 }
 
 #[test]
+fn threaded_compressed_vcf_dosage_uses_fast_path_semantics() {
+    let dir = unique_dir("vcf-dosage-threaded-fast-compressed");
+    let path = dir.join("dosage.vcf.gz");
+    // The malformed FORMAT header is intentional: it proves threaded compressed
+    // reads still use the permissive noodles fast path rather than htslib.
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Expected alternate allele dosage\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tDS\t0.2\t1.4\t1.8
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDS\t0\t.\t0.7
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense = genoio_io::read_vcf_dosage_dense_windowed_with_threads(
+        &path,
+        Some(&samples),
+        None,
+        None,
+        false,
+        Some(2),
+    )
+    .expect("threaded compressed dosage VCF should decode through noodles fast path");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.2, 0.0, 1.8, 0.7]);
+    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+}
+
+#[test]
+fn threaded_compressed_vcf_rejects_zero_threads() {
+    let dir = unique_dir("vcf-threaded-zero");
+    let path = dir.join("tiny.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
+
+    let error =
+        genoio_io::read_vcf_dense_windowed_with_threads(&path, None, None, None, false, Some(0))
+            .expect_err("zero VCF thread count should fail");
+
+    assert!(error
+        .to_string()
+        .contains("vcf thread count must be greater than zero"));
+}
+
+#[test]
 fn compressed_vcf_dosage_rejects_invalid_ds_values() {
     let cases = [
         ("GT\t0/0", "FORMAT/DS"),

@@ -94,7 +94,7 @@ pub fn read_vcf_dense_windowed(
     )
 }
 
-/// Read retained VCF/BCF diploid genotypes with optional htslib BGZF threads.
+/// Read retained VCF/BCF diploid genotypes with optional BGZF decompression threads.
 pub fn read_vcf_dense_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -182,7 +182,7 @@ pub fn read_vcf_dosage_dense_windowed(
     )
 }
 
-/// Read retained VCF/BCF FORMAT/DS values with optional htslib BGZF threads.
+/// Read retained VCF/BCF FORMAT/DS values with optional BGZF decompression threads.
 pub fn read_vcf_dosage_dense_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -264,7 +264,7 @@ pub fn read_vcf_sparse_windowed(
     )
 }
 
-/// Read retained VCF/BCF diploid genotypes as sparse CSC with optional htslib BGZF threads.
+/// Read retained VCF/BCF diploid genotypes as sparse CSC with optional BGZF decompression threads.
 pub fn read_vcf_sparse_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -344,7 +344,7 @@ pub fn read_vcf_haplotypes_dense_windowed(
     )
 }
 
-/// Read phased VCF/BCF diploid genotypes as dense haplotype rows with optional htslib BGZF threads.
+/// Read phased VCF/BCF diploid genotypes as dense haplotype rows with optional BGZF decompression threads.
 pub fn read_vcf_haplotypes_dense_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -426,7 +426,7 @@ pub fn read_vcf_haplotypes_sparse_windowed(
     )
 }
 
-/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows with optional htslib BGZF threads.
+/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows with optional BGZF decompression threads.
 pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
