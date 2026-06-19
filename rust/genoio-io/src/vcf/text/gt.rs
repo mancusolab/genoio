@@ -1,4 +1,4 @@
-//! Byte-level GT decoding for the compressed VCF fast path.
+//! Byte-level GT decoding for the text VCF backend.
 //!
 //! This module intentionally handles only biallelic diploid hardcalls. Broader
 //! FORMAT semantics remain unsupported here until they are covered explicitly.

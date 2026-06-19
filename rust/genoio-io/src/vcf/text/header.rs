@@ -1,6 +1,6 @@
-//! Minimal VCF header handling for the lazy fast path.
+//! Minimal VCF header handling for the text VCF backend.
 //!
-//! The fast path needs sample IDs but not structured declarations. Parsing only
+//! The text backend needs sample IDs but not structured declarations. Parsing only
 //! the final #CHROM line keeps metadata and GT reads permissive for real-world
 //! headers that strict parsers can reject.
 
@@ -19,7 +19,7 @@ pub(super) fn read_sample_records_from_header(
     loop {
         line.clear();
         let n = reader.read_line(&mut line).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf fast header read error: {error}"))
+            GenoioError::invalid_source(path, format!("text VCF header read error: {error}"))
         })?;
         if n == 0 {
             return Err(GenoioError::invalid_source(

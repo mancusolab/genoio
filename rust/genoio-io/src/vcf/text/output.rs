@@ -1,4 +1,4 @@
-//! Dense output staging for the VCF fast path.
+//! Dense output staging for the text VCF backend.
 //!
 //! The preferred layout depends on the read shape. All-sample matrix-only reads
 //! can write directly into the final sample-major layout, while filtered reads
@@ -30,7 +30,7 @@ pub(super) fn can_write_sample_major_directly(
             .eq(0..selection.source_indices.len())
 }
 
-pub(super) enum FastDenseOutput {
+pub(super) enum TextDenseOutput {
     SampleMajor {
         n_samples: usize,
         row_width: usize,
@@ -44,7 +44,7 @@ pub(super) enum FastDenseOutput {
     },
 }
 
-impl FastDenseOutput {
+impl TextDenseOutput {
     pub(super) fn new(n_samples: usize, variant_capacity: usize, sample_major: bool) -> Self {
         let len = n_samples * variant_capacity;
         if sample_major {

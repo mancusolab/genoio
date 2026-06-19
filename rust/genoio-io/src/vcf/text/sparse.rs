@@ -1,4 +1,4 @@
-//! Sparse CSC output for the VCF fast path.
+//! Sparse CSC output for the text VCF backend.
 
 // pattern: Mixed (unavoidable)
 // Reason: This hot path combines lazy VCF record IO with direct CSC emission to
@@ -57,7 +57,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
             break;
         }
         if reader.read_record(&mut record).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf fast record error: {error}"))
+            GenoioError::invalid_source(path, format!("text VCF record error: {error}"))
         })? == 0
         {
             break;
@@ -140,7 +140,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
         mut diagnostics,
     } = selection;
     let n_samples = samples.len() * 2;
-    let samples = haplotype_samples(&samples, &source_indices);
+    let samples = haplotype_sample_records(&samples, &source_indices);
     let variant_capacity = variant_window.map_or(0, |window| window.len);
     let mut indptr = Vec::with_capacity(variant_capacity.saturating_add(1));
     indptr.push(0);
@@ -157,7 +157,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             break;
         }
         if reader.read_record(&mut record).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf fast record error: {error}"))
+            GenoioError::invalid_source(path, format!("text VCF record error: {error}"))
         })? == 0
         {
             break;
@@ -233,13 +233,6 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
         variants,
         diagnostics,
     )
-}
-
-fn haplotype_samples(
-    samples: &[genoio_core::SampleRecord],
-    source_indices: &[usize],
-) -> Vec<genoio_core::SampleRecord> {
-    haplotype_sample_records(samples, source_indices)
 }
 
 fn append_haplotype_minor_sparse_column(

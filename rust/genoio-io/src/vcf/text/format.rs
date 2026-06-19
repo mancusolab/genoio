@@ -1,6 +1,6 @@
 //! Shared byte scanners for VCF FORMAT/sample columns.
 //!
-//! The fast path decoders use these helpers to find a FORMAT key once and then
+//! The text backend decoders use these helpers to find a FORMAT key once and then
 //! visit only selected sample columns without materializing intermediate fields.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

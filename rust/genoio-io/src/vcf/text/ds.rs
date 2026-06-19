@@ -1,4 +1,4 @@
-//! Byte-level FORMAT/DS decoding for the compressed VCF fast path.
+//! Byte-level FORMAT/DS decoding for the text VCF backend.
 
 use std::path::Path;
 
