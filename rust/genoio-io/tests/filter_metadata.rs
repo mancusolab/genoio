@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -76,6 +78,17 @@ fn tabix_index_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tbi", path.to_string_lossy()))
 }
 
+fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
+    let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
+    for col in 0..sparse.n_cols {
+        for offset in sparse.indptr[col]..sparse.indptr[col + 1] {
+            let row = sparse.indices[offset];
+            dense[row * sparse.n_cols + col] = sparse.data[offset];
+        }
+    }
+    dense
+}
+
 fn write_compressed_unindexed_vcf(path: &Path) {
     let mut header = Header::new();
     header.push_record(br#"##fileformat=VCFv4.2"#);
@@ -100,6 +113,119 @@ fn write_compressed_unindexed_vcf(path: &Path) {
         .push_genotypes(&[GenotypeAllele::Unphased(0), GenotypeAllele::Unphased(1)])
         .expect("genotype should be set");
     writer.write(&record).expect("record should be written");
+}
+
+#[test]
+fn indexed_vcf_region_dosage_uses_permissive_fast_path() {
+    let dir = unique_dir("vcf-filter-indexed-dosage-fast");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Expected dosage\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs10\tA\tG\t.\tPASS\t.\tDS\t0.1\t1.1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tDS\t0.2\t1.2
+1\t30\trs30\tA\tG\t.\tPASS\t.\tDS\t0.3\t1.3
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None, false)
+        .expect("indexed dosage VCF should decode through permissive fast path");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(dense.values, vec![0.2, 1.2]);
+}
+
+#[test]
+fn indexed_vcf_region_sparse_uses_permissive_fast_path() {
+    let dir = unique_dir("vcf-filter-indexed-sparse-fast");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1\t1/1
+1\t30\trs30\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let sparse = genoio_io::read_vcf_sparse(&path, None, Some(&filter))
+        .expect("indexed sparse VCF should decode through permissive fast path");
+
+    assert_eq!(
+        sparse
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(csc_to_dense(&sparse), vec![1.0, 0.0]);
+    assert!(sparse.variants[0].flipped);
+}
+
+#[test]
+fn indexed_vcf_region_haplotypes_use_permissive_fast_path() {
+    let dir = unique_dir("vcf-filter-indexed-haplo-fast");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|0
+1\t30\trs30\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_vcf_haplotypes_dense(&path, None, Some(&filter))
+        .expect("indexed haplotype dense VCF should decode through permissive fast path");
+    let sparse = genoio_io::read_vcf_haplotypes_sparse(&path, None, Some(&filter))
+        .expect("indexed haplotype sparse VCF should decode through permissive fast path");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(csc_to_dense(&sparse), dense.values);
 }
 
 #[test]

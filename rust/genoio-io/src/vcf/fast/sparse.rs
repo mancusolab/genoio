@@ -11,7 +11,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
+    PartialFilterDecision, RegionPredicate, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -23,12 +24,15 @@ use super::gt::{
     decode_gt_record, decode_phased_gt_sparse_record, GtDecodeBuffers, GtStatsMode,
     HaplotypeSparseDecodeBuffers,
 };
-use super::record::{metadata_variant_record_from_record, validate_biallelic_variant};
+use super::record::{
+    metadata_variant_record_from_record, skip_variant_for_region, validate_biallelic_variant,
+};
 
 pub(super) fn read_sparse_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    source_region: Option<&RegionPredicate>,
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<SparseGenotypeMatrix> {
@@ -60,6 +64,9 @@ pub(super) fn read_sparse_records<R: BufRead>(
         }
 
         let mut variant = metadata_variant_record_from_record(path, &record)?;
+        if skip_variant_for_region(&variant, source_region) {
+            continue;
+        }
         let partial_decision = variant_filter
             .map(|filter| filter.partial_decision(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
@@ -123,6 +130,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    source_region: Option<&RegionPredicate>,
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<SparseGenotypeMatrix> {
@@ -156,6 +164,9 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
         }
 
         let mut variant = metadata_variant_record_from_record(path, &record)?;
+        if skip_variant_for_region(&variant, source_region) {
+            continue;
+        }
         let partial_decision = variant_filter
             .map(|filter| filter.partial_decision(&variant))
             .unwrap_or(PartialFilterDecision::Accept);

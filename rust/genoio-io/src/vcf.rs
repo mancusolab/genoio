@@ -222,6 +222,17 @@ pub fn read_vcf_dosage_dense_windowed_with_threads(
 
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
+            if let Some(matrix) = fast::try_read_vcf_dosage_dense_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+                matrix_only,
+                threads,
+            )? {
+                return Ok(matrix);
+            }
             return read_indexed_vcf_dosage_dense(
                 path,
                 requested_samples,
@@ -303,6 +314,16 @@ pub fn read_vcf_sparse_windowed_with_threads(
     // same variants and fail the same way for unindexed compressed inputs.
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
+            if let Some(matrix) = fast::try_read_vcf_sparse_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+                threads,
+            )? {
+                return Ok(matrix);
+            }
             return read_indexed_vcf_sparse(
                 path,
                 requested_samples,
@@ -384,6 +405,17 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads(
 
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
+            if let Some(matrix) = fast::try_read_vcf_haplotypes_dense_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+                matrix_only,
+                threads,
+            )? {
+                return Ok(matrix);
+            }
             return read_indexed_vcf_haplotypes_dense(
                 path,
                 requested_samples,
@@ -465,6 +497,16 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
 
     if let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) {
         if has_vcf_index(path) {
+            if let Some(matrix) = fast::try_read_vcf_haplotypes_sparse_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                &region,
+                threads,
+            )? {
+                return Ok(matrix);
+            }
             return read_indexed_vcf_haplotypes_sparse(
                 path,
                 requested_samples,

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, VariantRecord};
+use genoio_core::{GenoioError, RegionPredicate, VariantRecord};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
@@ -71,6 +71,17 @@ where
         missing_rate: None,
         n_called: None,
     })
+}
+
+pub(super) fn variant_in_region(variant: &VariantRecord, region: &RegionPredicate) -> bool {
+    variant.chrom == region.chrom && variant.pos >= region.start && variant.pos <= region.end
+}
+
+pub(super) fn skip_variant_for_region(
+    variant: &VariantRecord,
+    region: Option<&RegionPredicate>,
+) -> bool {
+    region.is_some_and(|region| !variant_in_region(variant, region))
 }
 
 pub(super) fn metadata_variant_record_from_record(
