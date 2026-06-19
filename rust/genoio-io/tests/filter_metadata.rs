@@ -345,6 +345,149 @@ fn indexed_vcf_region_uses_tabix_reference_names() {
 }
 
 #[test]
+fn threaded_indexed_vcf_region_uses_permissive_fast_path_for_all_outputs() {
+    let dir = unique_dir("vcf-filter-threaded-indexed-fast-region");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.0\t0|1:1.0
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT:DS\t0|1:1.0\t1|0:1.0
+1\t30\trs30\tA\tG\t.\tPASS\t.\tGT:DS\t1|1:2.0\t0|1:1.0
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let dense = genoio_io::read_vcf_dense_windowed_with_threads(
+        &path,
+        None,
+        Some(&filter),
+        None,
+        false,
+        Some(2),
+    )
+    .expect("threaded indexed VCF should decode through permissive fast path");
+    let dosage = genoio_io::read_vcf_dosage_dense_windowed_with_threads(
+        &path,
+        None,
+        Some(&filter),
+        None,
+        false,
+        Some(2),
+    )
+    .expect("threaded indexed DS VCF should decode through permissive fast path");
+    let sparse =
+        genoio_io::read_vcf_sparse_windowed_with_threads(&path, None, Some(&filter), None, Some(2))
+            .expect("threaded indexed sparse VCF should decode through permissive fast path");
+    let haplotypes = genoio_io::read_vcf_haplotypes_dense_windowed_with_threads(
+        &path,
+        None,
+        Some(&filter),
+        None,
+        false,
+        Some(2),
+    )
+    .expect("threaded indexed haplotype VCF should decode through permissive fast path");
+    let sparse_haplotypes = genoio_io::read_vcf_haplotypes_sparse_windowed_with_threads(
+        &path,
+        None,
+        Some(&filter),
+        None,
+        Some(2),
+    )
+    .expect("threaded indexed sparse haplotype VCF should decode through permissive fast path");
+
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(
+        dosage
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(
+        sparse
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(
+        haplotypes
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(
+        sparse_haplotypes
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs20"]
+    );
+    assert_eq!(dense.values, vec![1.0, 1.0]);
+    assert_eq!(dosage.values, vec![1.0, 1.0]);
+    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(csc_to_dense(&sparse_haplotypes), haplotypes.values);
+}
+
+#[test]
+fn threaded_indexed_vcf_region_rejects_zero_threads() {
+    let dir = unique_dir("vcf-filter-threaded-indexed-zero");
+    let path = dir.join("indexed.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
+    build_tabix_index(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-20"}
+    }))
+    .expect("filter should parse");
+
+    let error = genoio_io::read_vcf_dense_windowed_with_threads(
+        &path,
+        None,
+        Some(&filter),
+        None,
+        false,
+        Some(0),
+    )
+    .expect_err("zero VCF thread count should fail for indexed reads");
+
+    assert!(error
+        .to_string()
+        .contains("vcf thread count must be greater than zero"));
+}
+
+#[test]
 fn indexed_vcf_region_absent_contig_returns_empty_dense_matrix() {
     let dir = unique_dir("vcf-filter-indexed-absent-contig");
     let path = dir.join("indexed.vcf.gz");
