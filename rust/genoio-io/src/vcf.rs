@@ -11,12 +11,19 @@ use genoio_core::{
     SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
     VariantStats, VariantWindow,
 };
+use noodles_bcf as bcf;
+use noodles_vcf as noodles;
+use noodles_vcf::variant::record::samples::{
+    keys::key,
+    series::{value::genotype::Phasing as NoodlesGenotypePhasing, Value as NoodlesSampleValue},
+};
 use rust_htslib::bcf::{
     record::{GenotypeAllele, Numeric},
     IndexedReader, Read, Reader,
 };
 use rust_htslib::htslib;
 
+use self::fast::metadata_variant_record_from_variant_record;
 use crate::error::Result;
 use crate::matrix::{
     empty_sparse_matrix, finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
@@ -28,30 +35,42 @@ mod fast;
 
 /// Read VCF/BCF sample and variant metadata without returning genotypes.
 pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
-    // BCF is binary and remains on htslib until the noodles replacement grows a
-    // binary source path. Text VCF metadata uses the permissive fast parser.
-    if !is_bcf_path(path) {
-        return fast::read_vcf_metadata(path);
+    if is_bcf_path(path) {
+        return read_bcf_metadata(path);
     }
-    read_vcf_metadata_htslib(path)
+    fast::read_vcf_metadata(path)
 }
 
-fn read_vcf_metadata_htslib(path: &Path) -> Result<MetadataOutput> {
-    let mut reader = Reader::from_path(path)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
-    let header = reader.header().clone();
-    let samples = sample_records_from_header(&header);
+fn read_bcf_metadata(path: &Path) -> Result<MetadataOutput> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| GenoioError::invalid_source(path, format!("bcf open error: {error}")))?;
+    let mut reader = bcf::io::Reader::new(file);
+    let header = reader
+        .read_header()
+        .map_err(|error| GenoioError::invalid_source(path, format!("bcf header error: {error}")))?;
+    let samples = sample_records_from_noodles_header(&header);
 
     let mut variants = Vec::new();
     let mut has_phased_genotype_evidence = false;
-    for record_result in reader.records() {
-        let record = record_result.map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf record error: {error}"))
+    // Reuse noodles' lazy BCF record buffer so metadata scans do not allocate a
+    // full RecordBuf for each variant before genotype decoding exists.
+    let mut record = bcf::Record::default();
+    loop {
+        let n = reader.read_record(&mut record).map_err(|error| {
+            GenoioError::invalid_source(path, format!("bcf record error: {error}"))
         })?;
-        if !has_phased_genotype_evidence && record_has_phased_genotype(&record, samples.len())? {
+        if n == 0 {
+            break;
+        }
+
+        if !has_phased_genotype_evidence
+            && noodles_record_has_phased_genotype(path, &header, &record)?
+        {
             has_phased_genotype_evidence = true;
         }
-        variants.push(variant_record_from_record(path, &header, &record)?);
+        variants.push(metadata_variant_record_from_variant_record(
+            path, &header, &record,
+        )?);
     }
 
     let capabilities = if has_phased_genotype_evidence {
@@ -1317,17 +1336,29 @@ fn sample_records_from_header(header: &rust_htslib::bcf::header::HeaderView) -> 
     header
         .samples()
         .iter()
-        .map(|sample| SampleRecord {
-            fid: None,
-            iid: String::from_utf8_lossy(sample).into_owned(),
-            father: None,
-            mother: None,
-            sex: None,
-            phenotype: None,
-            source_sample_index: None,
-            haplotype_index: None,
-        })
+        .map(|sample| plain_sample_record(String::from_utf8_lossy(sample).into_owned()))
         .collect()
+}
+
+fn sample_records_from_noodles_header(header: &noodles::Header) -> Vec<SampleRecord> {
+    header
+        .sample_names()
+        .iter()
+        .map(|sample| plain_sample_record(sample.to_string()))
+        .collect()
+}
+
+fn plain_sample_record(iid: String) -> SampleRecord {
+    SampleRecord {
+        fid: None,
+        iid,
+        father: None,
+        mother: None,
+        sex: None,
+        phenotype: None,
+        source_sample_index: None,
+        haplotype_index: None,
+    }
 }
 
 fn apply_original_source_indices(
@@ -1342,6 +1373,45 @@ fn apply_original_source_indices(
     for (sample, source_index) in samples.iter_mut().zip(original_source_indices) {
         sample.source_sample_index = Some(*source_index);
     }
+}
+
+fn noodles_record_has_phased_genotype<R>(
+    path: &Path,
+    header: &noodles::Header,
+    record: &R,
+) -> Result<bool>
+where
+    R: noodles::variant::Record + ?Sized,
+{
+    let samples = record.samples().map_err(|error| {
+        GenoioError::invalid_source(path, format!("vcf samples error: {error}"))
+    })?;
+    let Some(gt_series_result) = samples.select(header, key::GENOTYPE) else {
+        return Ok(false);
+    };
+    let gt_series = gt_series_result.map_err(|error| {
+        GenoioError::invalid_source(path, format!("vcf genotype series error: {error}"))
+    })?;
+
+    for value_result in gt_series.iter(header) {
+        let Some(NoodlesSampleValue::Genotype(genotype)) = value_result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf genotype value error: {error}"))
+        })?
+        else {
+            continue;
+        };
+
+        for allele_result in genotype.iter() {
+            let (_, phasing) = allele_result.map_err(|error| {
+                GenoioError::invalid_source(path, format!("vcf genotype allele error: {error}"))
+            })?;
+            if phasing == NoodlesGenotypePhasing::Phased {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 fn variant_record_from_record(
@@ -1742,24 +1812,6 @@ fn haplotype_sample_records(
         }
     }
     haplotype_samples
-}
-
-fn record_has_phased_genotype(
-    record: &rust_htslib::bcf::Record,
-    sample_count: usize,
-) -> Result<bool> {
-    let genotypes = match record.genotypes() {
-        Ok(genotypes) => genotypes,
-        Err(_) => return Ok(false),
-    };
-    Ok((0..sample_count).any(|sample_index| {
-        genotypes.get(sample_index).iter().any(|allele| {
-            matches!(
-                allele,
-                GenotypeAllele::Phased(_) | GenotypeAllele::PhasedMissing
-            )
-        })
-    }))
 }
 
 #[cfg(test)]

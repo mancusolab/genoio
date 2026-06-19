@@ -1,6 +1,22 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+
+use noodles_core::Position;
+use noodles_vcf::{
+    self as vcf,
+    header::record::value::{
+        map::{Contig, Format},
+        Map,
+    },
+    variant::{
+        io::Write as _,
+        record::samples::keys::key,
+        record_buf::{samples::sample::Value, samples::Keys, AlternateBases, Ids, Samples},
+    },
+};
 
 mod common;
 
@@ -16,6 +32,63 @@ fn write_bgzf_file(path: &Path, contents: &str) {
     writer
         .write_all(contents.as_bytes())
         .expect("test fixture should be compressed");
+}
+
+fn write_bcf_file(path: &Path) {
+    let file = fs::File::create(path).expect("test fixture should be created");
+    let mut writer = noodles_bcf::io::Writer::new(file);
+    let header = vcf::Header::builder()
+        .add_contig("1", Map::<Contig>::new())
+        .add_format(key::GENOTYPE, Map::<Format>::from(key::GENOTYPE))
+        .add_sample_name("s1")
+        .add_sample_name("s2")
+        .build();
+
+    writer
+        .write_header(&header)
+        .expect("bcf header should be written");
+    writer
+        .write_variant_record(&header, &bcf_record("rs1", 10, "A", &["G"], ["0|1", "0/0"]))
+        .expect("first bcf record should be written");
+    writer
+        .write_variant_record(
+            &header,
+            &bcf_record("rs2", 20, "C", &["T", "A"], ["0/1", "1/2"]),
+        )
+        .expect("second bcf record should be written");
+}
+
+fn bcf_record(
+    id: &str,
+    pos: usize,
+    reference_bases: &str,
+    alternate_bases: &[&str],
+    genotypes: [&str; 2],
+) -> vcf::variant::RecordBuf {
+    let ids: Ids = [id.to_string()].into_iter().collect();
+    let keys: Keys = [String::from(key::GENOTYPE)].into_iter().collect();
+    let samples = Samples::new(
+        keys,
+        genotypes
+            .into_iter()
+            .map(|gt| vec![Some(Value::from(gt))])
+            .collect(),
+    );
+
+    vcf::variant::RecordBuf::builder()
+        .set_reference_sequence_name("1")
+        .set_variant_start(Position::try_from(pos).expect("fixture position should be valid"))
+        .set_ids(ids)
+        .set_reference_bases(reference_bases)
+        .set_alternate_bases(AlternateBases::from(
+            alternate_bases
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        ))
+        .set_samples(samples)
+        .build()
 }
 
 #[test]
@@ -60,6 +133,37 @@ fn vcf_metadata_preserves_header_sample_and_variant_order() {
     assert_eq!(metadata.variants[1].alt_allele.as_deref(), Some("T,A"));
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
+}
+
+#[test]
+fn bcf_metadata_preserves_samples_variants_and_capabilities() {
+    let dir = unique_dir("bcf-metadata");
+    let path = dir.join("tiny.bcf");
+    write_bcf_file(&path);
+
+    let metadata = genoio_io::read_vcf_metadata(&path).expect("bcf metadata should parse");
+
+    assert_eq!(
+        metadata
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s1", "s2"]
+    );
+    assert_eq!(
+        metadata
+            .variants
+            .iter()
+            .map(|variant| (variant.chrom.as_str(), variant.pos, variant.id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("1", 10, "rs1"), ("1", 20, "rs2")]
+    );
+    assert_eq!(metadata.variants[1].a1, "T");
+    assert_eq!(metadata.variants[1].alt_allele.as_deref(), Some("T,A"));
+    assert!(metadata.capabilities.supports_geno);
+    assert!(metadata.capabilities.supports_haplo);
+    assert!(metadata.capabilities.phased);
 }
 
 #[test]

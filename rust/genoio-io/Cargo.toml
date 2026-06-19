@@ -10,6 +10,7 @@ license.workspace = true
 flate2 = { version = "1", default-features = false, features = ["zlib-ng-compat"] }
 genoio-core = { path = "../genoio-core" }
 noodles-bgzf = "0.47"
+noodles-bcf = "0.86"
 noodles-core = "0.20"
 noodles-csi = "0.56"
 noodles-tabix = "0.62"

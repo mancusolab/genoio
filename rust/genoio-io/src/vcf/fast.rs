@@ -51,6 +51,8 @@ mod output;
 mod record;
 mod sparse;
 
+pub(in crate::vcf) use self::record::metadata_variant_record_from_variant_record;
+
 const VCF_FAST_BUFFER_SIZE: usize = 1 << 20;
 
 type CompressedVcfReader = noodles::io::Reader<BufReader<MultiGzDecoder<File>>>;
