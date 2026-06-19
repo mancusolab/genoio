@@ -9,18 +9,18 @@ license.workspace = true
 # the pure-Rust miniz path for the main BGEN hot loop.
 flate2 = { version = "1", default-features = false, features = ["zlib-ng-compat"] }
 genoio-core = { path = "../genoio-core" }
-noodles-bgzf = "0.44"
-noodles-core = "0.18"
-noodles-csi = "0.52"
-noodles-tabix = "0.58"
-noodles-vcf = "0.82"
+noodles-bgzf = "0.47"
+noodles-core = "0.20"
+noodles-csi = "0.56"
+noodles-tabix = "0.62"
+noodles-vcf = "0.88"
 rust-htslib = { version = "1.0.0", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 zstd = "0.13"
 
 [dev-dependencies]
-noodles-bgzf = "0.44"
+noodles-bgzf = "0.47"
 tempfile = "3"
 
 [lib]
