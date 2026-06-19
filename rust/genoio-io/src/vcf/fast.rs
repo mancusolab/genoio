@@ -1,21 +1,22 @@
-//! Narrow VCF GT fast path built on noodles lazy records.
+//! Narrow VCF fast path built on noodles lazy records.
 //!
-//! This module is intentionally conservative: it accelerates full-scan GT reads
-//! for common biallelic diploid VCFs, and lets the htslib path remain the
-//! correctness path for indexed, threaded, and unsupported operations.
+//! This module is intentionally conservative: it accelerates full-scan metadata
+//! and GT reads for common text VCFs, and lets the htslib path remain the
+//! correctness path for BCF, indexed, threaded, and unsupported operations.
 
 // pattern: Mixed (unavoidable)
 // Reason: This performance path keeps reader setup close to decode routing so
 // buffer ownership and htslib fallback boundaries stay explicit.
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
 use genoio_core::{
     select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -23,12 +24,12 @@ use crate::error::Result;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use self::gt::{
-    decode_gt_record, decode_phased_gt_dense_record, GtDecodeBuffers, GtStatsMode,
-    HaplotypeDenseDecodeBuffers,
+    decode_gt_record, decode_phased_gt_dense_record, record_has_phased_gt_evidence,
+    GtDecodeBuffers, GtStatsMode, HaplotypeDenseDecodeBuffers,
 };
 use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, FastDenseOutput};
-use self::record::variant_record_from_record;
+use self::record::{metadata_variant_record_from_record, variant_record_from_record};
 use self::sparse::{read_haplotype_sparse_records, read_sparse_records};
 
 use super::{haplotype_sample_records, is_compressed_vcf};
@@ -42,11 +43,25 @@ mod sparse;
 const VCF_FAST_BUFFER_SIZE: usize = 1 << 20;
 
 type FastVcfReader = noodles::io::Reader<BufReader<MultiGzDecoder<File>>>;
+type PlainVcfReader = noodles::io::Reader<BufReader<File>>;
 
 struct FastVcfInput {
     reader: FastVcfReader,
     source_sample_count: usize,
     selection: DenseSampleSelection,
+}
+
+pub(super) fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
+    // Metadata reads can avoid strict full-header parsing. They only need the
+    // #CHROM line plus record fields, which keeps real-world VCF headers from
+    // forcing the slower htslib path.
+    if is_compressed_vcf(path) {
+        let mut reader = open_lazy_reader(path)?;
+        read_metadata_records(path, &mut reader)
+    } else {
+        let mut reader = open_plain_reader(path)?;
+        read_metadata_records(path, &mut reader)
+    }
 }
 
 pub(super) fn try_read_vcf_dense(
@@ -178,7 +193,50 @@ fn open_lazy_reader(path: &Path) -> Result<FastVcfReader> {
     Ok(noodles::io::Reader::new(reader))
 }
 
-fn read_dense_records<R: std::io::BufRead>(
+fn open_plain_reader(path: &Path) -> Result<PlainVcfReader> {
+    let file = File::open(path)
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
+    let reader = BufReader::with_capacity(VCF_FAST_BUFFER_SIZE, file);
+    Ok(noodles::io::Reader::new(reader))
+}
+
+fn read_metadata_records<R: BufRead>(
+    path: &Path,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<MetadataOutput> {
+    let samples = read_sample_records_from_header(path, reader.get_mut())?;
+    let mut variants = Vec::new();
+    let mut has_phased_genotype_evidence = false;
+    let mut record = noodles::Record::default();
+
+    loop {
+        if reader.read_record(&mut record).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf fast record error: {error}"))
+        })? == 0
+        {
+            break;
+        }
+
+        if !has_phased_genotype_evidence && record_has_phased_gt_evidence(&record) {
+            has_phased_genotype_evidence = true;
+        }
+        variants.push(metadata_variant_record_from_record(path, &record)?);
+    }
+
+    let capabilities = if has_phased_genotype_evidence {
+        SourceCapabilities::phased_genotypes()
+    } else {
+        SourceCapabilities::genotype_only()
+    };
+
+    Ok(MetadataOutput {
+        samples,
+        variants,
+        capabilities,
+    })
+}
+
+fn read_dense_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,

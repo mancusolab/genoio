@@ -12,6 +12,7 @@ import numpy as np
 from bench_common import benchmark, compare_summaries, nonnegative_float, positive_int
 
 SCENARIOS = (
+    "metadata",
     "matrix-only",
     "with-variants",
     "sample-filtered",
@@ -101,6 +102,15 @@ def read_genoio_matrix_only(args: argparse.Namespace) -> Any:
         )
     )
     return matrix
+
+
+def read_genoio_metadata(args: argparse.Namespace) -> np.ndarray:
+    import genoio
+
+    dataset = genoio.vcf(args.vcf)
+    samples = dataset.samples()
+    variants = dataset.variants()
+    return np.array([samples.height, variants.height], dtype=np.int64)
 
 
 def read_genoio_with_variants(args: argparse.Namespace) -> Any:
@@ -230,6 +240,12 @@ def selected_scenarios(scenario: str) -> tuple[str, ...]:
 
 
 def benchmark_genoio_scenario(scenario: str, args: argparse.Namespace) -> Any:
+    if scenario == "metadata":
+        return benchmark(
+            _genoio_label(args.kind, scenario, args.sparse),
+            lambda: read_genoio_metadata(args),
+            args.repeats,
+        )
     if scenario == "matrix-only":
         return benchmark(
             _genoio_label(args.kind, scenario, args.sparse),
@@ -278,7 +294,9 @@ def benchmark_genoio_scenario(scenario: str, args: argparse.Namespace) -> Any:
 
 
 def print_cyvcf2_skip(scenario: str, args: argparse.Namespace) -> None:
-    if args.kind != "geno":
+    if scenario == "metadata":
+        message = "skipped cyvcf2 comparison for metadata: benchmark only compares matrix-only genotype reads"
+    elif args.kind != "geno":
         message = f"skipped cyvcf2 comparison for {args.kind} {scenario}: benchmark only compares genotype hardcalls"
     elif args.sparse:
         message = f"skipped cyvcf2 comparison for sparse {scenario}: comparison backend returns dense genotypes"

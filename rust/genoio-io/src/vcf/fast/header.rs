@@ -1,7 +1,8 @@
 //! Minimal VCF header handling for the lazy fast path.
 //!
-//! The fast path only needs sample IDs. Full header validation remains owned by
-//! the htslib fallback, which accepts real-world VCF headers more permissively.
+//! The fast path needs sample IDs but not structured declarations. Parsing only
+//! the final #CHROM line keeps metadata and GT reads permissive for real-world
+//! headers that strict parsers can reject.
 
 use std::io::BufRead;
 use std::path::Path;
@@ -26,9 +27,9 @@ pub(super) fn read_sample_records_from_header(
                 "vcf header is missing #CHROM line",
             ));
         }
-        // noodles' full header parser is intentionally strict. The fast path
-        // only needs sample names, so parse the final header line directly and
-        // leave complete VCF header semantics to the htslib fallback.
+        // noodles' full header parser is intentionally strict. Parse the final
+        // header line directly because metadata and GT reads only need source
+        // sample order here.
         if line.starts_with("#CHROM\t") {
             return sample_records_from_chrom_header(line.trim_end_matches(['\r', '\n']));
         }
@@ -44,7 +45,7 @@ pub(super) fn read_sample_records_from_header(
 fn sample_records_from_chrom_header(line: &str) -> Result<Vec<SampleRecord>> {
     let mut columns = line.split('\t');
     let expected = [
-        "#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT",
+        "#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO",
     ];
 
     for expected_column in expected {
@@ -54,6 +55,16 @@ fn sample_records_from_chrom_header(line: &str) -> Result<Vec<SampleRecord>> {
                 "vcf #CHROM header does not have the required fixed columns",
             ));
         }
+    }
+
+    let Some(format_column) = columns.next() else {
+        return Ok(Vec::new());
+    };
+    if format_column != "FORMAT" {
+        return Err(GenoioError::invalid_source(
+            "<vcf header>",
+            "vcf #CHROM header has sample columns without FORMAT",
+        ));
     }
 
     Ok(columns

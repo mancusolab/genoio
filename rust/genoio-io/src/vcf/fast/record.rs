@@ -13,6 +13,20 @@ pub(super) fn variant_record_from_record(
     path: &Path,
     record: &noodles::Record,
 ) -> Result<VariantRecord> {
+    let variant = metadata_variant_record_from_record(path, record)?;
+    validate_biallelic_record(
+        path,
+        &variant.chrom,
+        variant.pos,
+        variant.alt_allele.as_deref(),
+    )?;
+    Ok(variant)
+}
+
+pub(super) fn metadata_variant_record_from_record(
+    path: &Path,
+    record: &noodles::Record,
+) -> Result<VariantRecord> {
     let chrom = record.reference_sequence_name().to_string();
     if chrom.is_empty() {
         return Err(GenoioError::invalid_source(
@@ -31,20 +45,25 @@ pub(super) fn variant_record_from_record(
     let ref_allele = record.reference_bases();
     let alternate_bases = record.alternate_bases();
     let alt_allele = alternate_bases.as_ref();
-    validate_biallelic_record(path, &chrom, pos, alt_allele)?;
     let ref_allele = ref_allele.to_string();
     let alt_allele = alt_allele.to_string();
+    let first_alt = first_alt_allele(&alt_allele).ok_or_else(|| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
+        )
+    })?;
 
     Ok(VariantRecord {
         chrom,
         pos,
         id: first_id(record),
         a0: ref_allele.clone(),
-        a1: alt_allele.clone(),
+        a1: first_alt.clone(),
         ref_allele: Some(ref_allele.clone()),
         alt_allele: Some(alt_allele.clone()),
         source_a0: ref_allele,
-        source_a1: alt_allele,
+        source_a1: first_alt,
         flipped: false,
         qual: record
             .quality_score()
@@ -69,8 +88,16 @@ fn first_id(record: &noodles::Record) -> String {
     }
 }
 
-fn validate_biallelic_record(path: &Path, chrom: &str, pos: u32, alt: &str) -> Result<()> {
-    if !alt.is_empty() && !alt.contains(',') {
+fn first_alt_allele(alt: &str) -> Option<String> {
+    if alt.is_empty() {
+        None
+    } else {
+        Some(alt.split(',').next().unwrap_or(alt).to_string())
+    }
+}
+
+fn validate_biallelic_record(path: &Path, chrom: &str, pos: u32, alt: Option<&str>) -> Result<()> {
+    if alt.is_some_and(|alt| !alt.is_empty() && !alt.contains(',')) {
         return Ok(());
     }
     Err(GenoioError::invalid_source(

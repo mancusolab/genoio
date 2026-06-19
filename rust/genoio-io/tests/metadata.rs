@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 mod common;
@@ -7,6 +8,14 @@ use common::unique_dir;
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
+}
+
+fn write_bgzf_file(path: &Path, contents: &str) {
+    let file = fs::File::create(path).expect("test fixture should be created");
+    let mut writer = noodles_bgzf::io::Writer::new(file);
+    writer
+        .write_all(contents.as_bytes())
+        .expect("test fixture should be compressed");
 }
 
 #[test]
@@ -93,6 +102,37 @@ fn vcf_haplotype_capability_is_detected_from_records_not_extension() {
     let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
 
     assert!(metadata.capabilities.supports_geno);
+    assert!(metadata.capabilities.supports_haplo);
+    assert!(metadata.capabilities.phased);
+}
+
+#[test]
+fn compressed_vcf_metadata_uses_permissive_header_and_preserves_multiallelic_records() {
+    let dir = unique_dir("vcf-metadata-fast-compressed");
+    let path = dir.join("tiny.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2
+1\t10\trs1\tA\tG,T\t.\tPASS\t.\tGT\t0|1\t0/0
+",
+    );
+
+    let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
+
+    assert_eq!(
+        metadata
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s1", "s2"]
+    );
+    assert_eq!(metadata.variants.len(), 1);
+    assert_eq!(metadata.variants[0].a1, "G");
+    assert_eq!(metadata.variants[0].alt_allele.as_deref(), Some("G,T"));
     assert!(metadata.capabilities.supports_haplo);
     assert!(metadata.capabilities.phased);
 }

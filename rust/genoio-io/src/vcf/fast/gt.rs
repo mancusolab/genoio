@@ -207,6 +207,35 @@ pub(super) fn decode_gt_record(
     Ok(())
 }
 
+pub(super) fn record_has_phased_gt_evidence(record: &noodles::Record) -> bool {
+    let samples = record.samples();
+    let sample_fields = samples.as_ref().as_bytes();
+    let Some(gt_index) = gt_key_index(sample_fields) else {
+        return false;
+    };
+    let Some(format_end) = sample_fields.iter().position(|&b| b == b'\t') else {
+        return false;
+    };
+
+    let mut field_start = format_end + 1;
+    while field_start <= sample_fields.len() {
+        let field_end = next_delimiter(sample_fields, field_start, b'\t');
+        // Capability detection only needs evidence of phase separators. Avoid
+        // decoding every allele during metadata scans.
+        if nth_colon_field(&sample_fields[field_start..field_end], gt_index)
+            .is_some_and(|gt| gt.contains(&b'|'))
+        {
+            return true;
+        }
+        if field_end == sample_fields.len() {
+            break;
+        }
+        field_start = field_end + 1;
+    }
+
+    false
+}
+
 pub(super) fn decode_phased_gt_sparse_record(
     path: &Path,
     record: &noodles::Record,

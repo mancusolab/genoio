@@ -28,6 +28,15 @@ mod fast;
 
 /// Read VCF/BCF sample and variant metadata without returning genotypes.
 pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
+    // BCF is binary and remains on htslib until the noodles replacement grows a
+    // binary source path. Text VCF metadata uses the permissive fast parser.
+    if !is_bcf_path(path) {
+        return fast::read_vcf_metadata(path);
+    }
+    read_vcf_metadata_htslib(path)
+}
+
+fn read_vcf_metadata_htslib(path: &Path) -> Result<MetadataOutput> {
     let mut reader = Reader::from_path(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf reader error: {error}")))?;
     let header = reader.header().clone();
@@ -1377,6 +1386,12 @@ fn is_compressed_vcf(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension, "gz" | "bgz"))
+}
+
+fn is_bcf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("bcf"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
