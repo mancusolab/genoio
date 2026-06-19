@@ -7,6 +7,8 @@ use noodles_vcf as noodles;
 
 use crate::error::Result;
 
+use super::format::{format_key_index, FormatScanError};
+
 pub(super) struct DsDecodeBuffers {
     values: Vec<f32>,
     missing: Vec<bool>,
@@ -48,7 +50,7 @@ pub(super) fn decode_ds_record(
     let ds_index = format_key_index(sample_fields, b"DS")
         .ok_or_else(|| GenoioError::unsupported("vcf dosage reads require FORMAT/DS values"))?;
 
-    scan_selected_format_tokens(
+    scan_selected_ds_tokens(
         path,
         &record_name,
         sample_fields,
@@ -61,6 +63,30 @@ pub(super) fn decode_ds_record(
             Ok(())
         },
     )
+}
+
+fn scan_selected_ds_tokens(
+    path: &Path,
+    record_name: &str,
+    sample_fields: &[u8],
+    key_index: usize,
+    source_indices: &[usize],
+    emit: &mut impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    super::format::scan_selected_format_tokens(
+        sample_fields,
+        key_index,
+        source_indices,
+        "sample is missing DS value",
+        emit,
+    )
+    .map_err(|error| match error {
+        FormatScanError::Scan(reason) => GenoioError::invalid_source(
+            path,
+            format!("vcf record {record_name} has unsupported FORMAT/DS: {reason}"),
+        ),
+        FormatScanError::Emit(error) => error,
+    })
 }
 
 fn parse_ds_token(path: &Path, record_name: &str, token: &[u8]) -> Result<DsCall> {
@@ -110,86 +136,6 @@ fn first_record_id(record: &noodles::Record) -> String {
     } else {
         id.split(';').next().unwrap_or(".").to_string()
     }
-}
-
-fn format_key_index(sample_fields: &[u8], key: &[u8]) -> Option<usize> {
-    let format_end = sample_fields.iter().position(|&b| b == b'\t')?;
-    sample_fields[..format_end]
-        .split(|&b| b == b':')
-        .position(|candidate| candidate == key)
-}
-
-fn scan_selected_format_tokens(
-    path: &Path,
-    record_name: &str,
-    sample_fields: &[u8],
-    key_index: usize,
-    source_indices: &[usize],
-    emit: &mut impl FnMut(&[u8]) -> Result<()>,
-) -> Result<()> {
-    let Some(format_end) = sample_fields.iter().position(|&b| b == b'\t') else {
-        return Err(GenoioError::invalid_source(
-            path,
-            format!("vcf record {record_name} has FORMAT but no sample columns"),
-        ));
-    };
-    let mut selected_index = 0_usize;
-    let mut sample_index = 0_usize;
-    let mut field_start = format_end + 1;
-
-    while selected_index < source_indices.len() {
-        let target_index = source_indices[selected_index];
-        if field_start > sample_fields.len() {
-            return Err(GenoioError::invalid_source(
-                path,
-                format!("vcf record {record_name} is missing a selected sample column"),
-            ));
-        }
-        let field_end = next_delimiter(sample_fields, field_start, b'\t');
-        if sample_index == target_index {
-            emit(
-                nth_colon_field(&sample_fields[field_start..field_end], key_index).ok_or_else(
-                    || {
-                        GenoioError::invalid_source(
-                            path,
-                            format!("vcf record {record_name} sample is missing DS value"),
-                        )
-                    },
-                )?,
-            )?;
-            selected_index += 1;
-        }
-        sample_index += 1;
-        if field_end == sample_fields.len() {
-            field_start = sample_fields.len() + 1;
-        } else {
-            field_start = field_end + 1;
-        }
-    }
-
-    Ok(())
-}
-
-fn nth_colon_field(sample: &[u8], index: usize) -> Option<&[u8]> {
-    let mut field_start = 0_usize;
-    for field_index in 0..=index {
-        let field_end = next_delimiter(sample, field_start, b':');
-        if field_index == index {
-            return Some(&sample[field_start..field_end]);
-        }
-        if field_end == sample.len() {
-            return None;
-        }
-        field_start = field_end + 1;
-    }
-    None
-}
-
-fn next_delimiter(buf: &[u8], start: usize, delimiter: u8) -> usize {
-    buf[start..]
-        .iter()
-        .position(|&b| b == delimiter)
-        .map_or(buf.len(), |offset| start + offset)
 }
 
 struct DsCall {

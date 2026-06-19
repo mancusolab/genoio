@@ -13,6 +13,10 @@ use noodles_vcf as noodles;
 
 use crate::error::Result;
 
+use super::format::{
+    format_key_index, next_delimiter, nth_colon_field, scan_selected_format_tokens, FormatScanError,
+};
+
 pub(super) struct GtDecodeBuffers {
     values: Vec<f32>,
     missing: Vec<bool>,
@@ -344,10 +348,7 @@ fn record_pos(record: &noodles::Record) -> usize {
 }
 
 fn gt_key_index(sample_fields: &[u8]) -> Option<usize> {
-    let format_end = sample_fields.iter().position(|&b| b == b'\t')?;
-    sample_fields[..format_end]
-        .split(|&b| b == b':')
-        .position(|key| key == b"GT")
+    format_key_index(sample_fields, b"GT")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -408,59 +409,16 @@ fn scan_selected_gt_tokens(
     source_indices: &[usize],
     emit: &mut impl FnMut(&[u8]) -> std::result::Result<(), &'static str>,
 ) -> std::result::Result<(), &'static str> {
-    let Some(format_end) = sample_fields.iter().position(|&b| b == b'\t') else {
-        return Err("record has FORMAT but no sample columns");
-    };
-    let mut selected_index = 0_usize;
-    let mut sample_index = 0_usize;
-    let mut field_start = format_end + 1;
-
-    while selected_index < source_indices.len() {
-        let target_index = source_indices[selected_index];
-        if field_start > sample_fields.len() {
-            return Err("selected sample index is outside the record");
-        }
-        let field_end = next_delimiter(sample_fields, field_start, b'\t');
-        if sample_index == target_index {
-            let sample = &sample_fields[field_start..field_end];
-            emit(gt_sample_token(sample, gt_index)?)?;
-            selected_index += 1;
-        }
-        sample_index += 1;
-        if field_end == sample_fields.len() {
-            field_start = sample_fields.len() + 1;
-        } else {
-            field_start = field_end + 1;
-        }
-    }
-
-    Ok(())
-}
-
-fn gt_sample_token(sample: &[u8], gt_index: usize) -> std::result::Result<&[u8], &'static str> {
-    nth_colon_field(sample, gt_index).ok_or("sample is missing GT value")
-}
-
-fn nth_colon_field(sample: &[u8], index: usize) -> Option<&[u8]> {
-    let mut field_start = 0_usize;
-    for field_index in 0..=index {
-        let field_end = next_delimiter(sample, field_start, b':');
-        if field_index == index {
-            return Some(&sample[field_start..field_end]);
-        }
-        if field_end == sample.len() {
-            return None;
-        }
-        field_start = field_end + 1;
-    }
-    None
-}
-
-fn next_delimiter(buf: &[u8], start: usize, delimiter: u8) -> usize {
-    buf[start..]
-        .iter()
-        .position(|&b| b == delimiter)
-        .map_or(buf.len(), |offset| start + offset)
+    scan_selected_format_tokens(
+        sample_fields,
+        gt_index,
+        source_indices,
+        "sample is missing GT value",
+        emit,
+    )
+    .map_err(|error| match error {
+        FormatScanError::Scan(reason) | FormatScanError::Emit(reason) => reason,
+    })
 }
 
 fn decode_gt_token(token: &[u8]) -> std::result::Result<GtCall, &'static str> {

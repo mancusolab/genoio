@@ -36,6 +36,7 @@ use self::sparse::{read_haplotype_sparse_records, read_sparse_records};
 use super::{haplotype_sample_records, is_compressed_vcf};
 
 mod ds;
+mod format;
 mod gt;
 mod header;
 mod output;
