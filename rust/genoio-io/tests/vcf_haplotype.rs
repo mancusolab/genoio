@@ -118,6 +118,55 @@ fn phased_vcf_haplotype_dense_matrix_only_omits_metadata() {
 }
 
 #[test]
+fn compressed_vcf_haplotype_dense_uses_fast_path_semantics() {
+    let dir = unique_dir("vcf-haplo-dense-fast-compressed");
+    let path = dir.join("phased.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DP\t0|1:7\t1|0:8\t1|1:9
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDP:GT\t5:1|0\t6:0|1\t7:0|0
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let haplotypes = genoio_io::read_vcf_haplotypes_dense(&path, Some(&samples), None)
+        .expect("compressed haplotypes should decode");
+
+    assert_eq!(haplotypes.n_samples, 4);
+    assert_eq!(haplotypes.n_variants, 2);
+    assert_eq!(
+        haplotypes.values,
+        vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    );
+    assert_eq!(
+        haplotypes
+            .samples
+            .iter()
+            .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
+            .collect::<Vec<_>>(),
+        vec![
+            ("S1", Some(0)),
+            ("S1", Some(1)),
+            ("S3", Some(0)),
+            ("S3", Some(1)),
+        ]
+    );
+    assert_eq!(
+        haplotypes
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1", "rs2"]
+    );
+}
+
+#[test]
 fn filtered_haplotype_samples_preserve_source_sample_index() {
     let dir = unique_dir("vcf-haplo-filtered-samples");
     let path = dir.join("phased.vcf");

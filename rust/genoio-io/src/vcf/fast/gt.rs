@@ -26,6 +26,50 @@ pub(super) struct HaplotypeSparseDecodeBuffers {
     stats: Option<VariantStats>,
 }
 
+pub(super) struct HaplotypeDenseDecodeBuffers {
+    values: Vec<f32>,
+    missing: Vec<bool>,
+    stats: Option<VariantStats>,
+}
+
+impl HaplotypeDenseDecodeBuffers {
+    /// Allocate per-record haplotype rows once and reuse them across records.
+    pub(super) fn with_capacity(n_samples: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(n_samples * 2),
+            missing: Vec::with_capacity(n_samples * 2),
+            stats: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.missing.clear();
+        self.stats = None;
+    }
+
+    fn push_call(&mut self, call: HaplotypeCall) {
+        for allele in call.alleles {
+            // Missing alleles carry a zero placeholder plus the mask bit, which
+            // keeps dense values rectangular without conflating missingness.
+            self.values.push(f32::from(allele.unwrap_or(0)));
+            self.missing.push(allele.is_none());
+        }
+    }
+
+    pub(super) fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    pub(super) fn missing(&self) -> &[bool] {
+        &self.missing
+    }
+
+    pub(super) fn stats(&self) -> Option<VariantStats> {
+        self.stats
+    }
+}
+
 impl HaplotypeSparseDecodeBuffers {
     /// Allocate sparse haplotype scratch once and reuse it for every record.
     pub(super) fn with_capacity(n_samples: usize) -> Self {
@@ -129,13 +173,7 @@ pub(super) fn decode_gt_record(
     output.clear();
     let samples = record.samples();
     let sample_fields = samples.as_ref().as_bytes();
-    let record_location = || {
-        format!(
-            "{}:{}",
-            record.reference_sequence_name(),
-            record_pos(record)
-        )
-    };
+    let record_location = || format_record_location(record);
     let gt_index = gt_key_index(sample_fields).ok_or_else(|| {
         GenoioError::invalid_source(
             path,
@@ -177,15 +215,44 @@ pub(super) fn decode_phased_gt_sparse_record(
     output: &mut HaplotypeSparseDecodeBuffers,
 ) -> Result<()> {
     output.clear();
+    output.stats = decode_selected_phased_gt_record(
+        path,
+        record,
+        source_indices,
+        stats_mode,
+        &mut |row_base, call| output.push_call(row_base, call),
+    )?;
+    Ok(())
+}
+
+pub(super) fn decode_phased_gt_dense_record(
+    path: &Path,
+    record: &noodles::Record,
+    source_indices: &[usize],
+    stats_mode: GtStatsMode,
+    output: &mut HaplotypeDenseDecodeBuffers,
+) -> Result<()> {
+    output.clear();
+    output.stats = decode_selected_phased_gt_record(
+        path,
+        record,
+        source_indices,
+        stats_mode,
+        &mut |_row_base, call| output.push_call(call),
+    )?;
+    Ok(())
+}
+
+fn decode_selected_phased_gt_record(
+    path: &Path,
+    record: &noodles::Record,
+    source_indices: &[usize],
+    stats_mode: GtStatsMode,
+    emit: &mut impl FnMut(usize, HaplotypeCall),
+) -> Result<Option<VariantStats>> {
     let samples = record.samples();
     let sample_fields = samples.as_ref().as_bytes();
-    let record_location = || {
-        format!(
-            "{}:{}",
-            record.reference_sequence_name(),
-            record_pos(record)
-        )
-    };
+    let record_location = || format_record_location(record);
     let gt_index = gt_key_index(sample_fields).ok_or_else(|| {
         GenoioError::invalid_source(
             path,
@@ -196,35 +263,46 @@ pub(super) fn decode_phased_gt_sparse_record(
     match stats_mode {
         GtStatsMode::Compute => {
             let mut counts = GtCounts::default();
+            // The callback row base lets dense and sparse callers share the
+            // same selected-sample scan while preserving haplotype row order.
             let mut row_base = 0_usize;
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
                 let call = decode_phased_gt_token(token)?;
                 counts.record_class(call.genotype_class()?);
-                output.push_call(row_base, call);
+                emit(row_base, call);
                 row_base += 2;
                 Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
-            output.stats = Some(counts.variant_stats()?);
+            Ok(Some(counts.variant_stats()?))
         }
         GtStatsMode::Skip => {
+            // Keep row accounting in the no-stats branch so output order is
+            // identical regardless of filter shape.
             let mut row_base = 0_usize;
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
-                let call = decode_phased_gt_token(token)?;
-                output.push_call(row_base, call);
+                emit(row_base, decode_phased_gt_token(token)?);
                 row_base += 2;
                 Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
+            Ok(None)
         }
     }
-    Ok(())
 }
 
 fn gt_error(path: &Path, record_location: &str, reason: &str) -> GenoioError {
     GenoioError::invalid_source(
         path,
         format!("vcf record {record_location} has unsupported GT: {reason}"),
+    )
+}
+
+fn format_record_location(record: &noodles::Record) -> String {
+    format!(
+        "{}:{}",
+        record.reference_sequence_name(),
+        record_pos(record)
     )
 }
 

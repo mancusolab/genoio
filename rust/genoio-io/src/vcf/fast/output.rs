@@ -5,15 +5,13 @@
 //! keep variant-major staging for contiguous appends and a single final
 //! transpose.
 
-use genoio_core::{DenseGenotypeMatrix, SampleRecord, VariantFilter};
+use genoio_core::{DenseGenotypeMatrix, SampleRecord, VariantFilter, VariantRecord};
 
 use crate::error::Result;
 use crate::matrix::{
     finish_dense_matrix, finish_variant_major_dense_matrix, shrink_sample_major_width,
     write_sample_major_variant_slot, DenseMatrixParts, VariantMajorDenseParts,
 };
-
-use super::gt::GtDecodeBuffers;
 
 pub(super) fn can_write_sample_major_directly(
     selection: &genoio_core::DenseSampleSelection,
@@ -68,7 +66,8 @@ impl FastDenseOutput {
     pub(super) fn write_variant(
         &mut self,
         variant_index: usize,
-        decoded: &GtDecodeBuffers,
+        decoded_values: &[f32],
+        decoded_missing: &[bool],
     ) -> Result<()> {
         match self {
             Self::SampleMajor {
@@ -82,14 +81,16 @@ impl FastDenseOutput {
                 *n_samples,
                 *row_width,
                 variant_index,
-                decoded.values(),
-                decoded.missing(),
+                decoded_values,
+                decoded_missing,
             ),
             Self::VariantMajor {
-                values, missing, ..
+                values: output_values,
+                missing: output_missing,
+                ..
             } => {
-                values.extend_from_slice(decoded.values());
-                missing.extend_from_slice(decoded.missing());
+                output_values.extend_from_slice(decoded_values);
+                output_missing.extend_from_slice(decoded_missing);
                 Ok(())
             }
         }
@@ -99,7 +100,9 @@ impl FastDenseOutput {
         self,
         n_variants: usize,
         samples: Vec<SampleRecord>,
+        variants: Vec<VariantRecord>,
         diagnostics: genoio_core::DenseDiagnostics,
+        matrix_only: bool,
     ) -> Result<DenseGenotypeMatrix> {
         match self {
             Self::SampleMajor {
@@ -117,10 +120,10 @@ impl FastDenseOutput {
                         values,
                         missing_mask,
                         samples,
-                        variants: Vec::new(),
+                        variants,
                         diagnostics,
                     },
-                    true,
+                    matrix_only,
                 )
             }
             Self::VariantMajor {
@@ -134,10 +137,10 @@ impl FastDenseOutput {
                     variant_major_values: values,
                     variant_major_missing: missing,
                     samples,
-                    variants: Vec::new(),
+                    variants,
                     diagnostics,
                 },
-                true,
+                matrix_only,
             ),
         }
     }

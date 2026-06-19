@@ -158,6 +158,48 @@ fn compressed_vcf_matrix_only_uses_fast_path_semantics() {
 }
 
 #[test]
+fn compressed_vcf_dense_with_metadata_uses_fast_path_semantics() {
+    let dir = unique_dir("vcf-dense-fast-metadata");
+    let path = dir.join("tiny.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DP\t0/0:7\t0/1:8\t1/1:9
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDP:GT\t5:0/1\t6:0/0\t7:./.
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense =
+        genoio_io::read_vcf_dense(&path, Some(&samples), None).expect("dense VCF should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1", "rs2"]
+    );
+}
+
+#[test]
 fn vcf_dense_sample_subset_preserves_source_order() {
     let dir = unique_dir("vcf-dense-sample-subset");
     let path = dir.join("subset.vcf");
