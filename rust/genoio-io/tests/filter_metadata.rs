@@ -1,11 +1,13 @@
 // pattern: Imperative Shell
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use rust_htslib::bcf::record::GenotypeAllele;
-use rust_htslib::bcf::{self, Format, Header, Writer};
+use noodles_core::Position;
+use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
+use noodles_csi::binning_index::index::{header::Format, Header};
+use noodles_tabix as tabix;
 
 mod common;
 
@@ -29,34 +31,19 @@ fn write_vcf(path: &Path) {
 }
 
 fn write_indexed_vcf(path: &Path) {
-    let mut header = Header::new();
-    header.push_record(br#"##fileformat=VCFv4.2"#);
-    header.push_record(br#"##contig=<ID=1>"#);
-    header.push_record(br#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">"#);
-    header.push_sample(b"S1");
-
-    {
-        let mut writer =
-            Writer::from_path(path, &header, false, Format::Vcf).expect("vcf writer should open");
-        for (id, pos) in [("rs10", 10_i64), ("rs20", 20), ("rs30", 30), ("rs40", 40)] {
-            let mut record = writer.empty_record();
-            let rid = writer
-                .header()
-                .name2rid(b"1")
-                .expect("contig should resolve");
-            record.set_rid(Some(rid));
-            record.set_pos(pos - 1);
-            record.set_id(id.as_bytes()).expect("id should be set");
-            record
-                .set_alleles(&[b"A", b"G"])
-                .expect("alleles should be set");
-            record
-                .push_genotypes(&[GenotypeAllele::Unphased(0), GenotypeAllele::Unphased(1)])
-                .expect("genotype should be set");
-            writer.write(&record).expect("record should be written");
-        }
-    }
-
+    write_bgzf_file(
+        path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t0/1
+1\t30\trs30\tA\tG\t.\tPASS\t.\tGT\t0/1
+1\t40\trs40\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
     build_tabix_index(path);
 }
 
@@ -70,8 +57,50 @@ fn write_bgzf_file(path: &Path, contents: &str) {
 
 fn build_tabix_index(path: &Path) {
     let index_path = tabix_index_path(path);
-    bcf::index::build(path, Some(index_path.as_path()), 1, bcf::index::Type::Tbx)
-        .expect("tabix index should build");
+    let index = tabix_index(path).expect("tabix index should build");
+    tabix::fs::write(index_path, &index).expect("tabix index should be written");
+}
+
+fn tabix_index(path: &Path) -> std::io::Result<tabix::Index> {
+    let file = fs::File::open(path)?;
+    let mut reader = noodles_bgzf::io::Reader::new(file);
+    let mut indexer = tabix::index::Indexer::default();
+    indexer.set_header(Header::builder().set_format(Format::Vcf).build());
+
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let chunk_start = reader.virtual_position();
+        let len = reader.read_until(b'\n', &mut line)?;
+
+        if len == 0 {
+            break;
+        }
+
+        if line.starts_with(b"#") {
+            continue;
+        }
+
+        let chunk_end = reader.virtual_position();
+        let Some((chrom, pos)) = vcf_line_reference_span(&line) else {
+            continue;
+        };
+
+        indexer.add_record(&chrom, pos, pos, Chunk::new(chunk_start, chunk_end))?;
+    }
+
+    Ok(indexer.build())
+}
+
+fn vcf_line_reference_span(line: &[u8]) -> Option<(String, Position)> {
+    let mut fields = line.split(|b| *b == b'\t');
+    let chrom = std::str::from_utf8(fields.next()?).ok()?.to_owned();
+    let pos = std::str::from_utf8(fields.next()?)
+        .ok()?
+        .parse::<usize>()
+        .ok()
+        .and_then(|pos| Position::try_from(pos).ok())?;
+    Some((chrom, pos))
 }
 
 fn tabix_index_path(path: &Path) -> PathBuf {
@@ -90,29 +119,16 @@ fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
 }
 
 fn write_compressed_unindexed_vcf(path: &Path) {
-    let mut header = Header::new();
-    header.push_record(br#"##fileformat=VCFv4.2"#);
-    header.push_record(br#"##contig=<ID=1>"#);
-    header.push_record(br#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">"#);
-    header.push_sample(b"S1");
-
-    let mut writer =
-        Writer::from_path(path, &header, false, Format::Vcf).expect("vcf writer should open");
-    let mut record = writer.empty_record();
-    let rid = writer
-        .header()
-        .name2rid(b"1")
-        .expect("contig should resolve");
-    record.set_rid(Some(rid));
-    record.set_pos(9);
-    record.set_id(b"rs10").expect("id should be set");
-    record
-        .set_alleles(&[b"A", b"G"])
-        .expect("alleles should be set");
-    record
-        .push_genotypes(&[GenotypeAllele::Unphased(0), GenotypeAllele::Unphased(1)])
-        .expect("genotype should be set");
-    writer.write(&record).expect("record should be written");
+    write_bgzf_file(
+        path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
 }
 
 #[test]
@@ -342,6 +358,8 @@ fn indexed_vcf_region_uses_tabix_reference_names() {
     );
     assert_eq!(dense.values, vec![1.0]);
     assert_eq!(dense.diagnostics.candidate_variants, 1);
+    assert_eq!(dense.diagnostics.retained_variants, 1);
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 0);
 }
 
 #[test]
@@ -565,8 +583,8 @@ fn indexed_vcf_region_sample_filter_preserves_source_order() {
 }
 
 #[test]
-fn indexed_vcf_region_falls_back_when_noodles_rejects_header() {
-    let dir = unique_dir("vcf-filter-indexed-header-fallback");
+fn indexed_vcf_region_uses_permissive_header_scan() {
+    let dir = unique_dir("vcf-filter-indexed-header-fast");
     let path = dir.join("indexed.vcf.gz");
     write_bgzf_file(
         &path,
@@ -620,10 +638,19 @@ fn compressed_vcf_region_filter_requires_index() {
 }
 
 #[test]
-fn compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan() {
+fn compressed_vcf_non_pushdown_region_filter_uses_permissive_full_scan() {
     let dir = unique_dir("vcf-filter-unindexed-non-pushdown-region");
     let path = dir.join("unindexed.vcf.gz");
-    write_compressed_unindexed_vcf(&path);
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT\t0/1
+1\t20\trs20\tA\tG\t.\tPASS\t.\tGT\t1/1
+",
+    );
     let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
         "op": "not",
         "expr": {
@@ -635,7 +662,7 @@ fn compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan() {
     .expect("filter should parse");
 
     let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter))
-        .expect("non-pushdown region filter should full-scan unindexed compressed vcf");
+        .expect("non-pushdown region filter should use permissive full scan");
 
     assert_eq!(
         dense
@@ -645,5 +672,7 @@ fn compressed_vcf_non_pushdown_region_filter_falls_back_to_full_scan() {
             .collect::<Vec<_>>(),
         vec!["rs10"]
     );
-    assert_eq!(dense.diagnostics.candidate_variants, 1);
+    assert_eq!(dense.diagnostics.candidate_variants, 2);
+    assert_eq!(dense.diagnostics.retained_variants, 1);
+    assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);
 }

@@ -235,7 +235,7 @@ fn threaded_compressed_vcf_dosage_uses_fast_path_semantics() {
     let dir = unique_dir("vcf-dosage-threaded-fast-compressed");
     let path = dir.join("dosage.vcf.gz");
     // The malformed FORMAT header is intentional: it proves threaded compressed
-    // reads still use the permissive noodles fast path rather than htslib.
+    // reads still use the permissive noodles fast path.
     write_bgzf_file(
         &path,
         "\
@@ -293,6 +293,28 @@ fn threaded_compressed_vcf_rejects_zero_threads() {
     assert!(error
         .to_string()
         .contains("vcf thread count must be greater than zero"));
+}
+
+#[test]
+fn plain_vcf_rejects_threaded_reads() {
+    let dir = unique_dir("vcf-threaded-plain");
+    let path = dir.join("tiny.vcf");
+    write_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1
+",
+    );
+
+    let error =
+        genoio_io::read_vcf_dense_windowed_with_threads(&path, None, None, None, false, Some(2))
+            .expect_err("plain VCF should reject explicit thread count");
+
+    assert!(error
+        .to_string()
+        .contains("threaded reads are only supported for compressed VCF"));
 }
 
 #[test]

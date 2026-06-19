@@ -300,8 +300,13 @@ fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
 #[test]
 fn threaded_haplotype_reads_match_unthreaded_reads() {
     let dir = unique_dir("vcf-haplo-threaded");
-    let path = dir.join("phased.vcf");
-    fs::write(&path, phased_vcf()).expect("fixture should be written");
+    let path = dir.join("phased.vcf.gz");
+    let file = fs::File::create(&path).expect("fixture should be created");
+    let mut writer = noodles_bgzf::io::Writer::new(file);
+    writer
+        .write_all(phased_vcf().as_bytes())
+        .expect("fixture should be compressed");
+    drop(writer);
 
     let dense = genoio_io::read_vcf_haplotypes_dense_windowed(&path, None, None, None, false)
         .expect("unthreaded dense haplotypes should decode");

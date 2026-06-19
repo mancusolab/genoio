@@ -1,8 +1,7 @@
 //! Byte-level GT decoding for the compressed VCF fast path.
 //!
 //! This module intentionally handles only biallelic diploid hardcalls. Broader
-//! FORMAT semantics stay on the htslib path, where correctness coverage is
-//! better than a custom parser would be.
+//! FORMAT semantics remain unsupported here until they are covered explicitly.
 
 // pattern: Functional Core
 

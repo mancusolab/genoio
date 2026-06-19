@@ -1,13 +1,13 @@
 //! Narrow VCF fast path built on noodles lazy records.
 //!
 //! This module is intentionally conservative: it accelerates common text VCF
-//! scans and keeps htslib as the correctness path for BCF and unsupported
-//! operations. Threaded compressed VCF reads use noodles' BGZF block
+//! scans while BCF uses the separate `bcf_fast` module. Threaded compressed VCF
+//! reads use noodles' BGZF block
 //! decompression; record parsing remains ordered and single-consumer.
 
 // pattern: Mixed (unavoidable)
 // Reason: This performance path keeps reader setup close to decode routing so
-// buffer ownership and htslib fallback boundaries stay explicit.
+// buffer ownership and format boundaries stay explicit.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -277,7 +277,7 @@ macro_rules! with_indexed_fast_vcf_input_for_threads {
 pub(super) fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     // Metadata reads can avoid strict full-header parsing. They only need the
     // #CHROM line plus record fields, which keeps real-world VCF headers from
-    // forcing the slower htslib path.
+    // forcing a strict parser onto the hot path.
     if is_compressed_vcf(path) {
         let mut reader = open_compressed_reader(path)?;
         read_metadata_records(path, &mut reader)
@@ -295,7 +295,7 @@ pub(super) fn try_read_vcf_dense(
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<Option<DenseGenotypeMatrix>> {
-    if !is_fast_vcf_supported(path, variant_filter, threads) {
+    if !is_fast_vcf_supported(path, threads) {
         return Ok(None);
     }
 
@@ -418,7 +418,7 @@ pub(super) fn try_read_vcf_dosage_dense(
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<Option<DenseGenotypeMatrix>> {
-    if !is_fast_vcf_supported(path, variant_filter, threads) {
+    if !is_fast_vcf_supported(path, threads) {
         return Ok(None);
     }
 
@@ -524,7 +524,7 @@ pub(super) fn try_read_vcf_haplotypes_dense(
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<Option<DenseGenotypeMatrix>> {
-    if !is_fast_vcf_supported(path, variant_filter, threads) {
+    if !is_fast_vcf_supported(path, threads) {
         return Ok(None);
     }
 
@@ -594,7 +594,7 @@ pub(super) fn try_read_vcf_sparse(
     variant_window: Option<VariantWindow>,
     threads: Option<usize>,
 ) -> Result<Option<SparseGenotypeMatrix>> {
-    if !is_fast_vcf_supported(path, variant_filter, threads) {
+    if !is_fast_vcf_supported(path, threads) {
         return Ok(None);
     }
 
@@ -662,7 +662,7 @@ pub(super) fn try_read_vcf_haplotypes_sparse(
     variant_window: Option<VariantWindow>,
     threads: Option<usize>,
 ) -> Result<Option<SparseGenotypeMatrix>> {
-    if !is_fast_vcf_supported(path, variant_filter, threads) {
+    if !is_fast_vcf_supported(path, threads) {
         return Ok(None);
     }
 
@@ -692,14 +692,8 @@ fn read_haplotype_sparse_from_input<R: BufRead>(
     )
 }
 
-fn is_fast_vcf_supported(
-    path: &Path,
-    variant_filter: Option<&VariantFilter>,
-    threads: Option<usize>,
-) -> bool {
-    !is_bcf_path(path)
-        && fast_path_supports_threads(path, threads)
-        && !variant_filter.is_some_and(VariantFilter::has_region_predicate)
+fn is_fast_vcf_supported(path: &Path, threads: Option<usize>) -> bool {
+    !is_bcf_path(path) && fast_path_supports_threads(path, threads)
 }
 
 fn is_fast_indexed_vcf_supported(path: &Path) -> bool {
@@ -712,7 +706,7 @@ fn is_fast_empty_supported(path: &Path, threads: Option<usize>) -> bool {
 
 fn fast_path_supports_threads(path: &Path, threads: Option<usize>) -> bool {
     // Noodles only gives us threaded BGZF decompression. Plain text with an
-    // explicit thread count stays on the htslib compatibility path.
+    // explicit thread count is rejected at the public VCF boundary.
     threads.is_none() || is_compressed_vcf(path)
 }
 
@@ -848,7 +842,8 @@ where
 
     // Query chunks directly rather than using noodles' strict IndexedReader.
     // The fast path only needs the #CHROM line, and real VCFs can have header
-    // records that htslib accepts but noodles' full header parser rejects.
+    // records that permissive parsers accept but noodles' full header parser
+    // rejects.
     let query = csi::io::Query::new(&mut bgzf_reader, chunks);
     let mut reader = noodles::io::Reader::new(query);
     read_records(
@@ -1374,10 +1369,6 @@ mod tests {
 
     #[test]
     fn dense_fast_path_accepts_metadata_reads() {
-        assert!(is_fast_vcf_supported(
-            Path::new("example.vcf.gz"),
-            None,
-            None,
-        ));
+        assert!(is_fast_vcf_supported(Path::new("example.vcf.gz"), None));
     }
 }

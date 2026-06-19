@@ -15,7 +15,6 @@ noodles-core = "0.20"
 noodles-csi = "0.56"
 noodles-tabix = "0.62"
 noodles-vcf = "0.88"
-rust-htslib = { version = "1.0.0", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 zstd = "0.13"

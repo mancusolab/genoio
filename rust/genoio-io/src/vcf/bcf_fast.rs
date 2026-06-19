@@ -1,8 +1,8 @@
 //! Lazy BCF readers built on noodles-bcf records.
 //!
 //! BCF exposes typed sample values, so this module deliberately does not reuse
-//! the text VCF byte scanners. The record loop mirrors the htslib path while
-//! keeping one lazy `bcf::Record` buffer alive across variants.
+//! the text VCF byte scanners. The record loop mirrors the public VCF/BCF
+//! semantics while keeping one lazy `bcf::Record` buffer alive across variants.
 
 // pattern: Mixed
 // Reason: BCF setup, lazy record iteration, and decode routing share ownership
