@@ -14,15 +14,16 @@ use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
-    MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
-    VariantWindow,
+    compute_dosage_variant_stats, select_samples_source_order, DenseGenotypeMatrix,
+    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
 use crate::error::Result;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
+use self::ds::{decode_ds_record, DsDecodeBuffers};
 use self::gt::{
     decode_gt_record, decode_phased_gt_dense_record, record_has_phased_gt_evidence,
     GtDecodeBuffers, GtStatsMode, HaplotypeDenseDecodeBuffers,
@@ -34,6 +35,7 @@ use self::sparse::{read_haplotype_sparse_records, read_sparse_records};
 
 use super::{haplotype_sample_records, is_compressed_vcf};
 
+mod ds;
 mod gt;
 mod header;
 mod output;
@@ -83,6 +85,36 @@ pub(super) fn try_read_vcf_dense(
     } = open_fast_vcf_input(path, requested_samples)?;
 
     read_dense_records(
+        path,
+        variant_filter,
+        variant_window,
+        matrix_only,
+        source_sample_count,
+        &selection,
+        &mut reader,
+    )
+    .map(Some)
+}
+
+pub(super) fn try_read_vcf_dosage_dense(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
+    threads: Option<usize>,
+) -> Result<Option<DenseGenotypeMatrix>> {
+    if !is_fast_vcf_supported(path, variant_filter, threads) {
+        return Ok(None);
+    }
+
+    let FastVcfInput {
+        mut reader,
+        source_sample_count,
+        selection,
+    } = open_fast_vcf_input(path, requested_samples)?;
+
+    read_dosage_dense_records(
         path,
         variant_filter,
         variant_window,
@@ -314,6 +346,96 @@ fn read_dense_records<R: BufRead>(
             if let Some(stats) = stats {
                 genoio_core::attach_variant_stats(&mut variant, stats);
             }
+            variants.push(variant);
+        }
+
+        output.write_variant(output_variant_count, decoded.values(), decoded.missing())?;
+        output_variant_count += 1;
+    }
+
+    diagnostics.retained_variants = output_variant_count;
+    output.finish(
+        output_variant_count,
+        selection.samples.clone(),
+        variants,
+        diagnostics,
+        matrix_only,
+    )
+}
+
+fn read_dosage_dense_records<R: BufRead>(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
+    source_sample_count: usize,
+    selection: &genoio_core::DenseSampleSelection,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<DenseGenotypeMatrix> {
+    let mut diagnostics = selection.diagnostics.clone();
+    let n_samples = selection.samples.len();
+    let output_variant_capacity = variant_window.map_or(0, |window| window.len);
+    let direct_sample_major = matrix_only
+        && variant_window.is_some()
+        && can_write_sample_major_directly(selection, source_sample_count, variant_filter);
+    let mut output = FastDenseOutput::new(n_samples, output_variant_capacity, direct_sample_major);
+    let mut output_variant_count = 0;
+    let mut variants = Vec::with_capacity(if matrix_only {
+        0
+    } else {
+        output_variant_capacity
+    });
+    let mut retention = RetainedVariantState::new(variant_window);
+    let mut record = noodles::Record::default();
+    let mut decoded = DsDecodeBuffers::with_capacity(selection.source_indices.len());
+
+    loop {
+        if retention.window_is_satisfied() {
+            break;
+        }
+        if reader.read_record(&mut record).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf fast record error: {error}"))
+        })? == 0
+        {
+            break;
+        }
+
+        let mut variant = variant_record_from_record(path, &record)?;
+        let partial_decision = variant_filter
+            .map(|filter| filter.partial_decision(&variant))
+            .unwrap_or(PartialFilterDecision::Accept);
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => break,
+        }
+
+        decode_ds_record(path, &record, &selection.source_indices, &mut decoded)?;
+        let needs_genotype_decision =
+            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let stats = if needs_genotype_decision {
+            Some(compute_dosage_variant_stats(
+                decoded.values(),
+                decoded.missing(),
+            )?)
+        } else {
+            None
+        };
+
+        if let Some(stats) = stats {
+            match retention.genotype_decision(
+                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
+                &mut diagnostics,
+            ) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => break,
+            }
+            if !matrix_only {
+                genoio_core::attach_variant_stats(&mut variant, stats);
+            }
+        }
+        if !matrix_only {
             variants.push(variant);
         }
 

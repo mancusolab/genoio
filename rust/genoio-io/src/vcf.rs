@@ -195,6 +195,17 @@ pub fn read_vcf_dosage_dense_windowed_with_threads(
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
+    if let Some(matrix) = fast::try_read_vcf_dosage_dense(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        matrix_only,
+        threads,
+    )? {
+        return Ok(matrix);
+    }
+
     let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_dosage_dense_records(
         path,

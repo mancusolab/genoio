@@ -117,6 +117,82 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
 }
 
 #[test]
+fn compressed_vcf_dosage_dense_uses_fast_path_semantics() {
+    let dir = unique_dir("vcf-dosage-fast-compressed");
+    let path = dir.join("dosage.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Expected alternate allele dosage\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tDS\t0.2\t1.4\t1.8
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDS\t0\t.\t0.7
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, Some(&samples), None, None, false)
+        .expect("compressed dosage VCF should decode");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.2, 0.0, 1.8, 0.7]);
+    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+    assert_eq!(
+        dense
+            .variants
+            .iter()
+            .map(|variant| variant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rs1", "rs2"]
+    );
+}
+
+#[test]
+fn compressed_vcf_dosage_rejects_invalid_ds_values() {
+    let cases = [
+        ("GT\t0/0", "FORMAT/DS"),
+        ("DS\t0.1,0.2", "multiple values"),
+        ("DS\tNaN", "finite value in [0, 2]"),
+        ("DS\tinf", "finite value in [0, 2]"),
+        ("DS\t2.1", "finite value in [0, 2]"),
+    ];
+
+    for (format_and_sample, expected) in cases {
+        let dir = unique_dir("vcf-dosage-fast-invalid");
+        let path = dir.join("dosage.vcf.gz");
+        write_bgzf_file(
+            &path,
+            &format!(
+                "\
+##fileformat=VCFv4.2
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Expected alternate allele dosage\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t10\trs1\tA\tG\t.\tPASS\t.\t{format_and_sample}
+"
+            ),
+        );
+
+        let error = genoio_io::read_vcf_dosage_dense_windowed(&path, None, None, None, false)
+            .expect_err("invalid compressed DS should fail");
+
+        assert!(
+            error.to_string().contains(expected),
+            "expected error containing {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
 fn compressed_vcf_matrix_only_uses_fast_path_semantics() {
     let dir = unique_dir("vcf-dense-fast-compressed");
     let path = dir.join("tiny.vcf.gz");

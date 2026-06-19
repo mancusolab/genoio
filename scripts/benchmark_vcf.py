@@ -20,7 +20,7 @@ SCENARIOS = (
     "indexed-region",
     "indexed-region-sample-filtered",
 )
-KINDS = ("geno", "haplo")
+KINDS = ("geno", "dosage", "haplo")
 _last_variant_metadata_length: int | None = None
 
 
@@ -35,7 +35,10 @@ def parse_args() -> argparse.Namespace:
         "--kind",
         choices=KINDS,
         default="geno",
-        help='Matrix kind to time. Defaults to genotype hardcalls; "haplo" times phased haplotype hardcalls.',
+        help=(
+            "Matrix kind to time. Defaults to genotype hardcalls; "
+            '"dosage" reads FORMAT/DS; "haplo" times phased haplotype hardcalls.'
+        ),
     )
     parser.add_argument("--sparse", action="store_true", help="Time genoio sparse CSC output.")
     parser.add_argument("--region", default="22:20000000-21000000")
@@ -69,12 +72,14 @@ def _read_options(kind: str, sparse: bool) -> dict[str, object]:
     }
     if kind == "haplo":
         options["kind"] = "haplo"
+    if kind == "dosage":
+        options["dosage"] = "dosage"
     return options
 
 
 def _genoio_label(kind: str, scenario: str, sparse: bool) -> str:
     suffix = scenario.replace("-", "_")
-    kind_part = "haplo" if kind == "haplo" else ""
+    kind_part = kind if kind != "geno" else ""
     sparse_part = "sparse" if sparse else ""
     parts = ["genoio_vcf", kind_part, sparse_part, suffix]
     return "_".join(part for part in parts if part)

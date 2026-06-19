@@ -104,6 +104,44 @@ def test_haplotype_kind_dispatches_genoio_without_cyvcf2_comparison(monkeypatch)
     assert "cyvcf2_vcf" not in output
 
 
+def test_dosage_kind_dispatches_genoio_without_cyvcf2_comparison(monkeypatch) -> None:
+    observed_options = []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_vcf.py",
+            "--scenario",
+            "matrix-only",
+            "--kind",
+            "dosage",
+            "--backend",
+            "both",
+            "--max-variants",
+            "3",
+            "--repeats",
+            "1",
+        ],
+    )
+
+    def read_matrix(args) -> np.ndarray:
+        observed_options.append(benchmark_vcf._read_options(args.kind, args.sparse))
+        return _matrix(1.0)
+
+    monkeypatch.setattr(benchmark_vcf, "read_genoio_matrix_only", read_matrix)
+    monkeypatch.setattr(benchmark_vcf, "read_cyvcf2", lambda args: _matrix(1.0))
+
+    output = _capture_stdout(benchmark_vcf.main)
+    assert observed_options == [
+        {"missing": "nan", "dtype": np.float32, "sparse": False, "dosage": "dosage"},
+        {"missing": "nan", "dtype": np.float32, "sparse": False, "dosage": "dosage"},
+    ]
+    assert "genoio_vcf_dosage_matrix_only" in output
+    assert "skipped cyvcf2 comparison for dosage matrix-only" in output
+    assert "cyvcf2_vcf" not in output
+
+
 def test_all_scenario_names_each_genoio_reader(monkeypatch) -> None:
     def read_with_variants(args) -> np.ndarray:
         benchmark_vcf._last_variant_metadata_length = 3
