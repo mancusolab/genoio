@@ -4,14 +4,18 @@
 //! hardcall reads for common biallelic diploid VCFs, and lets the htslib path
 //! remain the correctness path for unsupported operations.
 
+// pattern: Mixed (unavoidable)
+// Reason: This performance path keeps reader setup close to decode routing so
+// buffer ownership and htslib fallback boundaries stay explicit.
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrix, GenoioError, PartialFilterDecision,
-    SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
+    PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -22,7 +26,7 @@ use self::gt::{decode_gt_record, GtDecodeBuffers, GtStatsMode};
 use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, FastDenseOutput};
 use self::record::variant_record_from_record;
-use self::sparse::read_sparse_records;
+use self::sparse::{read_haplotype_sparse_records, read_sparse_records};
 
 use super::is_compressed_vcf;
 
@@ -33,6 +37,14 @@ mod record;
 mod sparse;
 
 const VCF_FAST_BUFFER_SIZE: usize = 1 << 20;
+
+type FastVcfReader = noodles::io::Reader<BufReader<MultiGzDecoder<File>>>;
+
+struct FastVcfInput {
+    reader: FastVcfReader,
+    source_sample_count: usize,
+    selection: DenseSampleSelection,
+}
 
 pub(super) fn try_read_vcf_dense(
     path: &Path,
@@ -49,15 +61,17 @@ pub(super) fn try_read_vcf_dense(
         return Ok(None);
     };
 
-    let mut reader = open_lazy_reader(path)?;
-    let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let FastVcfInput {
+        mut reader,
+        source_sample_count,
+        selection,
+    } = open_fast_vcf_input(path, requested_samples)?;
 
     read_dense_records(
         path,
         variant_filter,
         variant_window,
-        all_samples.len(),
+        source_sample_count,
         &selection,
         &mut reader,
     )
@@ -75,11 +89,34 @@ pub(super) fn try_read_vcf_sparse(
         return Ok(None);
     }
 
-    let mut reader = open_lazy_reader(path)?;
-    let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    let FastVcfInput {
+        mut reader,
+        selection,
+        ..
+    } = open_fast_vcf_input(path, requested_samples)?;
 
     read_sparse_records(path, variant_filter, variant_window, selection, &mut reader).map(Some)
+}
+
+pub(super) fn try_read_vcf_haplotypes_sparse(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    threads: Option<usize>,
+) -> Result<Option<SparseGenotypeMatrix>> {
+    if !is_fast_vcf_supported(path, variant_filter, threads) {
+        return Ok(None);
+    }
+
+    let FastVcfInput {
+        mut reader,
+        selection,
+        ..
+    } = open_fast_vcf_input(path, requested_samples)?;
+
+    read_haplotype_sparse_records(path, variant_filter, variant_window, selection, &mut reader)
+        .map(Some)
 }
 
 fn is_fast_dense_supported(
@@ -101,7 +138,19 @@ fn is_fast_vcf_supported(
         && !variant_filter.is_some_and(VariantFilter::has_region_predicate)
 }
 
-fn open_lazy_reader(path: &Path) -> Result<noodles::io::Reader<BufReader<MultiGzDecoder<File>>>> {
+fn open_fast_vcf_input(path: &Path, requested_samples: Option<&[String]>) -> Result<FastVcfInput> {
+    let mut reader = open_lazy_reader(path)?;
+    let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
+    let source_sample_count = all_samples.len();
+    let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
+    Ok(FastVcfInput {
+        reader,
+        source_sample_count,
+        selection,
+    })
+}
+
+fn open_lazy_reader(path: &Path) -> Result<FastVcfReader> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
     let reader = BufReader::with_capacity(VCF_FAST_BUFFER_SIZE, MultiGzDecoder::new(file));

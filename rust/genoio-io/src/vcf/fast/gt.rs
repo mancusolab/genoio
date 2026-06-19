@@ -4,6 +4,8 @@
 //! FORMAT semantics stay on the htslib path, where correctness coverage is
 //! better than a custom parser would be.
 
+// pattern: Functional Core
+
 use std::path::Path;
 
 use genoio_core::{variant_stats_from_counts, GenoioError, VariantStats};
@@ -15,6 +17,57 @@ pub(super) struct GtDecodeBuffers {
     values: Vec<f32>,
     missing: Vec<bool>,
     stats: Option<VariantStats>,
+}
+
+pub(super) struct HaplotypeSparseDecodeBuffers {
+    a1_rows: Vec<usize>,
+    n_rows: usize,
+    has_missing: bool,
+    stats: Option<VariantStats>,
+}
+
+impl HaplotypeSparseDecodeBuffers {
+    /// Allocate sparse haplotype scratch once and reuse it for every record.
+    pub(super) fn with_capacity(n_samples: usize) -> Self {
+        Self {
+            a1_rows: Vec::with_capacity(n_samples * 2),
+            n_rows: n_samples * 2,
+            has_missing: false,
+            stats: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.a1_rows.clear();
+        self.has_missing = false;
+        self.stats = None;
+    }
+
+    fn push_call(&mut self, row_base: usize, call: HaplotypeCall) {
+        for (offset, allele) in call.alleles.iter().enumerate() {
+            match allele {
+                Some(1) => self.a1_rows.push(row_base + offset),
+                Some(_) => {}
+                None => self.has_missing = true,
+            }
+        }
+    }
+
+    pub(super) fn a1_rows(&self) -> &[usize] {
+        &self.a1_rows
+    }
+
+    pub(super) fn n_rows(&self) -> usize {
+        self.n_rows
+    }
+
+    pub(super) fn has_missing(&self) -> bool {
+        self.has_missing
+    }
+
+    pub(super) fn stats(&self) -> Option<VariantStats> {
+        self.stats
+    }
 }
 
 impl GtDecodeBuffers {
@@ -93,18 +146,74 @@ pub(super) fn decode_gt_record(
     match stats_mode {
         GtStatsMode::Compute => {
             let mut counts = GtCounts::default();
-            scan_selected_gt(sample_fields, gt_index, source_indices, &mut |call| {
+            scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
+                let call = decode_gt_token(token)?;
                 counts.record(call);
                 output.values.push(call.value);
                 output.missing.push(call.is_missing);
+                Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
             output.stats = Some(counts.variant_stats()?);
         }
         GtStatsMode::Skip => {
-            scan_selected_gt(sample_fields, gt_index, source_indices, &mut |call| {
+            scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
+                let call = decode_gt_token(token)?;
                 output.values.push(call.value);
                 output.missing.push(call.is_missing);
+                Ok(())
+            })
+            .map_err(|reason| gt_error(path, &record_location(), reason))?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn decode_phased_gt_sparse_record(
+    path: &Path,
+    record: &noodles::Record,
+    source_indices: &[usize],
+    stats_mode: GtStatsMode,
+    output: &mut HaplotypeSparseDecodeBuffers,
+) -> Result<()> {
+    output.clear();
+    let samples = record.samples();
+    let sample_fields = samples.as_ref().as_bytes();
+    let record_location = || {
+        format!(
+            "{}:{}",
+            record.reference_sequence_name(),
+            record_pos(record)
+        )
+    };
+    let gt_index = gt_key_index(sample_fields).ok_or_else(|| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf record {} is missing FORMAT/GT", record_location()),
+        )
+    })?;
+
+    match stats_mode {
+        GtStatsMode::Compute => {
+            let mut counts = GtCounts::default();
+            let mut row_base = 0_usize;
+            scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
+                let call = decode_phased_gt_token(token)?;
+                counts.record_class(call.genotype_class()?);
+                output.push_call(row_base, call);
+                row_base += 2;
+                Ok(())
+            })
+            .map_err(|reason| gt_error(path, &record_location(), reason))?;
+            output.stats = Some(counts.variant_stats()?);
+        }
+        GtStatsMode::Skip => {
+            let mut row_base = 0_usize;
+            scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
+                let call = decode_phased_gt_token(token)?;
+                output.push_call(row_base, call);
+                row_base += 2;
+                Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
         }
@@ -169,7 +278,11 @@ struct GtCounts {
 
 impl GtCounts {
     fn record(&mut self, call: GtCall) {
-        match call.class {
+        self.record_class(call.class);
+    }
+
+    fn record_class(&mut self, class: GtClass) {
+        match class {
             GtClass::HomRef => self.hom_ref += 1,
             GtClass::Het => self.het += 1,
             GtClass::HomAlt => self.hom_alt += 1,
@@ -182,11 +295,11 @@ impl GtCounts {
     }
 }
 
-fn scan_selected_gt(
+fn scan_selected_gt_tokens(
     sample_fields: &[u8],
     gt_index: usize,
     source_indices: &[usize],
-    emit: &mut impl FnMut(GtCall),
+    emit: &mut impl FnMut(&[u8]) -> std::result::Result<(), &'static str>,
 ) -> std::result::Result<(), &'static str> {
     let Some(format_end) = sample_fields.iter().position(|&b| b == b'\t') else {
         return Err("record has FORMAT but no sample columns");
@@ -203,7 +316,7 @@ fn scan_selected_gt(
         let field_end = next_delimiter(sample_fields, field_start, b'\t');
         if sample_index == target_index {
             let sample = &sample_fields[field_start..field_end];
-            emit(decode_gt_sample(sample, gt_index)?);
+            emit(gt_sample_token(sample, gt_index)?)?;
             selected_index += 1;
         }
         sample_index += 1;
@@ -217,9 +330,8 @@ fn scan_selected_gt(
     Ok(())
 }
 
-fn decode_gt_sample(sample: &[u8], gt_index: usize) -> std::result::Result<GtCall, &'static str> {
-    let token = nth_colon_field(sample, gt_index).ok_or("sample is missing GT value")?;
-    decode_gt_token(token)
+fn gt_sample_token(sample: &[u8], gt_index: usize) -> std::result::Result<&[u8], &'static str> {
+    nth_colon_field(sample, gt_index).ok_or("sample is missing GT value")
 }
 
 fn nth_colon_field(sample: &[u8], index: usize) -> Option<&[u8]> {
@@ -266,6 +378,50 @@ fn decode_gt_token(token: &[u8]) -> std::result::Result<GtCall, &'static str> {
     }
 }
 
+#[derive(Debug)]
+struct HaplotypeCall {
+    alleles: [Option<u8>; 2],
+}
+
+impl HaplotypeCall {
+    fn genotype_class(&self) -> std::result::Result<GtClass, &'static str> {
+        match self.alleles {
+            [None, _] | [_, None] => Ok(GtClass::Missing),
+            [Some(0), Some(0)] => Ok(GtClass::HomRef),
+            [Some(1), Some(1)] => Ok(GtClass::HomAlt),
+            [Some(0), Some(1)] | [Some(1), Some(0)] => Ok(GtClass::Het),
+            _ => Err("expected diploid phased biallelic hardcall"),
+        }
+    }
+}
+
+fn decode_phased_gt_token(token: &[u8]) -> std::result::Result<HaplotypeCall, &'static str> {
+    if token.len() != 3 {
+        return Err("expected diploid phased biallelic hardcall");
+    }
+    if token[1] == b'/' {
+        return Err("contains an unphased GT separator in a retained haplotype variant");
+    }
+    if token[1] != b'|' {
+        return Err("expected diploid phased biallelic hardcall");
+    }
+
+    let first = decode_phased_allele(token[0])?;
+    let second = decode_phased_allele(token[2])?;
+    Ok(HaplotypeCall {
+        alleles: [first, second],
+    })
+}
+
+fn decode_phased_allele(raw: u8) -> std::result::Result<Option<u8>, &'static str> {
+    match raw {
+        b'0' => Ok(Some(0)),
+        b'1' => Ok(Some(1)),
+        b'.' => Ok(None),
+        _ => Err("expected diploid phased biallelic hardcall"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,11 +436,14 @@ mod tests {
     #[test]
     fn scan_selected_gt_decodes_source_order_subset() {
         let mut calls = Vec::new();
-        scan_selected_gt(
+        scan_selected_gt_tokens(
             b"DP:GT\t9:0/0\t8:0/1\t7:1/1\t6:./.",
             1,
             &[1, 3],
-            &mut |call| calls.push(call),
+            &mut |token| {
+                calls.push(decode_gt_token(token)?);
+                Ok(())
+            },
         )
         .expect("selected GTs should decode");
 
@@ -306,5 +465,18 @@ mod tests {
         assert!(decode_gt_token(b"1/2").is_err());
         assert!(decode_gt_token(b"0").is_err());
         assert!(decode_gt_token(b"0/0/1").is_err());
+    }
+
+    #[test]
+    fn decode_phased_gt_token_rejects_unphased_separator() {
+        assert!(decode_phased_gt_token(b"0/1")
+            .expect_err("unphased separator should fail")
+            .contains("unphased"));
+        let call = decode_phased_gt_token(b"1|0").expect("phased GT should decode");
+        assert_eq!(call.alleles, [Some(1), Some(0)]);
+        assert_eq!(
+            call.genotype_class().expect("class should compute"),
+            GtClass::Het
+        );
     }
 }

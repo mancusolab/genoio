@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
-    flip_values_to_minor_allele, reject_sparse_missing_values, select_samples_source_order,
-    variant_stats_from_counts, DenseGenotypeMatrix, GenoioError, MetadataOutput,
-    PartialFilterDecision, RegionPredicate, SampleRecord, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantStats, VariantWindow,
+    flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
+    reject_sparse_missing_values, select_samples_source_order, variant_stats_from_counts,
+    DenseGenotypeMatrix, GenoioError, MetadataOutput, PartialFilterDecision, RegionPredicate,
+    SampleRecord, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantStats, VariantWindow,
 };
 use rust_htslib::bcf::{
     record::{GenotypeAllele, Numeric},
@@ -392,6 +393,16 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
     }
 
     reject_unindexed_compressed_region(path, variant_filter)?;
+    if let Some(matrix) = fast::try_read_vcf_haplotypes_sparse(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        threads,
+    )? {
+        return Ok(matrix);
+    }
+
     let (mut reader, original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
     read_vcf_haplotypes_sparse_records(
         path,
@@ -1039,12 +1050,9 @@ fn read_vcf_haplotypes_sparse_records<R: Read>(
         }
         let decoded = decode_phased_haplotype_record(path, &record, &selection.source_indices)?;
         reject_sparse_missing_values(&decoded.haplotype_missing)?;
-        append_sparse_column(
-            &mut indptr,
-            &mut indices,
-            &mut data,
-            &decoded.haplotype_values,
-        );
+        let mut haplotype_values = decoded.haplotype_values;
+        flip_haplotype_values_to_minor_allele(&mut haplotype_values, &mut variant);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &haplotype_values);
         variants.push(variant);
     }
 

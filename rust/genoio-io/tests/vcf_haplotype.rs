@@ -1,6 +1,7 @@
 // pattern: Imperative Shell
 
 use std::fs;
+use std::io::Write;
 
 mod common;
 
@@ -42,6 +43,17 @@ fn mixed_phase_stat_filter_vcf() -> String {
     .to_string()
 }
 
+fn phased_alt_major_vcf() -> String {
+    "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs_alt_major\tA\tG\t.\tPASS\t.\tGT\t1|1\t1|0
+"
+    .to_string()
+}
+
 fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
     let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
     for col in 0..sparse.n_cols {
@@ -51,6 +63,14 @@ fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
         }
     }
     dense
+}
+
+fn write_bgzf_file(path: &std::path::Path, contents: &str) {
+    let file = fs::File::create(path).expect("test fixture should be created");
+    let mut writer = noodles_bgzf::io::Writer::new(file);
+    writer
+        .write_all(contents.as_bytes())
+        .expect("test fixture should be compressed");
 }
 
 #[test]
@@ -148,6 +168,83 @@ fn phased_vcf_haplotype_sparse_reconstructs_dense_values() {
     assert_eq!(
         csc_to_dense(&sparse),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn phased_vcf_haplotype_sparse_flips_common_alt_allele() {
+    let dir = unique_dir("vcf-haplo-sparse-flip");
+    let path = dir.join("phased.vcf");
+    fs::write(&path, phased_alt_major_vcf()).expect("fixture should be written");
+
+    let sparse =
+        genoio_io::read_vcf_haplotypes_sparse(&path, None, None).expect("haplotypes should decode");
+
+    assert_eq!(sparse.indptr, vec![0, 1]);
+    assert_eq!(sparse.indices, vec![3]);
+    assert_eq!(sparse.data, vec![1.0]);
+    assert!(sparse.variants[0].flipped);
+    assert_eq!(sparse.variants[0].a0, "G");
+    assert_eq!(sparse.variants[0].a1, "A");
+}
+
+#[test]
+fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
+    let dir = unique_dir("vcf-haplo-sparse-fast-compressed");
+    let path = dir.join("phased.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DP\t1|1:7\t1|0:8\t0|1:9
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDP:GT\t5:1|0\t6:0|1\t7:0|0
+1\t30\trs3\tC\tA\t.\tPASS\t.\tGT\t0|0\t0|0\t0|0
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("MAF filter should parse");
+
+    let sparse = genoio_io::read_vcf_haplotypes_sparse_windowed(
+        &path,
+        Some(&samples),
+        Some(&filter),
+        Some(genoio_core::VariantWindow { start: 0, len: 2 }),
+    )
+    .expect("compressed haplotype sparse VCF should decode");
+
+    assert_eq!(sparse.n_rows, 4);
+    assert_eq!(sparse.n_cols, 2);
+    assert_eq!(sparse.indptr, vec![0, 1, 2]);
+    assert_eq!(sparse.indices, vec![2, 0]);
+    assert_eq!(sparse.data, vec![1.0, 1.0]);
+    assert_eq!(
+        sparse
+            .samples
+            .iter()
+            .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
+            .collect::<Vec<_>>(),
+        vec![
+            ("S1", Some(0)),
+            ("S1", Some(1)),
+            ("S3", Some(0)),
+            ("S3", Some(1)),
+        ]
+    );
+    assert_eq!(
+        sparse
+            .variants
+            .iter()
+            .map(|variant| (variant.id.as_str(), variant.flipped))
+            .collect::<Vec<_>>(),
+        vec![("rs1", true), ("rs2", false)]
     );
 }
 
