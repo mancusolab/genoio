@@ -9,20 +9,6 @@ use crate::error::Result;
 
 use super::super::finite_qual;
 
-pub(super) fn variant_record_from_record(
-    path: &Path,
-    record: &noodles::Record,
-) -> Result<VariantRecord> {
-    let variant = metadata_variant_record_from_record(path, record)?;
-    validate_biallelic_record(
-        path,
-        &variant.chrom,
-        variant.pos,
-        variant.alt_allele.as_deref(),
-    )?;
-    Ok(variant)
-}
-
 pub(super) fn metadata_variant_record_from_record(
     path: &Path,
     record: &noodles::Record,
@@ -96,9 +82,26 @@ fn first_alt_allele(alt: &str) -> Option<String> {
     }
 }
 
+pub(super) fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()> {
+    validate_biallelic_record(
+        path,
+        &variant.chrom,
+        variant.pos,
+        variant.alt_allele.as_deref(),
+    )
+}
+
 fn validate_biallelic_record(path: &Path, chrom: &str, pos: u32, alt: Option<&str>) -> Result<()> {
     if alt.is_some_and(|alt| !alt.is_empty() && !alt.contains(',')) {
         return Ok(());
+    }
+    if alt.is_some_and(|alt| alt.contains(',')) {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!(
+                "vcf dense reads require biallelic records; record {chrom}:{pos} has multi-ALT alleles: multi-ALT records are not supported"
+            ),
+        ));
     }
     Err(GenoioError::invalid_source(
         path,

@@ -18,6 +18,15 @@ fn write_bgzf_file(path: &Path, contents: &str) {
         .expect("test fixture should be compressed");
 }
 
+fn contradictory_chrom_filter() -> genoio_core::VariantFilter {
+    genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "and",
+        "left": {"op": "predicate", "name": "chrom", "params": {"value": "1"}},
+        "right": {"op": "predicate", "name": "chrom", "params": {"value": "2"}}
+    }))
+    .expect("contradictory chrom filter should parse")
+}
+
 #[test]
 fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
     let dir = unique_dir("vcf-dense-values");
@@ -56,6 +65,70 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
             .collect::<Vec<_>>(),
         vec!["rs1", "rs2"]
     );
+}
+
+#[test]
+fn plain_vcf_dense_uses_permissive_fast_header_path() {
+    let dir = unique_dir("vcf-dense-fast-plain");
+    let path = dir.join("tiny.vcf");
+    write_file(
+        &path,
+        "\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DP\t0/0:7\t0/1:8\t1/1:9
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDP:GT\t5:0/1\t6:0/0\t7:./.
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+
+    let dense = genoio_io::read_vcf_dense(&path, Some(&samples), None)
+        .expect("plain VCF should decode through the permissive fast path");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+}
+
+#[test]
+fn plain_vcf_always_false_filter_uses_fast_empty_path() {
+    let dir = unique_dir("vcf-dense-fast-plain-empty");
+    let path = dir.join("tiny.vcf");
+    write_file(
+        &path,
+        "\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\"
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+this record is intentionally not valid VCF and should not be decoded
+",
+    );
+    let filter = contradictory_chrom_filter();
+
+    let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter))
+        .expect("always-false VCF filter should only need samples");
+
+    assert_eq!(dense.n_samples, 2);
+    assert_eq!(dense.n_variants, 0);
+    assert!(dense.values.is_empty());
+    assert!(dense.missing_mask.is_empty());
+    assert_eq!(
+        dense
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S2"]
+    );
+    assert!(dense.variants.is_empty());
 }
 
 #[test]

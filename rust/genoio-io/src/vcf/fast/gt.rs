@@ -68,10 +68,6 @@ impl HaplotypeDenseDecodeBuffers {
     pub(super) fn missing(&self) -> &[bool] {
         &self.missing
     }
-
-    pub(super) fn stats(&self) -> Option<VariantStats> {
-        self.stats
-    }
 }
 
 impl HaplotypeSparseDecodeBuffers {
@@ -111,10 +107,6 @@ impl HaplotypeSparseDecodeBuffers {
 
     pub(super) fn has_missing(&self) -> bool {
         self.has_missing
-    }
-
-    pub(super) fn stats(&self) -> Option<VariantStats> {
-        self.stats
     }
 }
 
@@ -439,8 +431,29 @@ fn decode_gt_token(token: &[u8]) -> std::result::Result<GtCall, &'static str> {
             class: GtClass::HomAlt,
         }),
         b"./." | b".|." => Ok(GtCall::missing()),
+        _ if is_non_diploid_gt_token(token) => Err("non-diploid GT"),
+        _ if is_multiallelic_gt_token(token) => Err("multiallelic GT"),
         _ => Err("expected diploid biallelic hardcall"),
     }
+}
+
+fn is_non_diploid_gt_token(token: &[u8]) -> bool {
+    let allele_count = token
+        .split(|byte| matches!(byte, b'/' | b'|'))
+        .filter(|allele| !allele.is_empty())
+        .count();
+    allele_count != 2
+}
+
+fn is_multiallelic_gt_token(token: &[u8]) -> bool {
+    token
+        .split(|byte| matches!(byte, b'/' | b'|'))
+        .any(|allele| {
+            std::str::from_utf8(allele)
+                .ok()
+                .and_then(|allele| allele.parse::<u32>().ok())
+                .is_some_and(|index| index > 1)
+        })
 }
 
 #[derive(Debug)]

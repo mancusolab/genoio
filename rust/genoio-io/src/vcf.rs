@@ -104,6 +104,11 @@ pub fn read_vcf_dense_windowed_with_threads(
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        if let Some(matrix) =
+            fast::try_empty_vcf_dense(path, requested_samples, matrix_only, threads)?
+        {
+            return Ok(matrix);
+        }
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_dense(path, reader.header(), requested_samples, matrix_only);
     }
@@ -187,6 +192,11 @@ pub fn read_vcf_dosage_dense_windowed_with_threads(
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        if let Some(matrix) =
+            fast::try_empty_vcf_dense(path, requested_samples, matrix_only, threads)?
+        {
+            return Ok(matrix);
+        }
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_dense(path, reader.header(), requested_samples, matrix_only);
     }
@@ -263,6 +273,9 @@ pub fn read_vcf_sparse_windowed_with_threads(
     threads: Option<usize>,
 ) -> Result<SparseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        if let Some(matrix) = fast::try_empty_vcf_sparse(path, requested_samples, threads)? {
+            return Ok(matrix);
+        }
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_sparse(path, reader.header(), requested_samples);
     }
@@ -341,6 +354,11 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads(
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        if let Some(matrix) =
+            fast::try_empty_vcf_haplotypes_dense(path, requested_samples, matrix_only, threads)?
+        {
+            return Ok(matrix);
+        }
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_haplotypes_dense(path, reader.header(), requested_samples, matrix_only);
     }
@@ -417,6 +435,11 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
     threads: Option<usize>,
 ) -> Result<SparseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        if let Some(matrix) =
+            fast::try_empty_vcf_haplotypes_sparse(path, requested_samples, threads)?
+        {
+            return Ok(matrix);
+        }
         let (reader, _original_source_indices) = open_vcf_reader(path, threads, requested_samples)?;
         return empty_vcf_haplotypes_sparse(path, reader.header(), requested_samples);
     }

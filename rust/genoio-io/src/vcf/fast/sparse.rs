@@ -1,4 +1,4 @@
-//! Sparse CSC output for the compressed VCF fast path.
+//! Sparse CSC output for the VCF fast path.
 
 // pattern: Mixed (unavoidable)
 // Reason: This hot path combines lazy VCF record IO with direct CSC emission to
@@ -23,7 +23,7 @@ use super::gt::{
     decode_gt_record, decode_phased_gt_sparse_record, GtDecodeBuffers, GtStatsMode,
     HaplotypeSparseDecodeBuffers,
 };
-use super::record::variant_record_from_record;
+use super::record::{metadata_variant_record_from_record, validate_biallelic_variant};
 
 pub(super) fn read_sparse_records<R: BufRead>(
     path: &Path,
@@ -59,7 +59,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_record(path, &record)?;
+        let mut variant = metadata_variant_record_from_record(path, &record)?;
         let partial_decision = variant_filter
             .map(|filter| filter.partial_decision(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
@@ -68,6 +68,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
             MetadataRetentionAction::Skip => continue,
             MetadataRetentionAction::Stop => break,
         }
+        validate_biallelic_variant(path, &variant)?;
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
@@ -141,6 +142,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = noodles::Record::default();
     let mut decoded = HaplotypeSparseDecodeBuffers::with_capacity(source_indices.len());
+    let mut stats_decoded = GtDecodeBuffers::with_capacity(source_indices.len());
 
     loop {
         if retention.window_is_satisfied() {
@@ -153,7 +155,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_record(path, &record)?;
+        let mut variant = metadata_variant_record_from_record(path, &record)?;
         let partial_decision = variant_filter
             .map(|filter| filter.partial_decision(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
@@ -162,19 +164,21 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             MetadataRetentionAction::Skip => continue,
             MetadataRetentionAction::Stop => break,
         }
+        validate_biallelic_variant(path, &variant)?;
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        decode_phased_gt_sparse_record(
-            path,
-            &record,
-            &source_indices,
-            GtStatsMode::from_needed(needs_genotype_decision),
-            &mut decoded,
-        )?;
-
         if needs_genotype_decision {
-            let stats = decoded.stats();
+            // Apply genotype-stat filters before phased decoding so rejected
+            // unphased records do not fail a haplotype sparse read.
+            decode_gt_record(
+                path,
+                &record,
+                &source_indices,
+                GtStatsMode::Compute,
+                &mut stats_decoded,
+            )?;
+            let stats = stats_decoded.stats();
             match retention.genotype_decision(
                 variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
                 &mut diagnostics,
@@ -188,6 +192,13 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             }
         }
 
+        decode_phased_gt_sparse_record(
+            path,
+            &record,
+            &source_indices,
+            GtStatsMode::Skip,
+            &mut decoded,
+        )?;
         reject_sparse_missing(decoded.has_missing())?;
         append_haplotype_minor_sparse_column(
             &mut indptr,
