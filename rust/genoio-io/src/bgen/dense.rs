@@ -1,5 +1,8 @@
 // pattern: Imperative Shell
 //! BGEN diploid dosage dense read orchestration.
+//!
+//! The loop combines metadata filtering, optional `.bgi` region cursors, dosage
+//! decode buffers, and retained-window accounting for sample-by-variant output.
 
 use std::path::Path;
 

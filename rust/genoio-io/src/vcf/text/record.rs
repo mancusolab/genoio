@@ -1,4 +1,7 @@
 //! Convert noodles lazy records into genoio metadata records.
+//!
+//! The conversion keeps REF/ALT orientation, finite QUAL values, and concrete
+//! region checks in one place for text VCF and BCF callers.
 
 // pattern: Functional Core
 

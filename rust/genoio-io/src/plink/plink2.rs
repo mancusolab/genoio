@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
-//! PLINK2 facade and shared orchestration helpers.
+//! PLINK2 reader facade and shared filter helpers.
+//!
+//! Public entry points are re-exported from dense, dosage, haplotype, and sparse
+//! modules. Shared helpers here keep genotype-stat filter behavior consistent
+//! across those read shapes.
 
 use std::path::Path;
 

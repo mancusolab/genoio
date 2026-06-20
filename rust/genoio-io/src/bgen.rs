@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! BGEN reader facade and metadata entry point.
+//!
+//! The facade exposes the public BGEN API while submodules handle header
+//! parsing, index lookup, probability decoding, genotype-filter stats, and dense
+//! output assembly.
 
 use std::path::Path;
 

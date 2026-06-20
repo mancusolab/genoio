@@ -1,4 +1,9 @@
 // pattern: Functional Core
+//! Packed hard-call storage and genotype-stat evaluation.
+//!
+//! Readers keep biallelic diploid hard calls in two-bit words while decoding.
+//! This module owns expansion into dense buffers, sparse-compatible missing
+//! checks, and the stats used by genotype filters.
 
 use genoio_core::{
     variant_stats_from_counts, GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan,
@@ -9,6 +14,11 @@ use crate::error::Result;
 
 pub(crate) const HARDCALL_BATCH_SIZE: usize = 64;
 
+/// Two-bit hard-call buffer in source-sample order.
+///
+/// Codes use the PLINK/PGEN convention after normalization: 0, 1, and 2 are
+/// called genotypes, and 3 is missing. Expansion helpers convert these codes to
+/// `f32` values and missing masks for selected samples.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PackedHardcalls {
     words: Vec<u64>,
@@ -453,6 +463,11 @@ pub(crate) fn evaluate_packed_hardcall_filter(
     Ok((retain, Some(stats)))
 }
 
+/// Small batch of packed variants waiting for sample-major expansion.
+///
+/// Hard-call dense readers decode variants one at a time but write the final
+/// matrix by sample rows. Batching keeps the transpose local without storing the
+/// whole variant-major matrix.
 #[derive(Debug, Clone)]
 pub(crate) struct HardcallBatch {
     variants: Vec<PackedHardcalls>,

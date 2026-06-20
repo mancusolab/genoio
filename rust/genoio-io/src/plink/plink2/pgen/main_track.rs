@@ -1,5 +1,9 @@
 // pattern: Functional Core
 //! PGEN hard-call main-track decompression.
+//!
+//! Main-track records provide the hard-call baseline for dense, sparse, dosage,
+//! and haplotype reads. This module handles uncompressed, one-bit, LD-compressed,
+//! and difflist encodings.
 
 use std::path::Path;
 

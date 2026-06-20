@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! VCF and BCF reader facade.
+//!
+//! The facade routes `.bcf` paths to the typed BCF backend and all other paths
+//! to the text VCF backend. Public functions preserve one contract for dense,
+//! sparse, dosage, haplotype, metadata, threaded, and windowed reads.
 
 use std::path::Path;
 

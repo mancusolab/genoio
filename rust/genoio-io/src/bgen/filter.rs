@@ -1,5 +1,9 @@
 // pattern: Functional Core
 //! BGEN dosage filter evaluation helpers.
+//!
+//! Matrix-only reads can often decide genotype-stat filters from dosage counts
+//! without building full `VariantStats`. Metadata-returning reads still attach
+//! complete stats to retained variants.
 
 use std::path::Path;
 

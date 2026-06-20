@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Query same-path `.bgi` indexes for BGEN region pushdown.
+//!
+//! BGEN indexes are SQLite databases keyed by chromosome and position. This
+//! module returns byte ranges in source order and validates that indexed reads
+//! seek to the expected variant payloads.
 
 use std::io::Seek;
 use std::path::{Path, PathBuf};

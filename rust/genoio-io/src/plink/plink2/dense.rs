@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Dense hard-call PLINK2 read orchestration.
+//!
+//! This path decodes PGEN hard calls, evaluates metadata and genotype-stat
+//! filters, and writes retained variants into sample-major dense matrices.
+//! Matrix-only windows can skip PVAR parsing when filter semantics allow it.
 
 use std::path::Path;
 

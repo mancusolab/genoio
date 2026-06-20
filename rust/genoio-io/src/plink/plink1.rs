@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! PLINK1 BED/BIM/FAM readers.
+//!
+//! This module coordinates companion-file validation, sample selection, variant
+//! filtering, and dense or sparse output assembly. Binary BED decoding and text
+//! metadata parsing live in submodules.
 
 use std::fs::{self, File};
 use std::path::Path;

@@ -1,4 +1,9 @@
 // pattern: Functional Core
+//! Shared PLINK metadata normalization.
+//!
+//! PLINK1 and PLINK2 use different missing-value tokens in companion text
+//! files. The parsers call these helpers before constructing core metadata
+//! records.
 
 pub(crate) const PLINK1_MISSING_VALUES: &[&str] = &["0"];
 pub(crate) const PLINK2_MISSING_VALUES: &[&str] = &["0", ".", "NA"];

@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Decode BGEN Layout 2 probability payloads into dense dosage buffers.
+//!
+//! The decoder validates sample counts, ploidy, phase flags, bit depth, and
+//! probability sums before producing dosage values. Fast paths write directly
+//! into caller-owned buffers when the BGEN shape is supported.
 
 use std::io::Read;
 use std::path::Path;
@@ -47,6 +51,7 @@ pub(super) struct ProbabilityPayloadBuffers {
     pub(super) compressed_payload: Vec<u8>,
 }
 
+/// Reused dosage decode scratch for selected diploid samples.
 #[derive(Default)]
 pub(super) struct DosageDecodeBuffers {
     pub(super) probability: ProbabilityPayloadBuffers,
@@ -63,6 +68,10 @@ pub(super) struct SampleMajorSlotMut<'a> {
     pub(super) variant_index: usize,
 }
 
+/// Reused decode scratch for phased haplotype output and collapsed dosages.
+///
+/// The selected haplotype buffers feed retained output. The collapsed buffers
+/// feed genotype-stat filters that operate on diploid dosage.
 #[derive(Default)]
 pub(super) struct HaplotypeDecodeBuffers {
     pub(super) probability: ProbabilityPayloadBuffers,

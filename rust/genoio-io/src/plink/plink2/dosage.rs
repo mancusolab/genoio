@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Dense dosage PLINK2 read orchestration.
+//!
+//! Dosage reads start from hard-call main-track values and apply PGEN dosage
+//! overlays before filter evaluation. Output is staged variant-major because
+//! dosage overlays naturally decode one retained variant at a time.
 
 use std::path::Path;
 

@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! PGEN header parsing and payload shape validation.
+//!
+//! Headers determine fixed-width versus variable-width layout, sample and
+//! variant counts, per-variant record types, and block offsets. Unsupported PGEN
+//! modes are rejected before callers allocate decode buffers.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

@@ -1,4 +1,8 @@
 //! Sparse CSC output for the text VCF backend.
+//!
+//! Sparse text reads decode selected GT or haplotype tokens and append retained
+//! variants directly to CSC buffers. Missing retained calls are rejected because
+//! the sparse matrix format stores values only.
 
 // pattern: Mixed (unavoidable)
 // Reason: This hot path combines lazy VCF record IO with direct CSC emission to

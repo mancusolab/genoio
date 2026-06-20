@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Parse BGEN headers, sample identifiers, and variant metadata records.
+//!
+//! Header parsing validates the Layout 2 subset supported by this crate. Variant
+//! metadata reads skip probability blocks so metadata-only calls avoid dosage
+//! allocation and decompression work.
 
 use std::collections::HashSet;
 use std::fs;

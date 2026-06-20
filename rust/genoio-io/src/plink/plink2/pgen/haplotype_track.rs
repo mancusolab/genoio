@@ -1,5 +1,8 @@
 // pattern: Mixed (unavoidable)
 //! PGEN haplotype-track reads and auxiliary phase/dosage decode.
+//!
+//! The helpers decode phase-present bitmaps, phase values, and phased dosage
+//! components, then map selected samples into haplotype-row output.
 // Reason: Haplotype reads share the variable-width record buffer and LD state
 // with main-track decode, so the IO cursor and auxiliary-track decode stay
 // together to avoid copying record payloads.

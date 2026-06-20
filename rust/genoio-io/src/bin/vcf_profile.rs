@@ -1,3 +1,9 @@
+//! Local profiling binary for VCF and BCF read paths.
+//!
+//! The binary runs one reader scenario repeatedly and prints matrix dimensions,
+//! checksum, missing count, and elapsed time. It is intended for development
+//! profiling, not as a stable command-line interface.
+
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;

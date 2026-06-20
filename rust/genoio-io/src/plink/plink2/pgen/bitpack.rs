@@ -1,5 +1,9 @@
 // pattern: Functional Core
 //! Bit and variable-width integer helpers for PGEN record payloads.
+//!
+//! PGEN variable-width records share base-128 varints, fixed-width sample IDs,
+//! packed two-bit values, and bounds checks. Keeping them here makes malformed
+//! record handling consistent across main, dosage, and haplotype tracks.
 
 use std::path::Path;
 

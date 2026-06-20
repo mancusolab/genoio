@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! PGEN header dispatch and variant decode entry points.
+//!
+//! This module owns format-mode routing and decoder state. Submodules handle
+//! header parsing, record I/O, main-track hard calls, dosage overlays, haplotype
+//! auxiliary tracks, and small bit-packing primitives.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -48,6 +53,10 @@ const PGEN_MAX_DOSAGE_RAW: u16 = 32_768;
 const PGEN_MIN_PHASE_RAW: i16 = -16_384;
 const PGEN_MAX_PHASE_RAW: i16 = 16_384;
 
+/// Parsed PGEN header fields needed by all read paths.
+///
+/// Fixed-width layouts compute offsets from shape. Variable-width layouts carry
+/// record types and block offsets so callers can seek directly to records.
 #[derive(Debug, Clone)]
 pub(super) struct PgenHeader {
     pub(super) layout: PgenLayout,
@@ -58,6 +67,10 @@ pub(super) struct PgenHeader {
     record_offsets: Vec<u64>,
 }
 
+/// Reused PGEN decode scratch for one read loop.
+///
+/// The state keeps variable-width record bytes, packed hard-call output, dense
+/// selected values, and LD-compressed main-track history.
 #[derive(Debug, Clone)]
 pub(super) struct PgenDecoderState {
     previous_non_ld_packed: PackedGenotypes,
@@ -68,6 +81,10 @@ pub(super) struct PgenDecoderState {
     pub(super) missing: Vec<bool>,
 }
 
+/// Reused selected-output buffers for PLINK2 haplotype reads.
+///
+/// Collapsed diploid buffers are populated alongside haplotype rows when
+/// genotype-stat filters need dosage semantics.
 #[derive(Default)]
 pub(super) struct PgenHaplotypeDecodeState {
     pub(super) selected_haplotype_values: Vec<f32>,
@@ -120,6 +137,7 @@ impl PgenDecoderState {
     }
 }
 
+/// Supported PGEN storage layouts after header validation.
 #[derive(Debug, Clone)]
 pub(super) enum PgenLayout {
     FixedWidth,

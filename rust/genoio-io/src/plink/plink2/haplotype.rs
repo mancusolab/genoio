@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Haplotype PLINK2 read orchestration.
+//!
+//! Haplotype readers use PGEN phase or phased-dosage auxiliary tracks and emit
+//! two rows per selected sample. Sparse hard-call output rejects retained
+//! missing haplotypes because sparse CSC has no missing-value channel.
 
 use std::path::Path;
 

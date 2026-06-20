@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! PGEN record seek and payload read helpers.
+//!
+//! The functions here hide fixed-width offset math and variable-width block
+//! seeks from higher-level readers. They return decoded packed hard calls or raw
+//! records ready for track-specific overlay logic.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

@@ -1,5 +1,9 @@
 // pattern: Functional Core
 //! PGEN dosage-track overlay helpers.
+//!
+//! Dosage tracks store sparse deviations from hard-call-derived values. These
+//! helpers apply fixed-width and variable-width overlays only to selected
+//! samples while preserving missingness bits.
 
 use std::path::Path;
 

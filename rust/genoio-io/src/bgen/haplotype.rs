@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! BGEN phased haplotype dosage dense read orchestration.
+//!
+//! The reader expands phased probabilities into two haplotype rows per selected
+//! sample. Genotype-stat filters use collapsed diploid dosages, while retained
+//! output preserves haplotype order.
 
 use std::path::Path;
 

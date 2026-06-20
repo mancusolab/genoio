@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! BGEN reader session and variant cursor helpers.
+//!
+//! A session owns the buffered file, parsed header, compression mode, and
+//! reusable probability buffers for one read call. Cursor types hide the
+//! difference between sequential scans and indexed byte-range reads.
 
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
@@ -117,6 +121,10 @@ impl<'a> BgenReadSession<'a> {
     }
 }
 
+/// Position of the current BGEN record in sequential or indexed reads.
+///
+/// Indexed positions carry the expected byte range so callers can verify that
+/// variant and payload reads consumed the index record exactly.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BgenRecordPosition<'a> {
     Sequential,
@@ -187,7 +195,7 @@ impl<'a> BgenVariantCursor<'a> {
     }
 }
 
-/// Read a matrix-only BGEN block without materializing unused variant metadata.
+/// Matrix-only indexed read state that can skip unused variant metadata.
 pub(super) struct BgenIndexedReadContext<'a> {
     pub(super) session: &'a mut BgenReadSession<'a>,
     pub(super) selection: DenseSampleSelection,

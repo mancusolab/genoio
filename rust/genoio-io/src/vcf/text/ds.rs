@@ -1,4 +1,7 @@
 //! Byte-level FORMAT/DS decoding for the text VCF backend.
+//!
+//! The decoder scans selected sample columns directly from the record bytes and
+//! validates dosage values before callers append them to dense buffers.
 
 use std::path::Path;
 

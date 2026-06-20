@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! PLINK2 PSAM and PVAR metadata parsing.
+//!
+//! The parser supports plain and zstd-compressed PVAR files, extracts the
+//! metadata columns used by core records, and keeps source alleles alongside
+//! normalized reference/alternate fields.
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};

@@ -1,5 +1,9 @@
 // pattern: Imperative Shell
 //! Sparse hard-call PLINK2 read orchestration.
+//!
+//! The sparse path decodes retained hard calls, applies the same filters as the
+//! dense path, flips common alternate columns when needed, and emits CSC columns
+//! without materializing a dense matrix.
 
 use std::path::Path;
 
