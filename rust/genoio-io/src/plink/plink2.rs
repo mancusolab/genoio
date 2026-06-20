@@ -1,14 +1,13 @@
 // pattern: Imperative Shell
 
-use std::fs;
 use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_values_to_minor_allele, is_dosage_polymorphic, reject_sparse_missing_values,
-    select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
-    GenotypeFilterPlan, MetadataOutput, PartialFilterDecision, SampleRecord, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantStats, VariantWindow,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataOutput,
+    PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantStats, VariantWindow,
 };
 
 use crate::error::Result;
@@ -28,6 +27,7 @@ use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionA
 
 mod metadata;
 mod pgen;
+mod source;
 use metadata::{parse_psam, parse_pvar, parse_pvar_source_window, PvarRecordReader};
 use pgen::{
     decode_plink2_haplotype_dosage_aux, decode_plink2_haplotype_hardcall_aux, open_pgen_payload,
@@ -35,8 +35,12 @@ use pgen::{
     read_plink2_variant_haplotype_dosage_track, read_plink2_variant_haplotype_main_track,
     read_plink2_variant_packed, read_plink2_variant_values, read_supported_pgen_header,
     read_supported_pgen_header_prefix, seek_fixed_width_variant_record, validate_plink2_dimensions,
-    validate_plink2_sample_count, PgenDecoderState, PgenHaplotypeDecodeState, PgenHeader,
-    PgenLayout,
+    PgenDecoderState, PgenHaplotypeDecodeState, PgenHeader, PgenLayout,
+};
+use source::{
+    empty_dense_for_samples, empty_sparse_for_selection, expand_selected_samples_to_haplotypes,
+    matrix_only_source_window_diagnostics, require_pvar, select_samples_for_header,
+    variant_output_capacity, Plink2ReadContext,
 };
 
 #[cfg(test)]
@@ -95,19 +99,6 @@ fn can_skip_pvar_for_matrix_only_genotype_filter(
     let window = variant_window?;
     (filter.requires_genotype_stats() && filter.is_genotype_stats_only())
         .then_some((filter, window))
-}
-
-fn expand_selected_samples_to_haplotypes(selection: &DenseSampleSelection) -> Vec<SampleRecord> {
-    let mut haplotype_samples = Vec::with_capacity(selection.samples.len() * 2);
-    for (sample, &source_index) in selection.samples.iter().zip(&selection.source_indices) {
-        for haplotype_index in 0..2 {
-            let mut haplotype_sample = sample.clone();
-            haplotype_sample.source_sample_index = Some(source_index);
-            haplotype_sample.haplotype_index = Some(haplotype_index);
-            haplotype_samples.push(haplotype_sample);
-        }
-    }
-    haplotype_samples
 }
 
 /// Read PLINK2 sample and variant metadata without returning genotypes.
@@ -169,40 +160,22 @@ pub fn read_plink2_dense_windowed(
         return read_plink2_dense_source_window(pgen, pvar, psam, requested_samples, window);
     }
 
-    let header = read_supported_pgen_header(pgen)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
-    let all_samples_selected = requested_samples.is_none();
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected,
+    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| GenoioError::Io {
-            path: pvar.to_path_buf(),
-            source,
-        })?;
-        diagnostics.retained_variants = 0;
-        return finish_dense_matrix(
-            DenseMatrixParts {
-                n_samples: selection.samples.len(),
-                n_variants: 0,
-                values: Vec::new(),
-                missing_mask: Vec::new(),
-                samples: selection.samples,
-                variants: Vec::new(),
-                diagnostics,
-            },
-            matrix_only,
-        );
+        require_pvar(pvar)?;
+        return empty_dense_for_samples(selection.samples, diagnostics, matrix_only);
     }
     if let Some((filter, window)) =
         can_skip_pvar_for_matrix_only_genotype_filter(matrix_only, variant_filter, variant_window)
     {
         // Matrix-only genotype-stat filters do not need per-variant metadata.
         // Keep the companion-file check, but avoid parsing PVAR rows.
-        fs::metadata(pvar).map_err(|source| GenoioError::Io {
-            path: pvar.to_path_buf(),
-            source,
-        })?;
+        require_pvar(pvar)?;
         return read_plink2_dense_matrix_only_genotype_filter(
             pgen,
             &header,
@@ -216,9 +189,7 @@ pub fn read_plink2_dense_windowed(
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
-    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
-        window.len.min(header.variant_ct)
-    });
+    let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let n_samples = selection.samples.len();
     let mut values = vec![0.0; n_samples * output_variant_capacity];
@@ -361,37 +332,21 @@ pub fn read_plink2_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let header = read_supported_pgen_header(pgen)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
-    let mut diagnostics = selection.diagnostics;
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected: _,
+    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
+    let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| GenoioError::Io {
-            path: pvar.to_path_buf(),
-            source,
-        })?;
-        diagnostics.retained_variants = 0;
-        return finish_dense_matrix(
-            DenseMatrixParts {
-                n_samples: selection.samples.len(),
-                n_variants: 0,
-                values: Vec::new(),
-                missing_mask: Vec::new(),
-                samples: selection.samples,
-                variants: Vec::new(),
-                diagnostics,
-            },
-            matrix_only,
-        );
+        require_pvar(pvar)?;
+        return empty_dense_for_samples(selection.samples, diagnostics, matrix_only);
     }
 
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
-    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
-        window.len.min(header.variant_ct)
-    });
+    let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
@@ -486,40 +441,23 @@ pub fn read_plink2_haplotypes_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let header = read_supported_pgen_header(pgen)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
-    let all_samples_selected = requested_samples.is_none();
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected,
+    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
     let mut diagnostics = selection.diagnostics.clone();
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| GenoioError::Io {
-            path: pvar.to_path_buf(),
-            source,
-        })?;
-        diagnostics.retained_variants = 0;
-        return finish_dense_matrix(
-            DenseMatrixParts {
-                n_samples: haplotype_samples.len(),
-                n_variants: 0,
-                values: Vec::new(),
-                missing_mask: Vec::new(),
-                samples: haplotype_samples,
-                variants: Vec::new(),
-                diagnostics,
-            },
-            matrix_only,
-        );
+        require_pvar(pvar)?;
+        return empty_dense_for_samples(haplotype_samples, diagnostics, matrix_only);
     }
 
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
     let mut haplotype_state = PgenHaplotypeDecodeState::default();
-    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
-        window.len.min(header.variant_ct)
-    });
+    let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
@@ -630,39 +568,23 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let header = read_supported_pgen_header(pgen)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected: _,
+    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
     let mut diagnostics = selection.diagnostics.clone();
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| GenoioError::Io {
-            path: pvar.to_path_buf(),
-            source,
-        })?;
-        diagnostics.retained_variants = 0;
-        return finish_dense_matrix(
-            DenseMatrixParts {
-                n_samples: haplotype_samples.len(),
-                n_variants: 0,
-                values: Vec::new(),
-                missing_mask: Vec::new(),
-                samples: haplotype_samples,
-                variants: Vec::new(),
-                diagnostics,
-            },
-            matrix_only,
-        );
+        require_pvar(pvar)?;
+        return empty_dense_for_samples(haplotype_samples, diagnostics, matrix_only);
     }
 
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
     let mut haplotype_state = PgenHaplotypeDecodeState::default();
-    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
-        window.len.min(header.variant_ct)
-    });
+    let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
@@ -862,37 +784,22 @@ pub fn read_plink2_sparse_windowed(
         return read_plink2_sparse_source_window(pgen, pvar, psam, requested_samples, window);
     }
 
-    let header = read_supported_pgen_header(pgen)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
-    let all_samples_selected = requested_samples.is_none();
-    let mut diagnostics = selection.diagnostics;
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected,
+    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
+    let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        fs::metadata(pvar).map_err(|source| GenoioError::Io {
-            path: pvar.to_path_buf(),
-            source,
-        })?;
-        diagnostics.retained_variants = 0;
-        return SparseGenotypeMatrix::new(
-            selection.samples.len(),
-            0,
-            vec![0],
-            Vec::new(),
-            Vec::new(),
-            selection.samples,
-            Vec::new(),
-            diagnostics,
-        );
+        require_pvar(pvar)?;
+        return empty_sparse_for_selection(selection);
     }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let n_samples = selection.samples.len();
-    let output_variant_capacity = variant_window.map_or(header.variant_ct, |window| {
-        window.len.min(header.variant_ct)
-    });
+    let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let mut indptr = Vec::with_capacity(output_variant_capacity + 1);
     indptr.push(0);
     let mut indices = Vec::new();
@@ -1022,9 +929,7 @@ fn read_plink2_dense_matrix_only_source_window(
     }
     let n_variants = window.len.min(header.variant_ct - window.start);
     if let Some(requested_samples) = requested_samples {
-        let all_samples = parse_psam(psam)?;
-        validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-        let selection = select_samples_source_order(&all_samples, Some(requested_samples), pgen)?;
+        let selection = select_samples_for_header(pgen, psam, Some(requested_samples), &header)?;
         return decode_plink2_dense_matrix_only_source_window(
             pgen,
             &header,
@@ -1038,13 +943,7 @@ fn read_plink2_dense_matrix_only_source_window(
 
     let n_samples = header.sample_ct;
     let source_indices = (0..n_samples).collect::<Vec<_>>();
-    let diagnostics = genoio_core::DenseDiagnostics {
-        requested_samples: n_samples,
-        retained_samples: n_samples,
-        candidate_variants: n_variants,
-        retained_variants: n_variants,
-        ..genoio_core::DenseDiagnostics::default()
-    };
+    let diagnostics = matrix_only_source_window_diagnostics(n_samples, n_variants);
 
     decode_plink2_dense_matrix_only_source_window(
         pgen,
@@ -1278,10 +1177,11 @@ fn read_plink2_dense_source_window(
     window: VariantWindow,
 ) -> Result<DenseGenotypeMatrix> {
     let decode_variant_ct = window.start.saturating_add(window.len);
-    let header = read_supported_pgen_header_prefix(pgen, decode_variant_ct)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected: _,
+    } = Plink2ReadContext::new_prefix(pgen, psam, requested_samples, decode_variant_ct)?;
     let mut diagnostics = selection.diagnostics;
     let window_variants = parse_pvar_source_window(pvar, window, header.variant_ct)?;
     let mut file = open_pgen_payload(pgen)?;
@@ -1402,10 +1302,11 @@ fn read_plink2_sparse_source_window(
     window: VariantWindow,
 ) -> Result<SparseGenotypeMatrix> {
     let decode_variant_ct = window.start.saturating_add(window.len);
-    let header = read_supported_pgen_header_prefix(pgen, decode_variant_ct)?;
-    let all_samples = parse_psam(psam)?;
-    validate_plink2_sample_count(pgen, &header, all_samples.len())?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, pgen)?;
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected: _,
+    } = Plink2ReadContext::new_prefix(pgen, psam, requested_samples, decode_variant_ct)?;
     let mut diagnostics = selection.diagnostics;
     let window_variants = parse_pvar_source_window(pvar, window, header.variant_ct)?;
     let mut file = open_pgen_payload(pgen)?;
