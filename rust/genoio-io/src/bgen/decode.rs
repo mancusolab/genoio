@@ -10,9 +10,9 @@ use genoio_core::GenoioError;
 
 use crate::Result;
 
+use super::filter::DosageFilterCounts;
 use super::header::BgenCompression;
 use super::io::{read_u32_le, skip_exact};
-use super::DosageFilterCounts;
 
 const DOSAGE_TOLERANCE: f32 = 1.0e-6;
 const UNPHASED_8_BIT_DEPTH: u8 = 8;

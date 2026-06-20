@@ -110,6 +110,8 @@ Acceptance criteria:
 - PLINK2 genotype-filtered median improves without regressing matrix-only,
   sample-filtered, haplotype hardcall, or haplotype dosage cases by more than 3%.
 
+Result: completed in `perf-phase2-results.md`.
+
 ## Phase 3: give BGEN the same structure as PLINK2
 
 `rust/genoio-io/src/bgen.rs` repeats the retained-variant loop across
@@ -135,6 +137,8 @@ Acceptance criteria:
 - BGEN dense, haplotype, indexed-region, and genotype-filtered tests pass.
 - BGEN matrix-only and indexed-region release medians stay within 3% of baseline.
 - Any BGEN speed claim includes before/after medians and fixture details.
+
+Result: completed in `perf-phase3-results.md`.
 
 ## Phase 4: add targeted decoder tests
 

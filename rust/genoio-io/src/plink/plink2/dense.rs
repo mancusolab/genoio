@@ -87,6 +87,22 @@ pub fn read_plink2_dense_windowed(
         return read_plink2_dense_source_window(pgen, pvar, psam, requested_samples, window);
     }
 
+    if let Some((filter, window)) =
+        can_skip_pvar_for_matrix_only_genotype_filter(matrix_only, variant_filter, variant_window)
+    {
+        // Matrix-only genotype-stat filters need PGEN/PSAM data only. Use
+        // prefix PGEN headers so retained-block reads do not pay the full
+        // variable-width header parse before decoding the first block.
+        require_pvar(pvar)?;
+        return read_plink2_dense_matrix_only_genotype_filter(
+            pgen,
+            psam,
+            requested_samples,
+            filter,
+            window,
+        );
+    }
+
     let Plink2ReadContext {
         header,
         selection,
@@ -96,21 +112,6 @@ pub fn read_plink2_dense_windowed(
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         require_pvar(pvar)?;
         return empty_dense_for_samples(selection.samples, diagnostics, matrix_only);
-    }
-    if let Some((filter, window)) =
-        can_skip_pvar_for_matrix_only_genotype_filter(matrix_only, variant_filter, variant_window)
-    {
-        // Matrix-only genotype-stat filters do not need per-variant metadata.
-        // Keep the companion-file check, but avoid parsing PVAR rows.
-        require_pvar(pvar)?;
-        return read_plink2_dense_matrix_only_genotype_filter(
-            pgen,
-            &header,
-            selection,
-            all_samples_selected,
-            filter,
-            window,
-        );
     }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
@@ -298,24 +299,96 @@ fn read_plink2_dense_matrix_only_source_window(
 
 fn read_plink2_dense_matrix_only_genotype_filter(
     pgen: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    filter: &VariantFilter,
+    window: VariantWindow,
+) -> Result<DenseGenotypeMatrix> {
+    let mut decode_variant_ct = initial_genotype_filter_prefix_len(pgen, window)?;
+    loop {
+        let Plink2ReadContext {
+            header,
+            selection,
+            all_samples_selected,
+        } = Plink2ReadContext::new_prefix(pgen, psam, requested_samples, decode_variant_ct)?;
+        let decode_limit = genotype_filter_decode_limit(&header);
+        let is_complete = decode_limit >= header.variant_ct;
+        let read = decode_plink2_dense_matrix_only_genotype_filter(
+            pgen,
+            &header,
+            selection,
+            all_samples_selected,
+            filter,
+            window,
+            decode_limit,
+        )?;
+        if read.window_satisfied || is_complete {
+            return Ok(read.matrix);
+        }
+        decode_variant_ct = next_genotype_filter_prefix_len(pgen, decode_limit, header.variant_ct)?;
+    }
+}
+
+struct MatrixOnlyGenotypeFilterRead {
+    matrix: DenseGenotypeMatrix,
+    window_satisfied: bool,
+}
+
+fn initial_genotype_filter_prefix_len(pgen: &Path, window: VariantWindow) -> Result<usize> {
+    window
+        .start
+        .checked_add(window.len)
+        .ok_or_else(|| GenoioError::invalid_source(pgen, "variant window end is out of range"))
+}
+
+fn next_genotype_filter_prefix_len(
+    pgen: &Path,
+    current: usize,
+    variant_ct: usize,
+) -> Result<usize> {
+    if current >= variant_ct {
+        return Ok(variant_ct);
+    }
+    let doubled = current
+        .checked_mul(2)
+        .ok_or_else(|| GenoioError::invalid_source(pgen, "variant window end is out of range"))?;
+    Ok(doubled.max(current + 1).min(variant_ct))
+}
+
+fn genotype_filter_decode_limit(header: &PgenHeader) -> usize {
+    match header.layout {
+        PgenLayout::VariableWidth => header.record_types.len(),
+        PgenLayout::FixedWidth
+        | PgenLayout::FixedWidthDosage
+        | PgenLayout::FixedWidthPhasedDosage => header.variant_ct,
+    }
+}
+
+fn decode_plink2_dense_matrix_only_genotype_filter(
+    pgen: &Path,
     header: &PgenHeader,
     selection: DenseSampleSelection,
     all_samples_selected: bool,
     filter: &VariantFilter,
     window: VariantWindow,
-) -> Result<DenseGenotypeMatrix> {
+    decode_limit: usize,
+) -> Result<MatrixOnlyGenotypeFilterRead> {
     let output_variant_capacity = window.len.min(header.variant_ct);
     let n_samples = selection.samples.len();
     if output_variant_capacity == 0 {
         let mut diagnostics = selection.diagnostics;
         diagnostics.retained_variants = 0;
-        return DenseGenotypeMatrix::new_matrix_only(
+        let matrix = DenseGenotypeMatrix::new_matrix_only(
             n_samples,
             0,
             Vec::new(),
             Vec::new(),
             diagnostics,
-        );
+        )?;
+        return Ok(MatrixOnlyGenotypeFilterRead {
+            matrix,
+            window_satisfied: true,
+        });
     }
 
     let mut file = open_pgen_payload(pgen)?;
@@ -329,7 +402,7 @@ fn read_plink2_dense_matrix_only_genotype_filter(
     let mut output_variant_count = 0_usize;
     let genotype_filter_plan = filter.genotype_filter_plan();
 
-    for variant_index in 0..header.variant_ct {
+    for variant_index in 0..decode_limit {
         diagnostics.candidate_variants += 1;
 
         match header.layout {
@@ -406,13 +479,17 @@ fn read_plink2_dense_matrix_only_genotype_filter(
     );
     diagnostics.retained_variants = output_variant_count;
 
-    DenseGenotypeMatrix::new_matrix_only(
+    let matrix = DenseGenotypeMatrix::new_matrix_only(
         n_samples,
         output_variant_count,
         values,
         missing_mask,
         diagnostics,
-    )
+    )?;
+    Ok(MatrixOnlyGenotypeFilterRead {
+        matrix,
+        window_satisfied: retention.window_is_satisfied(),
+    })
 }
 
 fn decode_plink2_dense_matrix_only_source_window(
