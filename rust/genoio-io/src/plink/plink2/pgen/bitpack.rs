@@ -127,3 +127,107 @@ pub(super) fn ensure_record_bits(
 pub(super) fn bit_is_set(bytes: &[u8], bit_index: usize) -> bool {
     bytes[bit_index / 8] & (1 << (bit_index % 8)) != 0
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn assert_error_contains(error: genoio_core::GenoioError, expected: &str) {
+        let message = error.to_string();
+        assert!(
+            message.contains(expected),
+            "expected error to contain {expected:?}, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn base128_varint_decodes_multibyte_values_and_advances_cursor() {
+        let path = Path::new("test.pgen");
+        let record = [0xac, 0x02, 0xff];
+        let mut cursor = 0;
+
+        let value = read_base128_varint(path, &record, &mut cursor).unwrap();
+
+        assert_eq!(value, 300);
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn base128_varint_rejects_truncated_continuation() {
+        let path = Path::new("test.pgen");
+        let mut cursor = 0;
+
+        let error = read_base128_varint(path, &[0x80], &mut cursor)
+            .expect_err("unterminated varint should fail");
+
+        assert_error_contains(error, "record ended before expected data");
+    }
+
+    #[test]
+    fn base128_varint_rejects_out_of_range_values() {
+        let path = Path::new("test.pgen");
+        let record = vec![0x80; (usize::BITS as usize / 7) + 1];
+        let mut cursor = 0;
+
+        let error = read_base128_varint(path, &record, &mut cursor)
+            .expect_err("oversized varint should fail");
+
+        assert_error_contains(error, "pgen varint is out of range");
+    }
+
+    #[test]
+    fn fixed_width_sample_id_reads_little_endian_widths() {
+        let path = Path::new("test.pgen");
+        let mut cursor = 0;
+
+        let value = read_fixed_width_sample_id(path, &[0x34, 0x12, 0xef], &mut cursor, 2).unwrap();
+
+        assert_eq!(value, 0x1234);
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn record_bounds_helpers_reject_short_and_overflowing_ranges() {
+        let path = Path::new("test.pgen");
+
+        let short_bytes =
+            ensure_record_bytes(path, &[1, 2], 1, 2).expect_err("short byte range should fail");
+        assert_error_contains(short_bytes, "record ended before expected data");
+
+        let overflowing_bytes = ensure_record_bytes(path, &[1, 2], usize::MAX, 1)
+            .expect_err("overflowing byte range should fail");
+        assert_error_contains(overflowing_bytes, "record ended before expected data");
+
+        let short_bits =
+            ensure_record_bits(path, &[0], 7, 2).expect_err("short bit range should fail");
+        assert_error_contains(short_bits, "record ended before expected bitarray data");
+
+        let overflowing_bits = ensure_record_bits(path, &[0], usize::MAX, 1)
+            .expect_err("overflowing bit range should fail");
+        assert_error_contains(overflowing_bits, "pgen bit range is out of range");
+    }
+
+    #[test]
+    fn difflist_sample_id_validation_rejects_bad_order_and_bounds() {
+        let path = Path::new("test.pgen");
+        let mut previous = None;
+
+        validate_difflist_sample_id(path, 2, 4, &mut previous).unwrap();
+
+        let duplicate = validate_difflist_sample_id(path, 2, 4, &mut previous)
+            .expect_err("duplicate sample id should fail");
+        assert_error_contains(duplicate, "strictly increasing");
+
+        let mut previous = Some(2);
+        let out_of_order = validate_difflist_sample_id(path, 1, 4, &mut previous)
+            .expect_err("out-of-order sample id should fail");
+        assert_error_contains(out_of_order, "strictly increasing");
+
+        let mut previous = None;
+        let out_of_range = validate_difflist_sample_id(path, 4, 4, &mut previous)
+            .expect_err("out-of-range sample id should fail");
+        assert_error_contains(out_of_range, "outside sample count");
+    }
+}

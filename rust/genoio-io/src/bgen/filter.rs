@@ -370,4 +370,107 @@ mod tests {
         assert_eq!(counts.missing_rate().unwrap(), stats.missing_rate);
         assert_eq!(counts.minor_allele_count().unwrap(), stats.mac);
     }
+
+    #[test]
+    fn dosage_filter_counts_handle_monomorphic_and_missing_variants() {
+        let values = [0.0, 0.0, 0.0];
+        let missing = [false, true, false];
+        let counts = dosage_counts_for_filter(&values, &missing).unwrap();
+
+        assert_eq!(counts.called_count, 2);
+        assert_eq!(counts.missing_count, 1);
+        assert_eq!(counts.allele_count, 0.0);
+        assert!(!counts.is_polymorphic().unwrap());
+        assert_eq!(counts.minor_allele_count().unwrap(), Some(0.0));
+        assert!((counts.missing_rate().unwrap() - (1.0 / 3.0)).abs() < f64::EPSILON);
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::Polymorphic)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MacRange {
+                    min: Some(1),
+                    max: None,
+                })
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MafRange {
+                    min: Some(0.01),
+                    max: None,
+                })
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MissingRateMax { max: 0.34 })
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MissingRateMax { max: 0.30 })
+                .unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn dosage_filter_counts_handle_all_missing_variants() {
+        let values = [0.0, 1.0, 2.0];
+        let missing = [true, true, true];
+        let counts = dosage_counts_for_filter(&values, &missing).unwrap();
+
+        assert_eq!(counts.called_count, 0);
+        assert_eq!(counts.missing_count, 3);
+        assert_eq!(counts.minor_allele_count().unwrap(), None);
+        assert_eq!(counts.missing_rate().unwrap(), 1.0);
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::Polymorphic)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MacRange {
+                    min: Some(0),
+                    max: None,
+                })
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            counts
+                .evaluate_plan(GenotypeFilterPlan::MafRange {
+                    min: Some(0.0),
+                    max: Some(1.0),
+                })
+                .unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn dosage_filter_counts_reject_invalid_inputs() {
+        let length_error = dosage_counts_for_filter(&[0.0, 1.0], &[false])
+            .expect_err("mismatched value and missing lengths should fail");
+        assert!(length_error
+            .to_string()
+            .contains("variant values and missing mask lengths differ"));
+
+        let high_value =
+            dosage_counts_for_filter(&[2.1], &[false]).expect_err("dosage above two should fail");
+        assert!(high_value.to_string().contains("values in [0, 2]"));
+
+        let low_value =
+            dosage_counts_for_filter(&[-0.1], &[false]).expect_err("negative dosage should fail");
+        assert!(low_value.to_string().contains("values in [0, 2]"));
+    }
 }

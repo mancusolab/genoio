@@ -156,6 +156,8 @@ Test targets:
 
 Property tests are useful for pure helpers if they stay fast and deterministic.
 
+Result: completed in `perf-phase4-results.md`.
+
 ## Phase 5: update public performance docs
 
 After each measured improvement, update `docs/performance.md` with:

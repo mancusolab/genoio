@@ -255,6 +255,20 @@ mod tests {
 
     use super::*;
 
+    fn decoded_categories(packed: &PackedGenotypes) -> Vec<u8> {
+        (0..packed.sample_ct())
+            .map(|sample_index| packed.get(sample_index))
+            .collect()
+    }
+
+    fn assert_error_contains(error: genoio_core::GenoioError, expected: &str) {
+        let message = error.to_string();
+        assert!(
+            message.contains(expected),
+            "expected error to contain {expected:?}, got {message:?}"
+        );
+    }
+
     #[test]
     fn variable_record_helpers_write_packed_genotypes() {
         let path = Path::new("test.pgen");
@@ -262,21 +276,11 @@ mod tests {
 
         decode_one_bit_record(path, &[2, 0b0000_1010, 0], 4, &mut packed)
             .expect("one-bit record should decode");
-        assert_eq!(
-            (0..4)
-                .map(|sample_index| packed.get(sample_index))
-                .collect::<Vec<_>>(),
-            vec![0, 2, 0, 2]
-        );
+        assert_eq!(decoded_categories(&packed), vec![0, 2, 0, 2]);
 
         decode_difflist_record(path, &[2, 1, 9, 2], 4, 0, &mut packed)
             .expect("difflist record should decode");
-        assert_eq!(
-            (0..4)
-                .map(|sample_index| packed.get(sample_index))
-                .collect::<Vec<_>>(),
-            vec![0, 1, 0, 2]
-        );
+        assert_eq!(decoded_categories(&packed), vec![0, 1, 0, 2]);
 
         let mut previous = PackedGenotypes::default();
         previous.resize(4);
@@ -287,11 +291,45 @@ mod tests {
 
         decode_ld_compressed_record(path, &[1, 2, 0], 4, &previous, true, &mut packed)
             .expect("LD-compressed record should decode");
-        assert_eq!(
-            (0..4)
-                .map(|sample_index| packed.get(sample_index))
-                .collect::<Vec<_>>(),
-            vec![2, 1, 2, 3]
-        );
+        assert_eq!(decoded_categories(&packed), vec![2, 1, 2, 3]);
+    }
+
+    #[test]
+    fn difflist_record_decodes_four_packed_values() {
+        let path = Path::new("test.pgen");
+        let mut packed = PackedGenotypes::default();
+
+        decode_difflist_record(path, &[4, 0, 0b11_10_01_00, 1, 1, 1], 4, 0, &mut packed)
+            .expect("four-entry difflist record should decode");
+
+        assert_eq!(decoded_categories(&packed), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn difflist_record_rejects_duplicate_and_out_of_range_sample_ids() {
+        let path = Path::new("test.pgen");
+        let mut packed = PackedGenotypes::default();
+
+        let duplicate = decode_difflist_record(path, &[2, 1, 0, 0], 4, 0, &mut packed)
+            .expect_err("duplicate difflist sample id should fail");
+        assert_error_contains(duplicate, "strictly increasing");
+
+        let out_of_range = decode_difflist_record(path, &[1, 4, 0], 4, 0, &mut packed)
+            .expect_err("out-of-range difflist sample id should fail");
+        assert_error_contains(out_of_range, "outside sample count");
+    }
+
+    #[test]
+    fn one_bit_record_decodes_with_and_without_difflist_overlay() {
+        let path = Path::new("test.pgen");
+        let mut packed = PackedGenotypes::default();
+
+        decode_one_bit_record(path, &[2, 0b0000_1010, 0], 4, &mut packed)
+            .expect("one-bit record without overlay should decode");
+        assert_eq!(decoded_categories(&packed), vec![0, 2, 0, 2]);
+
+        decode_one_bit_record(path, &[2, 0b0000_1010, 1, 2, 1], 4, &mut packed)
+            .expect("one-bit record with difflist overlay should decode");
+        assert_eq!(decoded_categories(&packed), vec![0, 2, 1, 2]);
     }
 }
