@@ -294,6 +294,16 @@ fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
     assert_eq!(dense.diagnostics.candidate_variants, 3);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 2);
+
+    let matrix_only = genoio_io::read_vcf_dense_windowed(&path, None, Some(&filter), None, true)
+        .expect("matrix-only vcf GT should filter");
+
+    assert_eq!(matrix_only.n_samples, 3);
+    assert_eq!(matrix_only.n_variants, 1);
+    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.variants.is_empty());
+    assert_eq!(matrix_only.values, vec![0.0, 1.0, 2.0]);
+    assert_eq!(matrix_only.missing_mask, vec![false, false, false]);
 }
 
 #[test]

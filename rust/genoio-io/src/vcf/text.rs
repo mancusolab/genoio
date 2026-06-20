@@ -20,6 +20,7 @@ use noodles_vcf as noodles;
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
+use crate::hardcall::evaluate_hardcall_counts_filter;
 use crate::matrix::empty_sparse_matrix;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -758,33 +759,50 @@ fn read_dense_records<R: BufRead>(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         // `record.samples()` borrows noodles' reusable record buffer, so decode
         // selected GTs completely before the next `read_record` call.
+        let stats_mode = match (needs_genotype_decision, matrix_only) {
+            (true, true) => GtStatsMode::Counts,
+            (true, false) => GtStatsMode::Compute,
+            (false, _) => GtStatsMode::Skip,
+        };
         decode_gt_record(
             path,
             &record,
             &selection.source_indices,
-            GtStatsMode::from_needed(needs_genotype_decision),
+            stats_mode,
             &mut decoded,
         )?;
-        let stats = if needs_genotype_decision {
-            decoded.stats()
-        } else {
-            None
-        };
 
-        if let Some(stats) = stats {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                &mut diagnostics,
-            ) {
+        if needs_genotype_decision {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, stats) = if matrix_only {
+                let counts = decoded.counts().ok_or_else(|| {
+                    GenoioError::internal_contract("matrix-only vcf GT filter missing counts")
+                })?;
+                evaluate_hardcall_counts_filter(
+                    counts,
+                    filter,
+                    filter.genotype_filter_plan(),
+                    Some(&variant),
+                    false,
+                )?
+            } else {
+                let stats = decoded
+                    .stats()
+                    .ok_or_else(|| GenoioError::internal_contract("vcf GT filter missing stats"))?;
+                (filter.evaluate(&variant, Some(&stats)), Some(stats))
+            };
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-        }
-        if !matrix_only {
             if let Some(stats) = stats {
                 genoio_core::attach_variant_stats(&mut variant, stats);
             }
+        }
+        if !matrix_only {
             variants.push(variant);
         }
 

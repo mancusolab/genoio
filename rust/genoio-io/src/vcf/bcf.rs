@@ -14,10 +14,9 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order, variant_stats_from_counts,
-    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantStats,
-    VariantWindow,
+    reject_sparse_missing_values, select_samples_source_order, DenseGenotypeMatrix,
+    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -29,6 +28,7 @@ use noodles_vcf::variant::record::{
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
+use crate::hardcall::{evaluate_hardcall_counts_filter, HardcallCounts};
 use crate::matrix::{finish_variant_major_dense_matrix, VariantMajorDenseParts};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -190,7 +190,7 @@ pub(super) fn read_sparse_windowed(
             &header,
             &record,
             &source_indices,
-            needs_genotype_decision,
+            BcfStatsMode::from_needed(needs_genotype_decision),
         )?;
         if needs_genotype_decision {
             match retention.genotype_decision(
@@ -293,9 +293,15 @@ pub(super) fn read_haplotypes_dense_windowed(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         let stats = if needs_genotype_decision {
             Some(
-                decode_gt_record(path, &header, &record, &source_indices, true)?
-                    .stats
-                    .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
+                decode_gt_record(
+                    path,
+                    &header,
+                    &record,
+                    &source_indices,
+                    BcfStatsMode::Compute,
+                )?
+                .stats
+                .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
             )
         } else {
             None
@@ -400,9 +406,15 @@ pub(super) fn read_haplotypes_sparse_windowed(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         let stats = if needs_genotype_decision {
             Some(
-                decode_gt_record(path, &header, &record, &source_indices, true)?
-                    .stats
-                    .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
+                decode_gt_record(
+                    path,
+                    &header,
+                    &record,
+                    &source_indices,
+                    BcfStatsMode::Compute,
+                )?
+                .stats
+                .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
             )
         } else {
             None
@@ -519,7 +531,11 @@ fn read_dense_windowed_with_field(
                 &header,
                 &record,
                 &source_indices,
-                needs_genotype_decision,
+                match (needs_genotype_decision, matrix_only) {
+                    (true, true) => BcfStatsMode::Counts,
+                    (true, false) => BcfStatsMode::Compute,
+                    (false, _) => BcfStatsMode::Skip,
+                },
             )?,
             DenseField::Ds => decode_ds_record(path, &header, &record, &source_indices, false)?,
         };
@@ -529,11 +545,32 @@ fn read_dense_windowed_with_field(
                 GenoioError::internal_contract("bcf filter requires variant metadata")
             })?;
             let (retain_variant, stats) = match field {
-                DenseField::Gt => (
-                    variant_filter
-                        .is_none_or(|filter| filter.evaluate(variant_ref, decoded.stats.as_ref())),
-                    decoded.stats,
-                ),
+                DenseField::Gt => {
+                    let filter = variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?;
+                    if matrix_only {
+                        let counts = decoded.counts.ok_or_else(|| {
+                            GenoioError::internal_contract(
+                                "matrix-only bcf GT filter missing counts",
+                            )
+                        })?;
+                        evaluate_hardcall_counts_filter(
+                            counts,
+                            filter,
+                            filter.genotype_filter_plan(),
+                            Some(variant_ref),
+                            false,
+                        )?
+                    } else {
+                        (
+                            filter.evaluate(variant_ref, decoded.stats.as_ref()),
+                            decoded.stats,
+                        )
+                    }
+                }
                 DenseField::Ds => {
                     let filter = variant_filter.ok_or_else(|| {
                         GenoioError::internal_contract(
@@ -640,6 +677,24 @@ struct DecodedBcfDenseValues {
     values: Vec<f32>,
     missing: Vec<bool>,
     stats: Option<VariantStats>,
+    counts: Option<HardcallCounts>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BcfStatsMode {
+    Skip,
+    Counts,
+    Compute,
+}
+
+impl BcfStatsMode {
+    const fn from_needed(needed: bool) -> Self {
+        if needed {
+            Self::Compute
+        } else {
+            Self::Skip
+        }
+    }
 }
 
 fn decode_gt_record(
@@ -647,7 +702,7 @@ fn decode_gt_record(
     header: &noodles::Header,
     record: &bcf::Record,
     source_indices: &[usize],
-    collect_stats: bool,
+    stats_mode: BcfStatsMode,
 ) -> Result<DecodedBcfDenseValues> {
     let samples = record.samples().map_err(|error| {
         GenoioError::invalid_source(path, format!("bcf samples error: {error}"))
@@ -661,32 +716,29 @@ fn decode_gt_record(
 
     let mut values = Vec::with_capacity(source_indices.len());
     let mut missing = Vec::with_capacity(source_indices.len());
-    let mut hom_ref_count = 0_u64;
-    let mut het_count = 0_u64;
-    let mut hom_alt_count = 0_u64;
-    let mut missing_count = 0_u64;
+    let mut counts = HardcallCounts::default();
 
     for source_index in source_indices {
         let call = decode_gt_call(path, header, record, &gt_series, *source_index)?;
-        if collect_stats {
+        if !matches!(stats_mode, BcfStatsMode::Skip) {
             match call.class {
-                BcfGtClass::HomRef => hom_ref_count += 1,
-                BcfGtClass::Het => het_count += 1,
-                BcfGtClass::HomAlt => hom_alt_count += 1,
-                BcfGtClass::Missing => missing_count += 1,
+                BcfGtClass::HomRef => counts.record_hom_ref(),
+                BcfGtClass::Het => counts.record_het(),
+                BcfGtClass::HomAlt => counts.record_hom_alt(),
+                BcfGtClass::Missing => counts.record_missing(),
             }
         }
         values.push(call.value);
         missing.push(call.is_missing());
     }
 
-    let stats = if collect_stats {
-        Some(variant_stats_from_counts(
-            hom_ref_count,
-            het_count,
-            hom_alt_count,
-            missing_count,
-        )?)
+    let stats = if matches!(stats_mode, BcfStatsMode::Compute) {
+        Some(counts.variant_stats()?)
+    } else {
+        None
+    };
+    let counts = if matches!(stats_mode, BcfStatsMode::Counts) {
+        Some(counts)
     } else {
         None
     };
@@ -694,6 +746,7 @@ fn decode_gt_record(
         values,
         missing,
         stats,
+        counts,
     })
 }
 
@@ -771,6 +824,7 @@ fn decode_ds_record(
         values,
         missing,
         stats,
+        counts: None,
     })
 }
 
@@ -1265,6 +1319,31 @@ mod tests {
         assert_eq!(dense.variants[0].id, "rs1");
         assert_eq!(dense.variants[0].mac, Some(1));
         assert_eq!(dense.variants[0].n_called, Some(1));
+    }
+
+    #[test]
+    fn bcf_dense_gt_matrix_only_filters_from_hardcall_counts() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf(file.path());
+        let filter = VariantFilter::from_json_value(serde_json::json!({
+            "op": "predicate",
+            "name": "mac",
+            "params": {"min": 1}
+        }))
+        .expect("filter should parse");
+
+        let dense = read_dense_windowed(file.path(), None, Some(&filter), None, true)
+            .expect("matrix-only BCF dense GT should filter");
+
+        assert_eq!(dense.n_samples, 2);
+        assert_eq!(dense.n_variants, 1);
+        assert!(dense.samples.is_empty());
+        assert!(dense.variants.is_empty());
+        assert_eq!(dense.values, vec![0.0, 1.0]);
+        assert_eq!(dense.missing_mask, vec![false, false]);
     }
 
     #[test]
