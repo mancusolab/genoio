@@ -163,6 +163,11 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch) -> None:
         ],
     )
     monkeypatch.setattr(benchmark_vcf, "read_genoio_matrix_only", lambda args: _matrix(1.0))
+    monkeypatch.setattr(
+        benchmark_vcf,
+        "read_genoio_metadata",
+        lambda args: np.array([2, 3], dtype=np.int64),
+    )
     monkeypatch.setattr(benchmark_vcf, "read_genoio_with_variants", read_with_variants)
     monkeypatch.setattr(benchmark_vcf, "read_genoio_sample_filtered", lambda args: _matrix(3.0))
     monkeypatch.setattr(benchmark_vcf, "read_genoio_genotype_filtered", lambda args: _matrix(4.0))
@@ -170,6 +175,7 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch) -> None:
     monkeypatch.setattr(benchmark_vcf, "read_genoio_indexed_region_sample_filtered", lambda args: _matrix(6.0))
 
     output = _capture_stdout(benchmark_vcf.main)
+    assert "genoio_vcf_metadata" in output
     assert "genoio_vcf_matrix_only" in output
     assert "genoio_vcf_with_variants" in output
     assert "variant_metadata length=3" in output
