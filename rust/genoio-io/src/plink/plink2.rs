@@ -16,7 +16,10 @@ use crate::error::Result;
 use crate::hardcall::PackedHardcalls as PackedGenotypes;
 #[cfg(test)]
 use crate::hardcall::HARDCALL_BATCH_SIZE;
-use crate::hardcall::{evaluate_packed_hardcall_filter, HardcallBatch as PackedVariantBatch};
+use crate::hardcall::{
+    evaluate_packed_hardcall_filter, flush_hardcall_batch_into_sample_major,
+    HardcallBatch as PackedVariantBatch,
+};
 use crate::matrix::{
     finish_dense_matrix, finish_variant_major_dense_matrix, shrink_sample_major_width,
     DenseMatrixParts, VariantMajorDenseParts,
@@ -58,28 +61,6 @@ fn append_variant_to_sample_major(
         out_values[offset] = value;
         out_missing[offset] = is_missing;
     }
-}
-
-fn flush_packed_variant_batch(
-    batch: &mut PackedVariantBatch,
-    source_indices: &[usize],
-    batch_start: &mut usize,
-    n_variants: usize,
-    values: &mut [f32],
-    missing_mask: &mut [bool],
-) {
-    if batch.is_empty() {
-        return;
-    }
-    batch.expand_into_sample_major(
-        source_indices,
-        *batch_start,
-        n_variants,
-        values,
-        missing_mask,
-    );
-    *batch_start += batch.len();
-    batch.clear();
 }
 
 fn evaluate_dosage_filter(
@@ -321,7 +302,7 @@ pub fn read_plink2_dense_windowed(
         packed_batch.push(&decoder_state.packed);
         output_variant_count += 1;
         if packed_batch.is_full() {
-            flush_packed_variant_batch(
+            flush_hardcall_batch_into_sample_major(
                 &mut packed_batch,
                 &selection.source_indices,
                 &mut batch_start,
@@ -338,7 +319,7 @@ pub fn read_plink2_dense_windowed(
     if !stopped_after_window {
         pvar_reader.validate_count(header.variant_ct)?;
     }
-    flush_packed_variant_batch(
+    flush_hardcall_batch_into_sample_major(
         &mut packed_batch,
         &selection.source_indices,
         &mut batch_start,
@@ -1146,7 +1127,7 @@ fn read_plink2_dense_matrix_only_genotype_filter(
                 packed_batch.push(&decoder_state.packed);
                 output_variant_count += 1;
                 if packed_batch.is_full() {
-                    flush_packed_variant_batch(
+                    flush_hardcall_batch_into_sample_major(
                         &mut packed_batch,
                         &selection.source_indices,
                         &mut batch_start,
@@ -1164,7 +1145,7 @@ fn read_plink2_dense_matrix_only_genotype_filter(
         }
     }
 
-    flush_packed_variant_batch(
+    flush_hardcall_batch_into_sample_major(
         &mut packed_batch,
         &selection.source_indices,
         &mut batch_start,
@@ -1229,7 +1210,7 @@ fn decode_plink2_dense_matrix_only_source_window(
                 )?;
                 packed_batch.push(&decoder_state.packed);
                 if packed_batch.is_full() {
-                    flush_packed_variant_batch(
+                    flush_hardcall_batch_into_sample_major(
                         &mut packed_batch,
                         source_indices,
                         &mut batch_start,
@@ -1239,7 +1220,7 @@ fn decode_plink2_dense_matrix_only_source_window(
                     );
                 }
             }
-            flush_packed_variant_batch(
+            flush_hardcall_batch_into_sample_major(
                 &mut packed_batch,
                 source_indices,
                 &mut batch_start,
@@ -1261,7 +1242,7 @@ fn decode_plink2_dense_matrix_only_source_window(
                 if source_variant_index >= window.start {
                     packed_batch.push(&decoder_state.packed);
                     if packed_batch.is_full() {
-                        flush_packed_variant_batch(
+                        flush_hardcall_batch_into_sample_major(
                             &mut packed_batch,
                             source_indices,
                             &mut batch_start,
@@ -1272,7 +1253,7 @@ fn decode_plink2_dense_matrix_only_source_window(
                     }
                 }
             }
-            flush_packed_variant_batch(
+            flush_hardcall_batch_into_sample_major(
                 &mut packed_batch,
                 source_indices,
                 &mut batch_start,
@@ -1334,7 +1315,7 @@ fn read_plink2_dense_source_window(
                 variants.push(variant);
                 packed_batch.push(&decoder_state.packed);
                 if packed_batch.is_full() {
-                    flush_packed_variant_batch(
+                    flush_hardcall_batch_into_sample_major(
                         &mut packed_batch,
                         &selection.source_indices,
                         &mut batch_start,
@@ -1344,7 +1325,7 @@ fn read_plink2_dense_source_window(
                     );
                 }
             }
-            flush_packed_variant_batch(
+            flush_hardcall_batch_into_sample_major(
                 &mut packed_batch,
                 &selection.source_indices,
                 &mut batch_start,
@@ -1375,7 +1356,7 @@ fn read_plink2_dense_source_window(
                         variants.push(variant);
                         packed_batch.push(&decoder_state.packed);
                         if packed_batch.is_full() {
-                            flush_packed_variant_batch(
+                            flush_hardcall_batch_into_sample_major(
                                 &mut packed_batch,
                                 &selection.source_indices,
                                 &mut batch_start,
@@ -1387,7 +1368,7 @@ fn read_plink2_dense_source_window(
                     }
                 }
             }
-            flush_packed_variant_batch(
+            flush_hardcall_batch_into_sample_major(
                 &mut packed_batch,
                 &selection.source_indices,
                 &mut batch_start,

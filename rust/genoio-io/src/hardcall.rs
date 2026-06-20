@@ -515,6 +515,29 @@ impl HardcallBatch {
     }
 }
 
+#[inline]
+pub(crate) fn flush_hardcall_batch_into_sample_major(
+    batch: &mut HardcallBatch,
+    source_indices: &[usize],
+    batch_start: &mut usize,
+    n_variants: usize,
+    values: &mut [f32],
+    missing_mask: &mut [bool],
+) {
+    if batch.is_empty() {
+        return;
+    }
+    batch.expand_into_sample_major(
+        source_indices,
+        *batch_start,
+        n_variants,
+        values,
+        missing_mask,
+    );
+    *batch_start += batch.len();
+    batch.clear();
+}
+
 pub(crate) fn decode_hardcall_code(code: u8) -> (f32, bool) {
     match code {
         0b00 => (0.0, false),

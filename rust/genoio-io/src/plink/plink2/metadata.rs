@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use genoio_core::{GenoioError, SampleRecord, VariantRecord, VariantWindow};
 
 use crate::error::Result;
-use crate::plink_common::{optional_plink_value, PLINK2_MISSING_VALUES};
+use crate::plink::common::{optional_plink_value, PLINK2_MISSING_VALUES};
 
 pub(super) fn parse_psam(path: &Path) -> Result<Vec<SampleRecord>> {
     let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
