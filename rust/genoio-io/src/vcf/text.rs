@@ -14,7 +14,8 @@ use std::path::Path;
 
 use genoio_core::{
     DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    RegionPredicate, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    RegionPredicate, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -776,23 +777,8 @@ fn read_dense_records<R: BufRead>(
             let filter = variant_filter.ok_or_else(|| {
                 GenoioError::internal_contract("genotype decision requires a variant filter")
             })?;
-            let (retain_variant, stats) = if matrix_only {
-                let counts = decoded.counts().ok_or_else(|| {
-                    GenoioError::internal_contract("matrix-only vcf GT filter missing counts")
-                })?;
-                evaluate_hardcall_counts_filter(
-                    counts,
-                    filter,
-                    filter.genotype_filter_plan(),
-                    Some(&variant),
-                    false,
-                )?
-            } else {
-                let stats = decoded
-                    .stats()
-                    .ok_or_else(|| GenoioError::internal_contract("vcf GT filter missing stats"))?;
-                (filter.evaluate(&variant, Some(&stats)), Some(stats))
-            };
+            let (retain_variant, stats) =
+                evaluate_text_gt_filter(&decoded, filter, &variant, matrix_only, "GT")?;
             match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
@@ -988,25 +974,13 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
             let filter = variant_filter.ok_or_else(|| {
                 GenoioError::internal_contract("genotype decision requires a variant filter")
             })?;
-            let (retain_variant, stats) = if matrix_only {
-                let counts = stats_decoded.counts().ok_or_else(|| {
-                    GenoioError::internal_contract(
-                        "matrix-only vcf haplotype filter missing counts",
-                    )
-                })?;
-                evaluate_hardcall_counts_filter(
-                    counts,
-                    filter,
-                    filter.genotype_filter_plan(),
-                    Some(&variant),
-                    false,
-                )?
-            } else {
-                let stats = stats_decoded.stats().ok_or_else(|| {
-                    GenoioError::internal_contract("vcf haplotype filter missing stats")
-                })?;
-                (filter.evaluate(&variant, Some(&stats)), Some(stats))
-            };
+            let (retain_variant, stats) = evaluate_text_gt_filter(
+                &stats_decoded,
+                filter,
+                &variant,
+                matrix_only,
+                "haplotype",
+            )?;
             match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
@@ -1048,6 +1022,34 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
         diagnostics,
         matrix_only,
     )
+}
+
+fn evaluate_text_gt_filter(
+    decoded: &GtDecodeBuffers,
+    filter: &VariantFilter,
+    variant: &VariantRecord,
+    matrix_only: bool,
+    context: &str,
+) -> Result<(bool, Option<VariantStats>)> {
+    if matrix_only {
+        let counts = decoded.counts().ok_or_else(|| {
+            GenoioError::internal_contract(format!(
+                "matrix-only vcf {context} filter missing counts"
+            ))
+        })?;
+        return evaluate_hardcall_counts_filter(
+            counts,
+            filter,
+            filter.genotype_filter_plan(),
+            Some(variant),
+            false,
+        );
+    }
+
+    let stats = decoded.stats().ok_or_else(|| {
+        GenoioError::internal_contract(format!("vcf {context} filter missing stats"))
+    })?;
+    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
 }
 
 #[cfg(test)]

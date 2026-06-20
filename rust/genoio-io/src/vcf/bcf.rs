@@ -309,25 +309,13 @@ pub(super) fn read_haplotypes_dense_windowed(
                     BcfStatsMode::Compute
                 },
             )?;
-            Some(if matrix_only {
-                let counts = decoded_gt.counts.ok_or_else(|| {
-                    GenoioError::internal_contract(
-                        "matrix-only bcf haplotype filter missing counts",
-                    )
-                })?;
-                evaluate_hardcall_counts_filter(
-                    counts,
-                    filter,
-                    filter.genotype_filter_plan(),
-                    Some(variant),
-                    false,
-                )?
-            } else {
-                let stats = decoded_gt
-                    .stats
-                    .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?;
-                (filter.evaluate(variant, Some(&stats)), Some(stats))
-            })
+            Some(evaluate_bcf_gt_filter(
+                &decoded_gt,
+                filter,
+                variant,
+                matrix_only,
+                "haplotype",
+            )?)
         } else {
             None
         };
@@ -570,25 +558,7 @@ fn read_dense_windowed_with_field(
                             "genotype decision requires a variant filter",
                         )
                     })?;
-                    if matrix_only {
-                        let counts = decoded.counts.ok_or_else(|| {
-                            GenoioError::internal_contract(
-                                "matrix-only bcf GT filter missing counts",
-                            )
-                        })?;
-                        evaluate_hardcall_counts_filter(
-                            counts,
-                            filter,
-                            filter.genotype_filter_plan(),
-                            Some(variant_ref),
-                            false,
-                        )?
-                    } else {
-                        (
-                            filter.evaluate(variant_ref, decoded.stats.as_ref()),
-                            decoded.stats,
-                        )
-                    }
+                    evaluate_bcf_gt_filter(&decoded, filter, variant_ref, matrix_only, "GT")?
                 }
                 DenseField::Ds => {
                     let filter = variant_filter.ok_or_else(|| {
@@ -645,6 +615,34 @@ fn read_dense_windowed_with_field(
         },
         matrix_only,
     )
+}
+
+fn evaluate_bcf_gt_filter(
+    decoded: &DecodedBcfDenseValues,
+    filter: &VariantFilter,
+    variant: &VariantRecord,
+    matrix_only: bool,
+    context: &str,
+) -> Result<(bool, Option<VariantStats>)> {
+    if matrix_only {
+        let counts = decoded.counts.ok_or_else(|| {
+            GenoioError::internal_contract(format!(
+                "matrix-only bcf {context} filter missing counts"
+            ))
+        })?;
+        return evaluate_hardcall_counts_filter(
+            counts,
+            filter,
+            filter.genotype_filter_plan(),
+            Some(variant),
+            false,
+        );
+    }
+
+    let stats = decoded.stats.ok_or_else(|| {
+        GenoioError::internal_contract(format!("bcf {context} filter missing stats"))
+    })?;
+    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
 }
 
 fn validate_biallelic_lazy_record(
