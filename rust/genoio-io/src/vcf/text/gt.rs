@@ -202,7 +202,7 @@ pub(super) fn decode_gt_record(
     Ok(())
 }
 
-pub(super) fn record_has_phased_gt_evidence(record: &noodles::Record) -> bool {
+pub(super) fn text_record_has_phased_genotype(record: &noodles::Record) -> bool {
     let samples = record.samples();
     let sample_fields = samples.as_ref().as_bytes();
     let Some(gt_index) = gt_key_index(sample_fields) else {

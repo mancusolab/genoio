@@ -31,10 +31,10 @@ use crate::error::Result;
 use crate::matrix::{finish_variant_major_dense_matrix, VariantMajorDenseParts};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
-use super::text::metadata_variant_record_from_variant_record;
+use super::text::variant_record_from_noodles_variant_record;
 use super::{
-    haplotype_sample_records, noodles_record_has_phased_genotype,
-    sample_records_from_noodles_header,
+    haplotype_sample_records, sample_records_from_noodles_header,
+    variant_record_has_phased_genotype,
 };
 
 pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
@@ -60,11 +60,11 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
         }
 
         if !has_phased_genotype_evidence
-            && noodles_record_has_phased_genotype(path, &header, &record)?
+            && variant_record_has_phased_genotype(path, &header, &record)?
         {
             has_phased_genotype_evidence = true;
         }
-        variants.push(metadata_variant_record_from_variant_record(
+        variants.push(variant_record_from_noodles_variant_record(
             path, &header, &record,
         )?);
     }
@@ -171,7 +171,7 @@ pub(super) fn read_sparse_windowed(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_variant_record(path, &header, &record)?;
+        let mut variant = variant_record_from_noodles_variant_record(path, &header, &record)?;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -261,7 +261,7 @@ pub(super) fn read_haplotypes_dense_windowed(
         }
 
         let variant = if !matrix_only || variant_filter.is_some() {
-            Some(metadata_variant_record_from_variant_record(
+            Some(variant_record_from_noodles_variant_record(
                 path, &header, &record,
             )?)
         } else {
@@ -384,7 +384,7 @@ pub(super) fn read_haplotypes_sparse_windowed(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_variant_record(path, &header, &record)?;
+        let mut variant = variant_record_from_noodles_variant_record(path, &header, &record)?;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -483,7 +483,7 @@ fn read_dense_windowed_with_field(
         }
 
         let variant = if !matrix_only || variant_filter.is_some() {
-            Some(metadata_variant_record_from_variant_record(
+            Some(variant_record_from_noodles_variant_record(
                 path, &header, &record,
             )?)
         } else {
@@ -584,7 +584,7 @@ fn validate_biallelic_lazy_record(
         return Ok(());
     }
 
-    let variant = metadata_variant_record_from_variant_record(path, header, record)?;
+    let variant = variant_record_from_noodles_variant_record(path, header, record)?;
     validate_biallelic_variant(path, &variant)
 }
 

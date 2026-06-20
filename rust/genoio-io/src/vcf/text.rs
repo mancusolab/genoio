@@ -25,13 +25,13 @@ use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionA
 
 use self::ds::{decode_ds_record, DsDecodeBuffers};
 use self::gt::{
-    decode_gt_record, decode_phased_gt_dense_record, record_has_phased_gt_evidence,
+    decode_gt_record, decode_phased_gt_dense_record, text_record_has_phased_genotype,
     GtDecodeBuffers, GtStatsMode, HaplotypeDenseDecodeBuffers,
 };
 use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, TextDenseOutput};
 use self::record::{
-    metadata_variant_record_from_record, skip_variant_for_region, validate_biallelic_variant,
+    skip_variant_for_region, validate_biallelic_variant, variant_record_from_text_record,
 };
 use self::source::{
     ensure_text_indexed_vcf_supported, ensure_text_vcf_supported, open_compressed_reader,
@@ -52,7 +52,7 @@ mod record;
 mod source;
 mod sparse;
 
-pub(in crate::vcf) use self::record::metadata_variant_record_from_variant_record;
+pub(in crate::vcf) use self::record::variant_record_from_noodles_variant_record;
 
 pub(super) const VCF_TEXT_BUFFER_SIZE: usize = 1 << 20;
 
@@ -681,10 +681,10 @@ fn read_metadata_records<R: BufRead>(
             break;
         }
 
-        if !has_phased_genotype_evidence && record_has_phased_gt_evidence(&record) {
+        if !has_phased_genotype_evidence && text_record_has_phased_genotype(&record) {
             has_phased_genotype_evidence = true;
         }
-        variants.push(metadata_variant_record_from_record(path, &record)?);
+        variants.push(variant_record_from_text_record(path, &record)?);
     }
 
     let capabilities = if has_phased_genotype_evidence {
@@ -737,7 +737,7 @@ fn read_dense_records<R: BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         // Tabix/CSI chunks can include neighboring records from the same BGZF
         // block. Keep the text backend's exact region contract independent of the
         // lower-level chunk boundaries.
@@ -839,7 +839,7 @@ fn read_dosage_dense_records<R: BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source.region) {
             continue;
         }
@@ -935,7 +935,7 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }

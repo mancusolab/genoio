@@ -493,7 +493,7 @@ fn plain_sample_record(iid: String) -> SampleRecord {
     }
 }
 
-fn noodles_record_has_phased_genotype<R>(
+fn variant_record_has_phased_genotype<R>(
     path: &Path,
     header: &noodles::Header,
     record: &R,
