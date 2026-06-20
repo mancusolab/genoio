@@ -1,0 +1,128 @@
+// pattern: Imperative Shell
+//! Dense dosage PLINK2 read orchestration.
+
+use std::path::Path;
+
+use genoio_core::{
+    attach_variant_stats, DenseGenotypeMatrix, PartialFilterDecision, VariantFilter, VariantWindow,
+};
+
+use crate::error::Result;
+use crate::matrix::{finish_variant_major_dense_matrix, VariantMajorDenseParts};
+use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+
+use super::evaluate_dosage_filter;
+use super::metadata::PvarRecordReader;
+use super::pgen::{open_pgen_payload, read_plink2_variant_dosage, PgenDecoderState};
+use super::require_genotype_decision_filter;
+use super::source::{
+    empty_dense_for_samples, require_pvar, variant_output_capacity, Plink2ReadContext,
+};
+
+/// Read retained PLINK2 unphased biallelic dosages as a dense matrix.
+pub fn read_plink2_dosage_dense_windowed(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    let Plink2ReadContext {
+        header,
+        selection,
+        all_samples_selected: _,
+    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
+    let mut diagnostics = selection.diagnostics.clone();
+    if variant_filter.is_some_and(VariantFilter::is_always_false) {
+        require_pvar(pvar)?;
+        return empty_dense_for_samples(selection.samples, diagnostics, matrix_only);
+    }
+
+    let mut pvar_reader = PvarRecordReader::new(pvar)?;
+    let mut file = open_pgen_payload(pgen)?;
+    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
+    let output_variant_capacity = variant_output_capacity(&header, variant_window);
+    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variant_major_values =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut variant_major_missing =
+        Vec::with_capacity(selection.samples.len() * output_variant_capacity);
+    let mut retention = RetainedVariantState::new(variant_window);
+    let mut stopped_after_window = false;
+    let mut output_variant_count = 0_usize;
+
+    while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
+        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+            filter.partial_decision(&variant)
+        });
+        match retention.metadata_decision(partial_decision, &mut diagnostics) {
+            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            MetadataRetentionAction::Skip => continue,
+            MetadataRetentionAction::Stop => {
+                stopped_after_window = true;
+                break;
+            }
+        }
+
+        read_plink2_variant_dosage(
+            pgen,
+            &mut file,
+            &header,
+            variant_index,
+            &selection.source_indices,
+            &mut decoder_state,
+        )?;
+        if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+            let filter = require_genotype_decision_filter(variant_filter)?;
+            let (retain_variant, stats) = evaluate_dosage_filter(
+                &decoder_state.values,
+                &decoder_state.missing,
+                filter,
+                &variant,
+                !matrix_only,
+            )?;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
+                RetentionAction::Include => {}
+                RetentionAction::Skip => continue,
+                RetentionAction::Stop => {
+                    stopped_after_window = true;
+                    break;
+                }
+            }
+            if let Some(stats) = stats {
+                attach_variant_stats(&mut variant, stats);
+            }
+        }
+        if !matrix_only {
+            variants.push(variant);
+        }
+        variant_major_values.extend_from_slice(&decoder_state.values);
+        variant_major_missing.extend_from_slice(&decoder_state.missing);
+        output_variant_count += 1;
+        if retention.window_is_satisfied() {
+            stopped_after_window = true;
+            break;
+        }
+    }
+    if !stopped_after_window {
+        pvar_reader.validate_count(header.variant_ct)?;
+    }
+
+    let n_samples = selection.samples.len();
+    let n_variants = output_variant_count;
+    diagnostics.retained_variants = n_variants;
+    finish_variant_major_dense_matrix(
+        VariantMajorDenseParts {
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            samples: selection.samples,
+            variants,
+            diagnostics,
+        },
+        matrix_only,
+    )
+}
