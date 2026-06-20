@@ -27,6 +27,7 @@ use noodles_vcf::variant::record::{
     AlternateBases as _, Ids as _,
 };
 
+use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::matrix::{finish_variant_major_dense_matrix, VariantMajorDenseParts};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
@@ -520,37 +521,52 @@ fn read_dense_windowed_with_field(
                 &source_indices,
                 needs_genotype_decision,
             )?,
-            DenseField::Ds => decode_ds_record(
-                path,
-                &header,
-                &record,
-                &source_indices,
-                needs_genotype_decision,
-            )?,
+            DenseField::Ds => decode_ds_record(path, &header, &record, &source_indices, false)?,
         };
 
         if needs_genotype_decision {
-            let variant = variant.as_ref().ok_or_else(|| {
+            let variant_ref = variant.as_ref().ok_or_else(|| {
                 GenoioError::internal_contract("bcf filter requires variant metadata")
             })?;
-            match retention.genotype_decision(
-                variant_filter
-                    .is_none_or(|filter| filter.evaluate(variant, decoded.stats.as_ref())),
-                &mut diagnostics,
-            ) {
+            let (retain_variant, stats) = match field {
+                DenseField::Gt => (
+                    variant_filter
+                        .is_none_or(|filter| filter.evaluate(variant_ref, decoded.stats.as_ref())),
+                    decoded.stats,
+                ),
+                DenseField::Ds => {
+                    let filter = variant_filter.ok_or_else(|| {
+                        GenoioError::internal_contract(
+                            "genotype decision requires a variant filter",
+                        )
+                    })?;
+                    evaluate_dosage_filter(
+                        &decoded.values,
+                        &decoded.missing,
+                        filter,
+                        variant_ref,
+                        !matrix_only,
+                    )?
+                }
+            };
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-        }
-
-        if !matrix_only {
-            let mut variant = variant.ok_or_else(|| {
+            if !matrix_only {
+                let mut variant = variant.ok_or_else(|| {
+                    GenoioError::internal_contract("bcf metadata output requires variant metadata")
+                })?;
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
+                variants.push(variant);
+            }
+        } else if !matrix_only {
+            let variant = variant.ok_or_else(|| {
                 GenoioError::internal_contract("bcf metadata output requires variant metadata")
             })?;
-            if let Some(stats) = decoded.stats {
-                attach_variant_stats(&mut variant, stats);
-            }
             variants.push(variant);
         }
 
@@ -1274,6 +1290,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["rs1", "rs2"]
         );
+    }
+
+    #[test]
+    fn bcf_dense_ds_matrix_only_filters_from_dosage_stats() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf_with_ds(file.path());
+        let filter = VariantFilter::from_json_value(serde_json::json!({
+            "op": "predicate",
+            "name": "mac",
+            "params": {"max": 1}
+        }))
+        .expect("filter should parse");
+
+        let dense = read_dosage_dense_windowed(file.path(), None, Some(&filter), None, true)
+            .expect("matrix-only BCF dense DS should filter");
+
+        assert_eq!(dense.n_samples, 2);
+        assert_eq!(dense.n_variants, 1);
+        assert!(dense.samples.is_empty());
+        assert!(dense.variants.is_empty());
+        assert_eq!(dense.values, vec![2.0, 0.0]);
+        assert_eq!(dense.missing_mask, vec![false, true]);
     }
 
     #[test]

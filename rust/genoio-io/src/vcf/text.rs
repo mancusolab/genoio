@@ -13,12 +13,12 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    compute_dosage_variant_stats, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
-    MetadataOutput, PartialFilterDecision, RegionPredicate, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    RegionPredicate, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
+use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::matrix::empty_sparse_matrix;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
@@ -856,26 +856,26 @@ fn read_dosage_dense_records<R: BufRead>(
         decode_ds_record(path, &record, &selection.source_indices, &mut decoded)?;
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        let stats = if needs_genotype_decision {
-            Some(compute_dosage_variant_stats(
+        if needs_genotype_decision {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, stats) = evaluate_dosage_filter(
                 decoded.values(),
                 decoded.missing(),
-            )?)
-        } else {
-            None
-        };
-
-        if let Some(stats) = stats {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                &mut diagnostics,
-            ) {
+                filter,
+                &variant,
+                !matrix_only,
+            )?;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
             if !matrix_only {
-                genoio_core::attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    genoio_core::attach_variant_stats(&mut variant, stats);
+                }
             }
         }
         if !matrix_only {

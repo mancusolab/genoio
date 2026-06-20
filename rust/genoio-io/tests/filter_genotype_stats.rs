@@ -256,6 +256,17 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+
+    let matrix_only =
+        genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None, true)
+            .expect("matrix-only vcf dosage should filter");
+
+    assert_eq!(matrix_only.n_samples, 3);
+    assert_eq!(matrix_only.n_variants, 1);
+    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.variants.is_empty());
+    assert_eq!(matrix_only.values, vec![0.0, 0.0, 0.7]);
+    assert_eq!(matrix_only.missing_mask, vec![false, true, false]);
 }
 
 #[test]
