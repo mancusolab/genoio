@@ -100,7 +100,7 @@ pub fn read_plink2_haplotypes_dense_windowed(
                 filter,
                 genotype_filter_plan,
                 Some(&variant),
-                true,
+                !matrix_only,
             )?;
             match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
