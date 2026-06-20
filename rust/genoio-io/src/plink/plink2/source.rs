@@ -109,15 +109,21 @@ pub(super) fn empty_dense_for_samples(
 pub(super) fn empty_sparse_for_selection(
     selection: DenseSampleSelection,
 ) -> Result<SparseGenotypeMatrix> {
-    let mut diagnostics = selection.diagnostics;
+    empty_sparse_for_samples(selection.samples, selection.diagnostics)
+}
+
+pub(super) fn empty_sparse_for_samples(
+    samples: Vec<SampleRecord>,
+    mut diagnostics: DenseDiagnostics,
+) -> Result<SparseGenotypeMatrix> {
     diagnostics.retained_variants = 0;
     SparseGenotypeMatrix::new(
-        selection.samples.len(),
+        samples.len(),
         0,
         vec![0],
         Vec::new(),
         Vec::new(),
-        selection.samples,
+        samples,
         Vec::new(),
         diagnostics,
     )
