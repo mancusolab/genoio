@@ -69,12 +69,17 @@ impl SparseGenotypeMatrix {
 
 /// Reject retained missing calls before constructing sparse matrices.
 pub fn reject_sparse_missing_values(missing: &[bool]) -> Result<(), GenoioError> {
-    if missing.iter().any(|value| *value) {
-        return Err(GenoioError::missing_data(
-            "sparse missing values are not stored in this release",
-        ));
+    reject_sparse_missing(missing.iter().any(|value| *value))
+}
+
+/// Reject a precomputed missing-call flag before sparse matrix construction.
+pub fn reject_sparse_missing(has_missing: bool) -> Result<(), GenoioError> {
+    if !has_missing {
+        return Ok(());
     }
-    Ok(())
+    Err(GenoioError::missing_data(
+        "sparse missing values are not stored in this release",
+    ))
 }
 
 /// Flip a biallelic 0/1/2 column so stored nonzeros represent the minor allele.
@@ -87,6 +92,29 @@ pub fn flip_values_to_minor_allele(values: &mut [f32], variant: &mut VariantReco
     for value in values {
         *value = 2.0 - *value;
     }
+    mark_variant_flipped(variant);
+}
+
+/// Flip a biallelic haplotype indicator column to encode the minor allele.
+pub fn flip_haplotype_values_to_minor_allele(values: &mut [f32], variant: &mut VariantRecord) {
+    let a1_count = values.iter().sum::<f32>();
+    let a0_count = values.len() as f32 - a1_count;
+    if a1_count <= a0_count {
+        return;
+    }
+    for value in values {
+        *value = 1.0 - *value;
+    }
+    mark_variant_flipped(variant);
+}
+
+/// Return true when allele 1 is the major allele among called haplotypes.
+pub fn should_flip_haplotype_to_minor_allele(a1_count: usize, n_haplotypes: usize) -> bool {
+    a1_count > n_haplotypes.saturating_sub(a1_count)
+}
+
+/// Flip only variant metadata after a backend emitted complement allele rows.
+pub fn flip_variant_metadata_to_minor_allele(variant: &mut VariantRecord) {
     mark_variant_flipped(variant);
 }
 

@@ -37,8 +37,9 @@ pub use filter::{
 };
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 pub use sparse::{
-    append_sparse_column, flip_values_to_minor_allele, reject_sparse_missing_values,
-    SparseGenotypeMatrix,
+    append_sparse_column, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
+    flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,
+    should_flip_haplotype_to_minor_allele, SparseGenotypeMatrix,
 };
 
 /// Python package and Rust workspace package name.

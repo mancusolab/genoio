@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod common;
@@ -7,6 +8,14 @@ use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
+}
+
+fn write_bgzf_file(path: &Path, contents: &str) {
+    let file = fs::File::create(path).expect("test fixture should be created");
+    let mut writer = noodles_bgzf::io::Writer::new(file);
+    writer
+        .write_all(contents.as_bytes())
+        .expect("test fixture should be compressed");
 }
 
 fn write_vcf(path: &Path, body: &str) {
@@ -75,6 +84,61 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
     assert_eq!(sparse.n_rows, dense.n_samples);
     assert_eq!(sparse.n_cols, dense.n_variants);
     assert_eq!(csc_to_dense(&sparse), dense.values);
+}
+
+#[test]
+fn compressed_vcf_sparse_windowed_matches_existing_sparse_semantics() {
+    let dir = unique_dir("vcf-sparse-fast-compressed");
+    let path = dir.join("tiny.vcf.gz");
+    write_bgzf_file(
+        &path,
+        "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DP\t0/0:7\t0/1:8\t1/1:9
+1\t20\trs2\tC\tT\t.\tPASS\t.\tDP:GT\t5:0/1\t6:0/0\t7:1/1
+1\t30\trs3\tC\tA\t.\tPASS\t.\tGT\t0/0\t0/0\t0/0
+",
+    );
+    let samples = vec!["S3".to_string(), "S1".to_string()];
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("MAF filter should parse");
+
+    let sparse = genoio_io::read_vcf_sparse_windowed(
+        &path,
+        Some(&samples),
+        Some(&filter),
+        Some(genoio_core::VariantWindow { start: 0, len: 2 }),
+    )
+    .expect("compressed sparse VCF should decode");
+
+    assert_eq!(sparse.n_rows, 2);
+    assert_eq!(sparse.n_cols, 2);
+    assert_eq!(sparse.indptr, vec![0, 1, 2]);
+    assert_eq!(sparse.indices, vec![1, 0]);
+    assert_eq!(sparse.data, vec![2.0, 1.0]);
+    assert_eq!(
+        sparse
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S1", "S3"]
+    );
+    assert_eq!(
+        sparse
+            .variants
+            .iter()
+            .map(|variant| (variant.id.as_str(), variant.flipped))
+            .collect::<Vec<_>>(),
+        vec![("rs1", false), ("rs2", true)]
+    );
 }
 
 #[test]
