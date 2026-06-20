@@ -973,18 +973,41 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
             // Genotype-stat filters are evaluated on diploid dosage before
             // enforcing phased output. This lets filters drop unphased records
             // without surfacing a haplotype decode error.
+            let stats_mode = if matrix_only {
+                GtStatsMode::Counts
+            } else {
+                GtStatsMode::Compute
+            };
             decode_gt_record(
                 path,
                 &record,
                 &source_indices,
-                GtStatsMode::Compute,
+                stats_mode,
                 &mut stats_decoded,
             )?;
-            let stats = stats_decoded.stats();
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, stats) = if matrix_only {
+                let counts = stats_decoded.counts().ok_or_else(|| {
+                    GenoioError::internal_contract(
+                        "matrix-only vcf haplotype filter missing counts",
+                    )
+                })?;
+                evaluate_hardcall_counts_filter(
+                    counts,
+                    filter,
+                    filter.genotype_filter_plan(),
+                    Some(&variant),
+                    false,
+                )?
+            } else {
+                let stats = stats_decoded.stats().ok_or_else(|| {
+                    GenoioError::internal_contract("vcf haplotype filter missing stats")
+                })?;
+                (filter.evaluate(&variant, Some(&stats)), Some(stats))
+            };
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,

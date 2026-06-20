@@ -291,29 +291,48 @@ pub(super) fn read_haplotypes_dense_windowed(
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        let stats = if needs_genotype_decision {
-            Some(
-                decode_gt_record(
-                    path,
-                    &header,
-                    &record,
-                    &source_indices,
-                    BcfStatsMode::Compute,
-                )?
-                .stats
-                .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
-            )
-        } else {
-            None
-        };
-        if needs_genotype_decision {
+        let filter_result = if needs_genotype_decision {
             let variant = variant.as_ref().ok_or_else(|| {
                 GenoioError::internal_contract("bcf filter requires variant metadata")
             })?;
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let decoded_gt = decode_gt_record(
+                path,
+                &header,
+                &record,
+                &source_indices,
+                if matrix_only {
+                    BcfStatsMode::Counts
+                } else {
+                    BcfStatsMode::Compute
+                },
+            )?;
+            Some(if matrix_only {
+                let counts = decoded_gt.counts.ok_or_else(|| {
+                    GenoioError::internal_contract(
+                        "matrix-only bcf haplotype filter missing counts",
+                    )
+                })?;
+                evaluate_hardcall_counts_filter(
+                    counts,
+                    filter,
+                    filter.genotype_filter_plan(),
+                    Some(variant),
+                    false,
+                )?
+            } else {
+                let stats = decoded_gt
+                    .stats
+                    .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?;
+                (filter.evaluate(variant, Some(&stats)), Some(stats))
+            })
+        } else {
+            None
+        };
+        if let Some((retain_variant, _)) = filter_result {
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
@@ -324,7 +343,7 @@ pub(super) fn read_haplotypes_dense_windowed(
             let mut variant = variant.ok_or_else(|| {
                 GenoioError::internal_contract("bcf metadata output requires variant metadata")
             })?;
-            if let Some(stats) = stats {
+            if let Some((_, Some(stats))) = filter_result {
                 attach_variant_stats(&mut variant, stats);
             }
             variants.push(variant);
@@ -1159,6 +1178,33 @@ mod tests {
             .expect("second phased BCF record should be written");
     }
 
+    fn write_test_bcf_mixed_phase_for_stat_filter(path: &Path) {
+        let file = fs::File::create(path).expect("test BCF should be created");
+        let mut writer = noodles_bcf::io::Writer::new(file);
+        let header = noodles_vcf::Header::builder()
+            .add_contig("1", Map::<Contig>::new())
+            .add_format(key::GENOTYPE, Map::<Format>::from(key::GENOTYPE))
+            .add_sample_name("s1")
+            .add_sample_name("s2")
+            .build();
+
+        writer
+            .write_header(&header)
+            .expect("test BCF header should be written");
+        writer
+            .write_variant_record(
+                &header,
+                &bcf_test_record("rs_phased", 10, "A", &["G"], ["0|1", "1|0"]),
+            )
+            .expect("first mixed-phase BCF record should be written");
+        writer
+            .write_variant_record(
+                &header,
+                &bcf_test_record("rs_unphased_monomorphic", 20, "C", &["T"], ["0/0", "0/0"]),
+            )
+            .expect("second mixed-phase BCF record should be written");
+    }
+
     fn bcf_test_record(
         id: &str,
         pos: usize,
@@ -1439,6 +1485,31 @@ mod tests {
         assert_eq!(dense.samples[0].iid, "s1");
         assert_eq!(dense.samples[0].haplotype_index, Some(0));
         assert_eq!(dense.samples[1].haplotype_index, Some(1));
+    }
+
+    #[test]
+    fn bcf_dense_haplotypes_matrix_only_filter_drops_unphased_before_decode() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf_mixed_phase_for_stat_filter(file.path());
+        let filter = VariantFilter::from_json_value(serde_json::json!({
+            "op": "predicate",
+            "name": "maf",
+            "params": {"min": 0.1}
+        }))
+        .expect("filter should parse");
+
+        let dense = read_haplotypes_dense_windowed(file.path(), None, Some(&filter), None, true)
+            .expect("matrix-only BCF haplotypes should prefilter before phased decode");
+
+        assert_eq!(dense.n_samples, 4);
+        assert_eq!(dense.n_variants, 1);
+        assert!(dense.samples.is_empty());
+        assert!(dense.variants.is_empty());
+        assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
+        assert_eq!(dense.missing_mask, vec![false; 4]);
     }
 
     #[test]
