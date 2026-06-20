@@ -24,6 +24,7 @@
 //!   inputs.
 
 mod bgen;
+mod dosage_filter;
 mod error;
 mod hardcall;
 mod matrix;

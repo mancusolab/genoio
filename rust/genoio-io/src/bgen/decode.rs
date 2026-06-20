@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 use flate2::read::ZlibDecoder;
 use genoio_core::GenoioError;
 
+use crate::dosage_filter::DosageFilterCounts;
 use crate::Result;
 
-use super::filter::DosageFilterCounts;
 use super::header::BgenCompression;
 use super::io::{read_u32_le, skip_exact};
 

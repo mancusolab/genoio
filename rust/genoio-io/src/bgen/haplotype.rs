@@ -12,6 +12,7 @@ use genoio_core::{
     PartialFilterDecision, SampleRecord, VariantFilter, VariantWindow,
 };
 
+use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::matrix::{
     finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
@@ -20,7 +21,7 @@ use crate::matrix::{
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use super::decode::{decode_buffered_haplotype_values, HaplotypeDecodeBuffers};
-use super::filter::{apply_genotype_filter_result, evaluate_dosage_filter};
+use super::filter::apply_genotype_filter_result;
 use super::index::{indexed_region_records, BgenIndexRecord};
 use super::session::{BgenIndexedReadContext, BgenReadSession, BgenVariantCursor};
 

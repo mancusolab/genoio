@@ -7,11 +7,9 @@
 
 use std::path::Path;
 
-use genoio_core::{
-    compute_dosage_variant_stats, is_dosage_polymorphic, GenoioError, GenotypeFilterPlan,
-    MetadataOutput, SourceCapabilities, VariantFilter, VariantRecord, VariantStats,
-};
+use genoio_core::{GenoioError, MetadataOutput, SourceCapabilities, VariantFilter};
 
+use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 #[cfg(test)]
 use crate::hardcall::HardcallBatch as PackedVariantBatch;
@@ -65,26 +63,6 @@ fn append_variant_to_sample_major(
         out_values[offset] = value;
         out_missing[offset] = is_missing;
     }
-}
-
-pub(super) fn evaluate_dosage_filter(
-    values: &[f32],
-    missing: &[bool],
-    filter: &VariantFilter,
-    variant: &VariantRecord,
-    require_stats: bool,
-) -> Result<(bool, Option<VariantStats>)> {
-    if !require_stats
-        && matches!(
-            filter.genotype_filter_plan(),
-            GenotypeFilterPlan::Polymorphic
-        )
-    {
-        return Ok((is_dosage_polymorphic(values, missing)?, None));
-    }
-
-    let stats = compute_dosage_variant_stats(values, missing)?;
-    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
 }
 
 pub(super) fn require_genotype_decision_filter(
