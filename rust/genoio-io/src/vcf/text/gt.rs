@@ -315,7 +315,15 @@ fn decode_selected_phased_gt_record(
     }
 }
 
+const UNPHASED_HAPLOTYPE_GT: &str =
+    "contains an unphased GT separator in a retained haplotype variant";
+
 fn gt_error(path: &Path, record_location: &str, reason: &str) -> GenoioError {
+    if reason == UNPHASED_HAPLOTYPE_GT {
+        return GenoioError::unsupported(format!(
+            "vcf record {record_location} has unsupported GT: {reason}"
+        ));
+    }
     GenoioError::invalid_source(
         path,
         format!("vcf record {record_location} has unsupported GT: {reason}"),
@@ -477,7 +485,7 @@ fn decode_phased_gt_token(token: &[u8]) -> std::result::Result<HaplotypeCall, &'
         return Err("expected diploid phased biallelic hardcall");
     }
     if token[1] == b'/' {
-        return Err("contains an unphased GT separator in a retained haplotype variant");
+        return Err(UNPHASED_HAPLOTYPE_GT);
     }
     if token[1] != b'|' {
         return Err("expected diploid phased biallelic hardcall");
