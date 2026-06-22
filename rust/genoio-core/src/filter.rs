@@ -12,6 +12,21 @@ use crate::{GenoioError, VariantRecord};
 /// Python constructs a JSON-compatible filter IR. This type validates that IR,
 /// tracks which predicates need genotype statistics, and exposes safe metadata
 /// decisions for early record skipping.
+///
+/// Reader contract:
+///
+/// 1. Call [`VariantFilter::partial_decision`] after source metadata has been
+///    parsed and before genotype values are decoded.
+/// 2. Treat `Accept` and `Reject` as final decisions; they must not decode
+///    genotypes just to re-evaluate the same filter.
+/// 3. For `NeedGenotypes`, evaluate the genotype-dependent portion with the
+///    most native backend representation available. [`GenotypeFilterPlan`]
+///    describes the optimized shapes; `Generic` means the reader must construct
+///    complete [`VariantStats`] and call [`VariantFilter::evaluate`].
+///
+/// Matrix-only reads may return only the retain/drop decision. Reads that return
+/// variant metadata should attach complete stats for retained genotype-filtered
+/// variants when the public output contract exposes those fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantFilter {
     expr: Expr,
@@ -21,6 +36,10 @@ pub struct VariantFilter {
 ///
 /// Backends use this to select a format-specific predicate kernel when the
 /// filter shape is simple enough to avoid constructing full `VariantStats`.
+/// The plan intentionally ignores metadata predicates because readers have
+/// already handled them with [`VariantFilter::partial_decision`]. A non-generic
+/// plan is therefore only a valid complete decision after partial evaluation has
+/// returned `NeedGenotypes` for that source variant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GenotypeFilterPlan {
     /// Use the generic `VariantStats` evaluation path.
