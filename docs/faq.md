@@ -62,8 +62,8 @@ expression such as
 expression while reading the file.
 
 That matters for region reads. A concrete region filter can be pushed into
-indexed VCF/BCF and BGEN reads, so `genoio` can jump to the requested genomic
-interval instead of scanning the full file.
+indexed compressed text VCF and indexed BGEN reads, so `genoio` can jump to the
+requested genomic interval instead of scanning the full file.
 
 ## When should I use read, iter_blocks, or iter_regions?
 

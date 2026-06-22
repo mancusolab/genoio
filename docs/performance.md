@@ -146,7 +146,7 @@ caller did not request. Returning `variants` costs more, but it keeps matrix
 columns interpretable.
 
 Metadata filters are cheaper than genotype filters because they can run before
-matrix decoding. Region filters on indexed compressed VCF/BCF sources and BGEN
+matrix decoding. Region filters on indexed compressed text VCF sources and BGEN
 sources with a same-path `.bgen.bgi` index can also skip unrelated records.
 
 For genotype-stat filters, pushing the filter into the Rust reader avoids a

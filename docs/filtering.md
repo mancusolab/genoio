@@ -32,21 +32,23 @@ genoio.maf(max=0.01) | genoio.id_in(["rs123", "rs456"])
 
 ---
 
-## Cheap filters and genotype filters
+## Metadata filters and genotype filters
 
 Some predicates use metadata already stored on the variant record: chromosome,
 position, ID, REF/ALT structure, and `QUAL`. These can remove records before
 genotypes are decoded.
 
 Other predicates need the genotype values. `maf(...)`, `mac(...)`,
-`missing_rate(...)`, and `polymorphic()` run after candidate genotypes have been
-read.
+`missing_rate(...)`, and `polymorphic()` are evaluated only for records that
+survive the metadata part of the expression. For common genotype-stat filters,
+the Rust reader can often evaluate a backend-specific filter plan from native
+counts or packed genotypes instead of building full variant statistics first.
 
-!!! tip "Put cheap filters first when you can"
+!!! tip "Combine metadata and genotype filters"
     `region("22:20000000-21000000") & qual(min=20) & maf(max=0.05)` lets the
-    reader narrow the candidate set before computing MAF. You don't have to
-    order expressions perfectly, but filters based on position, ID, allele
-    structure, and quality are the ones that can avoid genotype work.
+    reader narrow the candidate set before evaluating MAF. You do not need to
+    hand-order simple expressions for performance: Rust simplifies the filter IR
+    and partially evaluates metadata predicates before genotype decoding.
 
 ---
 
@@ -59,9 +61,9 @@ region = genoio.region("22:20000000-21000000")
 ```
 
 !!! note "Indexed regions"
-    Compressed VCF/BCF region reads require a `.tbi` or `.csi` index. `genoio`
-    rejects unindexed compressed region reads instead of silently scanning the
-    whole file.
+    Compressed text VCF region reads require a `.tbi` or `.csi` index. `genoio`
+    rejects unindexed compressed text VCF region reads instead of silently
+    scanning the whole file.
 
     BGEN dosage reads use a same-path bgenix SQLite index when one exists. For
     `cohort.bgen`, the expected path is `cohort.bgen.bgi`. Without that index,
@@ -118,11 +120,11 @@ allele frequency less than or equal to `0.05`.
     It does not contain Python callbacks. That keeps filtering portable across
     whole reads, block reads, and Rust reader implementations.
 
-    Rust uses the IR to separate cheap metadata decisions from data-dependent
-    genotype decisions. Metadata predicates can be evaluated before matrix
-    construction, and concrete VCF/BCF or BGEN region predicates can use an
-    index when one is available. Before reading, Rust also normalizes simple
-    boolean expressions: overlapping conjoined regions are reduced to their
+    Rust uses the IR to separate metadata decisions from genotype-dependent
+    decisions. Metadata predicates can be evaluated before matrix construction,
+    and concrete compressed text VCF or BGEN region predicates can use an index
+    when one is available. Before reading, Rust also normalizes simple boolean
+    expressions: overlapping conjoined regions are reduced to their
     intersection, repeated threshold predicates are tightened, conjoined `id_in`
     predicates are intersected, and contradictory predicates become an empty
     result without scanning variant records.
