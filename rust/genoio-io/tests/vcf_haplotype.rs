@@ -377,3 +377,26 @@ fn haplotype_stat_filter_drops_unphased_genotype_before_separator_check() {
     );
     assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
 }
+
+#[test]
+fn haplotype_matrix_only_stat_filter_drops_unphased_genotype_before_separator_check() {
+    let dir = unique_dir("vcf-haplo-filter-unphased-matrix-only");
+    let path = dir.join("mixed-stat.vcf");
+    fs::write(&path, mixed_phase_stat_filter_vcf()).expect("fixture should be written");
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let haplotypes =
+        genoio_io::read_vcf_haplotypes_dense_windowed(&path, None, Some(&filter), None, true)
+            .expect("matrix-only unphased dropped genotype should not fail haplotype decode");
+
+    assert_eq!(haplotypes.n_samples, 4);
+    assert_eq!(haplotypes.n_variants, 1);
+    assert!(haplotypes.samples.is_empty());
+    assert!(haplotypes.variants.is_empty());
+    assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
+}

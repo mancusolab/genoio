@@ -1,4 +1,8 @@
 //! Sparse CSC output for the text VCF backend.
+//!
+//! Sparse text reads decode selected GT or haplotype tokens and append retained
+//! variants directly to CSC buffers. Missing retained calls are rejected because
+//! the sparse matrix format stores values only.
 
 // pattern: Mixed (unavoidable)
 // Reason: This hot path combines lazy VCF record IO with direct CSC emission to
@@ -25,7 +29,7 @@ use super::gt::{
     HaplotypeSparseDecodeBuffers,
 };
 use super::record::{
-    metadata_variant_record_from_record, skip_variant_for_region, validate_biallelic_variant,
+    skip_variant_for_region, validate_biallelic_variant, variant_record_from_text_record,
 };
 
 pub(super) fn read_sparse_records<R: BufRead>(
@@ -63,7 +67,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }
@@ -163,7 +167,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }

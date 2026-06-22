@@ -1,5 +1,8 @@
 // pattern: Imperative Shell
 //! Shared binary read helpers for BGEN submodules.
+//!
+//! Helpers keep little-endian parsing and skip loops consistent across header,
+//! metadata, and probability-block readers.
 
 use std::io::Read;
 use std::path::Path;

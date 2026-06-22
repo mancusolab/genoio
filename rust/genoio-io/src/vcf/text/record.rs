@@ -1,4 +1,7 @@
 //! Convert noodles lazy records into genoio metadata records.
+//!
+//! The conversion keeps REF/ALT orientation, finite QUAL values, and concrete
+//! region checks in one place for text VCF and BCF callers.
 
 // pattern: Functional Core
 
@@ -11,8 +14,8 @@ use crate::error::Result;
 
 use super::super::finite_qual;
 
-/// Convert a structured noodles VCF/BCF record into genoio's metadata shape.
-pub(in crate::vcf) fn metadata_variant_record_from_variant_record<R>(
+/// Convert a noodles VCF/BCF record into genoio's metadata shape.
+pub(in crate::vcf) fn variant_record_from_noodles_variant_record<R>(
     path: &Path,
     header: &noodles::Header,
     record: &R,
@@ -84,7 +87,7 @@ pub(super) fn skip_variant_for_region(
     region.is_some_and(|region| !variant_in_region(variant, region))
 }
 
-pub(super) fn metadata_variant_record_from_record(
+pub(super) fn variant_record_from_text_record(
     path: &Path,
     record: &noodles::Record,
 ) -> Result<VariantRecord> {

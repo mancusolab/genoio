@@ -1,6 +1,11 @@
 // pattern: Mixed
 // Reason: Text VCF routing combines pure filter-policy decisions with cheap
 // filesystem checks for companion tabix/CSI indexes.
+//! Routing policy for indexed and full-scan text VCF reads.
+//!
+//! Concrete region predicates can use tabix or CSI indexes. Other filters stay
+//! on the permissive full scan so metadata parsing and record validation remain
+//! consistent with unindexed reads.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

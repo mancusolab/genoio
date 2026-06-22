@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! PLINK2 read setup and empty-output helpers.
+//!
+//! Read contexts pair a PGEN header with PSAM sample selection before the dense,
+//! dosage, haplotype, or sparse loops run. Empty-output helpers centralize the
+//! matrix-only metadata elision rules.
 
 use std::fs;
 use std::path::Path;

@@ -10,8 +10,21 @@
 //! Public functions in this crate perform filesystem IO and format parsing,
 //! then return validated core structs. Python bindings call these functions
 //! through `genoio-py`.
+//!
+//! Naming grammar inside parser modules:
+//!
+//! - `read_*` performs source IO or advances a reader.
+//! - `parse_*` turns text fields into typed records.
+//! - `decode_*` turns encoded genotype or dosage payloads into values.
+//! - `validate_*` checks source-data invariants.
+//! - `ensure_*` checks caller preconditions before entering a backend.
+//! - `skip_*` advances over data without materializing it.
+//! - `Session` owns an open reader; `Context` is read-loop setup; `State` and
+//!   `Buffers` are mutable decode scratch; `Parts` are final matrix assembly
+//!   inputs.
 
 mod bgen;
+mod dosage_filter;
 mod error;
 mod hardcall;
 mod matrix;

@@ -7,10 +7,11 @@
 
 use std::path::Path;
 
-use genoio_core::{variant_stats_from_counts, GenoioError, VariantStats};
+use genoio_core::{GenoioError, VariantStats};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
+use crate::hardcall::HardcallCounts;
 
 use super::format::{
     format_key_index, next_delimiter, nth_colon_field, scan_selected_format_tokens, FormatScanError,
@@ -20,6 +21,7 @@ pub(super) struct GtDecodeBuffers {
     values: Vec<f32>,
     missing: Vec<bool>,
     stats: Option<VariantStats>,
+    counts: Option<HardcallCounts>,
 }
 
 pub(super) struct HaplotypeSparseDecodeBuffers {
@@ -116,6 +118,7 @@ impl GtDecodeBuffers {
             values: Vec::with_capacity(n_samples),
             missing: Vec::with_capacity(n_samples),
             stats: None,
+            counts: None,
         }
     }
 
@@ -123,6 +126,7 @@ impl GtDecodeBuffers {
         self.values.clear();
         self.missing.clear();
         self.stats = None;
+        self.counts = None;
     }
 
     pub(super) fn values(&self) -> &[f32] {
@@ -140,11 +144,16 @@ impl GtDecodeBuffers {
     pub(super) fn stats(&self) -> Option<VariantStats> {
         self.stats
     }
+
+    pub(super) fn counts(&self) -> Option<HardcallCounts> {
+        self.counts
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GtStatsMode {
     Skip,
+    Counts,
     Compute,
 }
 
@@ -178,16 +187,28 @@ pub(super) fn decode_gt_record(
 
     match stats_mode {
         GtStatsMode::Compute => {
-            let mut counts = GtCounts::default();
+            let mut counts = HardcallCounts::default();
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
                 let call = decode_gt_token(token)?;
-                counts.record(call);
+                record_gt_call(&mut counts, call);
                 output.values.push(call.value);
                 output.missing.push(call.is_missing);
                 Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
             output.stats = Some(counts.variant_stats()?);
+        }
+        GtStatsMode::Counts => {
+            let mut counts = HardcallCounts::default();
+            scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
+                let call = decode_gt_token(token)?;
+                record_gt_call(&mut counts, call);
+                output.values.push(call.value);
+                output.missing.push(call.is_missing);
+                Ok(())
+            })
+            .map_err(|reason| gt_error(path, &record_location(), reason))?;
+            output.counts = Some(counts);
         }
         GtStatsMode::Skip => {
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
@@ -202,7 +223,7 @@ pub(super) fn decode_gt_record(
     Ok(())
 }
 
-pub(super) fn record_has_phased_gt_evidence(record: &noodles::Record) -> bool {
+pub(super) fn text_record_has_phased_genotype(record: &noodles::Record) -> bool {
     let samples = record.samples();
     let sample_fields = samples.as_ref().as_bytes();
     let Some(gt_index) = gt_key_index(sample_fields) else {
@@ -286,13 +307,13 @@ fn decode_selected_phased_gt_record(
 
     match stats_mode {
         GtStatsMode::Compute => {
-            let mut counts = GtCounts::default();
+            let mut counts = HardcallCounts::default();
             // The callback row base lets dense and sparse callers share the
             // same selected-sample scan while preserving haplotype row order.
             let mut row_base = 0_usize;
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
                 let call = decode_phased_gt_token(token)?;
-                counts.record_class(call.genotype_class()?);
+                record_gt_class(&mut counts, call.genotype_class()?);
                 emit(row_base, call);
                 row_base += 2;
                 Ok(())
@@ -300,7 +321,7 @@ fn decode_selected_phased_gt_record(
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
             Ok(Some(counts.variant_stats()?))
         }
-        GtStatsMode::Skip => {
+        GtStatsMode::Counts | GtStatsMode::Skip => {
             // Keep row accounting in the no-stats branch so output order is
             // identical regardless of filter shape.
             let mut row_base = 0_usize;
@@ -375,30 +396,16 @@ impl GtCall {
     }
 }
 
-#[derive(Default)]
-struct GtCounts {
-    hom_ref: u64,
-    het: u64,
-    hom_alt: u64,
-    missing: u64,
+fn record_gt_call(counts: &mut HardcallCounts, call: GtCall) {
+    record_gt_class(counts, call.class);
 }
 
-impl GtCounts {
-    fn record(&mut self, call: GtCall) {
-        self.record_class(call.class);
-    }
-
-    fn record_class(&mut self, class: GtClass) {
-        match class {
-            GtClass::HomRef => self.hom_ref += 1,
-            GtClass::Het => self.het += 1,
-            GtClass::HomAlt => self.hom_alt += 1,
-            GtClass::Missing => self.missing += 1,
-        }
-    }
-
-    fn variant_stats(&self) -> Result<VariantStats> {
-        variant_stats_from_counts(self.hom_ref, self.het, self.hom_alt, self.missing)
+fn record_gt_class(counts: &mut HardcallCounts, class: GtClass) {
+    match class {
+        GtClass::HomRef => counts.record_hom_ref(),
+        GtClass::Het => counts.record_het(),
+        GtClass::HomAlt => counts.record_hom_alt(),
+        GtClass::Missing => counts.record_missing(),
     }
 }
 

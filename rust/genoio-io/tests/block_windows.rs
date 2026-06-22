@@ -113,6 +113,30 @@ fn fixed_width_pgen(records: &[u8], n_samples: u32, n_variants: u32) -> Vec<u8> 
     bytes
 }
 
+fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    let n_variants = u32::try_from(records.len()).expect("test variant count fits u32");
+    let header_len = 12 + 8 + record_types.len() + records.len();
+    let mut bytes = vec![0x6c, 0x1b, 0x10];
+    bytes.extend(n_variants.to_le_bytes());
+    bytes.extend(n_samples.to_le_bytes());
+    bytes.push(0x04);
+    bytes.extend(
+        u64::try_from(header_len)
+            .expect("test header length fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(record_types);
+    bytes.extend(
+        records
+            .iter()
+            .map(|record| u8::try_from(record.len()).expect("test record length fits one byte")),
+    );
+    for record in records {
+        bytes.extend(*record);
+    }
+    bytes
+}
+
 fn write_plink2_filter_window_stop_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let pgen = dir.join("tiny.pgen");
     let pvar = dir.join("tiny.pvar");
@@ -474,6 +498,101 @@ malformed
     assert_eq!(block.n_variants, 1);
     assert!(block.variants.is_empty());
     assert_eq!(block.values, vec![1.0, 0.0, 1.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn plink2_matrix_only_genotype_filter_extends_variable_width_prefix() {
+    let dir = unique_dir("plink2-genotype-filter-prefix-extend");
+    let pgen = dir.join("tiny.pgen");
+    let pvar = dir.join("tiny.pvar");
+    let psam = dir.join("tiny.psam");
+    let all_hom_ref = [0x00];
+    let all_het = [0x15];
+    fs::write(
+        &pgen,
+        variable_width_pgen(&[0, 0], &[&all_hom_ref, &all_het], 3),
+    )
+    .expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "exists but matrix-only genotype filters do not parse this\n",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only genotype filter should extend the prefix when needed");
+
+    assert_eq!(block.n_variants, 1);
+    assert_eq!(block.values, vec![1.0, 1.0, 1.0]);
+    assert_eq!(block.diagnostics.candidate_variants, 2);
+    assert_eq!(block.diagnostics.dropped_genotype_variants, 1);
+}
+
+#[test]
+fn plink2_matrix_only_genotype_filter_prefix_ignores_later_unsupported_records() {
+    let dir = unique_dir("plink2-genotype-filter-prefix-ignore-later");
+    let pgen = dir.join("tiny.pgen");
+    let pvar = dir.join("tiny.pvar");
+    let psam = dir.join("tiny.psam");
+    let all_het = [0x15];
+    fs::write(&pgen, variable_width_pgen(&[0, 5], &[&all_het, &[0]], 3))
+        .expect("pgen fixture should be written");
+    write_text(
+        &pvar,
+        "exists but matrix-only genotype filters do not parse this\n",
+    );
+    write_text(
+        &psam,
+        "\
+#IID
+S1
+S2
+S3
+",
+    );
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("filter should parse");
+
+    let block = genoio_io::read_plink2_dense_windowed(
+        &pgen,
+        &pvar,
+        &psam,
+        None,
+        Some(&filter),
+        Some(VariantWindow { start: 0, len: 1 }),
+        true,
+    )
+    .expect("matrix-only genotype filter should not validate unused later records");
+
+    assert_eq!(block.n_variants, 1);
+    assert_eq!(block.values, vec![1.0, 1.0, 1.0]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 

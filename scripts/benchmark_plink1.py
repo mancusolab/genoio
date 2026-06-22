@@ -1,8 +1,12 @@
 #!/usr/bin/env python
+# pattern: Mixed
+
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 from bench_common import benchmark, compare_summaries, positive_int
@@ -31,13 +35,34 @@ def read_genoio(args: argparse.Namespace) -> np.ndarray:
     )
 
 
+def _patch_dask_memmap_tokenization() -> None:
+    """Avoid hashing the whole BED mmap while pandas-plink builds its Dask graph."""
+    dask_tokenize = cast(Any, importlib.import_module("dask.tokenize"))
+
+    # Force Dask's lazy NumPy token handlers to register before overriding memmap.
+    _ = dask_tokenize.normalize_token.dispatch(np.memmap)
+    dask_tokenize.normalize_token.register(
+        np.memmap,
+        lambda mmap: (
+            "memmap",
+            str(mmap.filename),
+            mmap.dtype.str,
+            mmap.mode,
+            mmap.offset,
+            mmap.shape,
+            mmap.strides,
+        ),
+    )
+
+
 def read_pandas_plink(args: argparse.Namespace) -> np.ndarray:
     from pandas_plink import read_plink1_bin  # type: ignore[import-not-found]
 
+    _patch_dask_memmap_tokenization()
     data = read_plink1_bin(
-        args.prefix.with_suffix(".bed"),
-        args.prefix.with_suffix(".bim"),
-        args.prefix.with_suffix(".fam"),
+        str(args.prefix.with_suffix(".bed")),
+        str(args.prefix.with_suffix(".bim")),
+        str(args.prefix.with_suffix(".fam")),
         verbose=False,
         ref=args.pandas_ref,
     )

@@ -13,25 +13,27 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    compute_dosage_variant_stats, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
-    MetadataOutput, PartialFilterDecision, RegionPredicate, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    RegionPredicate, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
+use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
+use crate::hardcall::evaluate_hardcall_counts_filter;
 use crate::matrix::empty_sparse_matrix;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use self::ds::{decode_ds_record, DsDecodeBuffers};
 use self::gt::{
-    decode_gt_record, decode_phased_gt_dense_record, record_has_phased_gt_evidence,
+    decode_gt_record, decode_phased_gt_dense_record, text_record_has_phased_genotype,
     GtDecodeBuffers, GtStatsMode, HaplotypeDenseDecodeBuffers,
 };
 use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, TextDenseOutput};
 use self::record::{
-    metadata_variant_record_from_record, skip_variant_for_region, validate_biallelic_variant,
+    skip_variant_for_region, validate_biallelic_variant, variant_record_from_text_record,
 };
 use self::source::{
     ensure_text_indexed_vcf_supported, ensure_text_vcf_supported, open_compressed_reader,
@@ -52,7 +54,7 @@ mod record;
 mod source;
 mod sparse;
 
-pub(in crate::vcf) use self::record::metadata_variant_record_from_variant_record;
+pub(in crate::vcf) use self::record::variant_record_from_noodles_variant_record;
 
 pub(super) const VCF_TEXT_BUFFER_SIZE: usize = 1 << 20;
 
@@ -681,10 +683,10 @@ fn read_metadata_records<R: BufRead>(
             break;
         }
 
-        if !has_phased_genotype_evidence && record_has_phased_gt_evidence(&record) {
+        if !has_phased_genotype_evidence && text_record_has_phased_genotype(&record) {
             has_phased_genotype_evidence = true;
         }
-        variants.push(metadata_variant_record_from_record(path, &record)?);
+        variants.push(variant_record_from_text_record(path, &record)?);
     }
 
     let capabilities = if has_phased_genotype_evidence {
@@ -737,7 +739,7 @@ fn read_dense_records<R: BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         // Tabix/CSI chunks can include neighboring records from the same BGZF
         // block. Keep the text backend's exact region contract independent of the
         // lower-level chunk boundaries.
@@ -758,33 +760,35 @@ fn read_dense_records<R: BufRead>(
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         // `record.samples()` borrows noodles' reusable record buffer, so decode
         // selected GTs completely before the next `read_record` call.
+        let stats_mode = match (needs_genotype_decision, matrix_only) {
+            (true, true) => GtStatsMode::Counts,
+            (true, false) => GtStatsMode::Compute,
+            (false, _) => GtStatsMode::Skip,
+        };
         decode_gt_record(
             path,
             &record,
             &selection.source_indices,
-            GtStatsMode::from_needed(needs_genotype_decision),
+            stats_mode,
             &mut decoded,
         )?;
-        let stats = if needs_genotype_decision {
-            decoded.stats()
-        } else {
-            None
-        };
 
-        if let Some(stats) = stats {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                &mut diagnostics,
-            ) {
+        if needs_genotype_decision {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, stats) =
+                evaluate_text_gt_filter(&decoded, filter, &variant, matrix_only, "GT")?;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-        }
-        if !matrix_only {
             if let Some(stats) = stats {
                 genoio_core::attach_variant_stats(&mut variant, stats);
             }
+        }
+        if !matrix_only {
             variants.push(variant);
         }
 
@@ -839,7 +843,7 @@ fn read_dosage_dense_records<R: BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source.region) {
             continue;
         }
@@ -856,26 +860,26 @@ fn read_dosage_dense_records<R: BufRead>(
         decode_ds_record(path, &record, &selection.source_indices, &mut decoded)?;
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        let stats = if needs_genotype_decision {
-            Some(compute_dosage_variant_stats(
+        if needs_genotype_decision {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, stats) = evaluate_dosage_filter(
                 decoded.values(),
                 decoded.missing(),
-            )?)
-        } else {
-            None
-        };
-
-        if let Some(stats) = stats {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, Some(&stats))),
-                &mut diagnostics,
-            ) {
+                filter,
+                &variant,
+                !matrix_only,
+            )?;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
             if !matrix_only {
-                genoio_core::attach_variant_stats(&mut variant, stats);
+                if let Some(stats) = stats {
+                    genoio_core::attach_variant_stats(&mut variant, stats);
+                }
             }
         }
         if !matrix_only {
@@ -935,7 +939,7 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
             break;
         }
 
-        let mut variant = metadata_variant_record_from_record(path, &record)?;
+        let mut variant = variant_record_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }
@@ -955,18 +959,29 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
             // Genotype-stat filters are evaluated on diploid dosage before
             // enforcing phased output. This lets filters drop unphased records
             // without surfacing a haplotype decode error.
+            let stats_mode = if matrix_only {
+                GtStatsMode::Counts
+            } else {
+                GtStatsMode::Compute
+            };
             decode_gt_record(
                 path,
                 &record,
                 &source_indices,
-                GtStatsMode::Compute,
+                stats_mode,
                 &mut stats_decoded,
             )?;
-            let stats = stats_decoded.stats();
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
+            let filter = variant_filter.ok_or_else(|| {
+                GenoioError::internal_contract("genotype decision requires a variant filter")
+            })?;
+            let (retain_variant, stats) = evaluate_text_gt_filter(
+                &stats_decoded,
+                filter,
+                &variant,
+                matrix_only,
+                "haplotype",
+            )?;
+            match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
@@ -1007,6 +1022,34 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
         diagnostics,
         matrix_only,
     )
+}
+
+fn evaluate_text_gt_filter(
+    decoded: &GtDecodeBuffers,
+    filter: &VariantFilter,
+    variant: &VariantRecord,
+    matrix_only: bool,
+    context: &str,
+) -> Result<(bool, Option<VariantStats>)> {
+    if matrix_only {
+        let counts = decoded.counts().ok_or_else(|| {
+            GenoioError::internal_contract(format!(
+                "matrix-only vcf {context} filter missing counts"
+            ))
+        })?;
+        return evaluate_hardcall_counts_filter(
+            counts,
+            filter,
+            filter.genotype_filter_plan(),
+            Some(variant),
+            false,
+        );
+    }
+
+    let stats = decoded.stats().ok_or_else(|| {
+        GenoioError::internal_contract(format!("vcf {context} filter missing stats"))
+    })?;
+    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
 }
 
 #[cfg(test)]

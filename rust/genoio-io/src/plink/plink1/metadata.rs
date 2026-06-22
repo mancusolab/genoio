@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! PLINK1 FAM and BIM metadata parsing.
+//!
+//! The parser is intentionally line-oriented because companion files are small
+//! text tables. It normalizes PLINK1 missing tokens while preserving source
+//! allele orientation for downstream metadata.
 
 use std::fs;
 use std::path::Path;

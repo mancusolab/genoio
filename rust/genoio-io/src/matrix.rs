@@ -1,4 +1,9 @@
 // pattern: Functional Core
+//! Matrix assembly helpers shared by format readers.
+//!
+//! Format modules decode variants in the order that is cheapest for their
+//! source files. These helpers validate shapes, transpose variant-major staging
+//! when needed, and construct the public dense or sparse core structs.
 
 use genoio_core::{
     transpose_variant_major_to_sample_major, DenseDiagnostics, DenseGenotypeMatrix, GenoioError,
@@ -7,6 +12,10 @@ use genoio_core::{
 
 use crate::error::Result;
 
+/// Already sample-major dense matrix components.
+///
+/// Use this when a reader wrote directly into the public sample-by-variant
+/// layout and only needs final shape validation and metadata elision.
 pub(crate) struct DenseMatrixParts {
     pub(crate) n_samples: usize,
     pub(crate) n_variants: usize,
@@ -17,6 +26,9 @@ pub(crate) struct DenseMatrixParts {
     pub(crate) diagnostics: DenseDiagnostics,
 }
 
+/// Variant-major dense matrix components that need one final transpose.
+///
+/// Use this when a decoder naturally appends one complete variant at a time.
 pub(crate) struct VariantMajorDenseParts {
     pub(crate) n_samples: usize,
     pub(crate) n_variants: usize,

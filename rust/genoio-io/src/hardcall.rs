@@ -1,4 +1,9 @@
 // pattern: Functional Core
+//! Packed hard-call storage and genotype-stat evaluation.
+//!
+//! Readers keep biallelic diploid hard calls in two-bit words while decoding.
+//! This module owns expansion into dense buffers, sparse-compatible missing
+//! checks, and the stats used by genotype filters.
 
 use genoio_core::{
     variant_stats_from_counts, GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan,
@@ -9,6 +14,11 @@ use crate::error::Result;
 
 pub(crate) const HARDCALL_BATCH_SIZE: usize = 64;
 
+/// Two-bit hard-call buffer in source-sample order.
+///
+/// Codes use the PLINK/PGEN convention after normalization: 0, 1, and 2 are
+/// called genotypes, and 3 is missing. Expansion helpers convert these codes to
+/// `f32` values and missing masks for selected samples.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PackedHardcalls {
     words: Vec<u64>,
@@ -16,7 +26,7 @@ pub(crate) struct PackedHardcalls {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct HardcallCounts {
+pub(crate) struct HardcallCounts {
     hom_ref: u64,
     het: u64,
     hom_alt: u64,
@@ -24,7 +34,23 @@ struct HardcallCounts {
 }
 
 impl HardcallCounts {
-    fn evaluate_plan(self, plan: GenotypeFilterPlan) -> Result<Option<bool>> {
+    pub(crate) fn record_hom_ref(&mut self) {
+        self.hom_ref += 1;
+    }
+
+    pub(crate) fn record_het(&mut self) {
+        self.het += 1;
+    }
+
+    pub(crate) fn record_hom_alt(&mut self) {
+        self.hom_alt += 1;
+    }
+
+    pub(crate) fn record_missing(&mut self) {
+        self.missing += 1;
+    }
+
+    pub(crate) fn evaluate_plan(self, plan: GenotypeFilterPlan) -> Result<Option<bool>> {
         match plan {
             GenotypeFilterPlan::Generic => Ok(None),
             GenotypeFilterPlan::Polymorphic => Ok(Some(self.is_polymorphic()?)),
@@ -151,6 +177,36 @@ impl HardcallCounts {
         Ok(min.is_none_or(|threshold| maf >= f64::from(threshold))
             && max.is_none_or(|threshold| maf <= f64::from(threshold)))
     }
+
+    pub(crate) fn variant_stats(self) -> Result<VariantStats> {
+        variant_stats_from_counts(self.hom_ref, self.het, self.hom_alt, self.missing)
+    }
+}
+
+pub(crate) fn evaluate_hardcall_counts_filter(
+    counts: HardcallCounts,
+    filter: &VariantFilter,
+    filter_plan: GenotypeFilterPlan,
+    variant: Option<&VariantRecord>,
+    require_stats: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    if !require_stats {
+        if let Some(retain) = counts.evaluate_plan(filter_plan)? {
+            return Ok((retain, None));
+        }
+    }
+
+    let stats = counts.variant_stats()?;
+    let retain = if let Some(variant) = variant {
+        filter.evaluate(variant, Some(&stats))
+    } else {
+        filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
+            GenoioError::internal_contract(
+                "genotype-stats-only fast path received metadata-dependent filter",
+            )
+        })?
+    };
+    Ok((retain, Some(stats)))
 }
 
 impl PackedHardcalls {
@@ -453,6 +509,11 @@ pub(crate) fn evaluate_packed_hardcall_filter(
     Ok((retain, Some(stats)))
 }
 
+/// Small batch of packed variants waiting for sample-major expansion.
+///
+/// Hard-call dense readers decode variants one at a time but write the final
+/// matrix by sample rows. Batching keeps the transpose local without storing the
+/// whole variant-major matrix.
 #[derive(Debug, Clone)]
 pub(crate) struct HardcallBatch {
     variants: Vec<PackedHardcalls>,

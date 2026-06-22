@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! VCF and BCF reader facade.
+//!
+//! The facade routes `.bcf` paths to the typed BCF backend and all other paths
+//! to the text VCF backend. Public functions preserve one contract for dense,
+//! sparse, dosage, haplotype, metadata, threaded, and windowed reads.
 
 use std::path::Path;
 
@@ -488,7 +493,7 @@ fn plain_sample_record(iid: String) -> SampleRecord {
     }
 }
 
-fn noodles_record_has_phased_genotype<R>(
+fn variant_record_has_phased_genotype<R>(
     path: &Path,
     header: &noodles::Header,
     record: &R,

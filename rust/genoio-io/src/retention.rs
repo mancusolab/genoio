@@ -1,7 +1,12 @@
 // pattern: Functional Core
+//! Retained-variant window state for metadata and genotype filters.
+//!
+//! The state counts variants that survive filtering, not raw source rows. This
+//! keeps source-window reads and retained-window reads separate in the callers.
 
 use genoio_core::{DenseDiagnostics, PartialFilterDecision, VariantWindow};
 
+/// Action after evaluating metadata-only predicates for one source variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MetadataRetentionAction {
     Include,
@@ -10,6 +15,7 @@ pub(crate) enum MetadataRetentionAction {
     Stop,
 }
 
+/// Action after a variant is known to survive or fail genotype-stat filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetentionAction {
     Include,
@@ -17,6 +23,11 @@ pub(crate) enum RetentionAction {
     Stop,
 }
 
+/// Tracks retained-variant index for optional retained-output windows.
+///
+/// Metadata rejects do not advance the retained index. Metadata accepts and
+/// genotype accepts do, because those variants are retained before the optional
+/// window is applied.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RetainedVariantState {
     window: Option<VariantWindow>,

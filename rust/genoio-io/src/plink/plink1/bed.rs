@@ -1,4 +1,9 @@
 // pattern: Imperative Shell
+//! PLINK1 BED header, seek, and genotype payload decoding.
+//!
+//! BED stores one variant per packed byte slice in variant-major mode. This
+//! module validates that layout and converts source records into packed
+//! hard-call scratch owned by the caller.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
