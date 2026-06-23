@@ -90,6 +90,21 @@ def test_dense_array_from_rust_imputes_sparse_indices_in_place():
     )
 
 
+def test_dense_array_from_rust_accepts_empty_missing_index_sequence():
+    values = np.array([1.0], dtype=np.float32)
+
+    array = dense_array_from_rust(
+        values=values,
+        shape=(1, 1),
+        missing="impute",
+        dtype=np.dtype("float32"),
+        missing_indices=[],
+    )
+
+    assert np.shares_memory(array, values)
+    np.testing.assert_array_equal(array, np.array([[1.0]], dtype=np.float32))
+
+
 def test_dense_array_from_rust_rejects_all_missing_variant_from_sparse_indices():
     with pytest.raises(assembly.MissingDataError, match="all-missing variant"):
         dense_array_from_rust(

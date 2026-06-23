@@ -195,6 +195,8 @@ def _dense_missing_indices_from_flat(
     indices = np.asarray(missing_indices)
     if indices.ndim != 1:
         raise AssertionError("dense missing indices must be one-dimensional")
+    if indices.size == 0:
+        return indices.astype(np.int64, copy=False)
     if not np.issubdtype(indices.dtype, np.integer):
         raise AssertionError("dense missing indices must be integers")
     return indices.astype(np.int64, copy=False)
