@@ -22,23 +22,19 @@
 //! those private classes to public `genoio` exceptions. Rust panics are treated
 //! as internal bugs and are contained at each `#[pyfunction]` entry point.
 //!
-//! Numeric `f32` value arrays returned from this crate transfer Rust vector
-//! ownership to NumPy. Boolean masks still expand into Python-owned byte
-//! buffers, and `usize` indices are checked, converted, and copied to NumPy
-//! `int64` arrays.
+//! Numeric arrays returned from this crate transfer Rust vector ownership to
+//! NumPy. `usize` indices are checked and converted to NumPy-compatible `int64`
+//! values before ownership transfer.
 
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::slice;
 
 use genoio_core::GenoioError;
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{
-    PyBool, PyByteArray, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
-};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
 
 pyo3::create_exception!(genoio_py, RustInvalidSourceError, PyException);
 pyo3::create_exception!(genoio_py, RustUnsupportedRepresentationError, PyException);
@@ -950,9 +946,7 @@ fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAn
 }
 
 fn bool_vec_to_numpy(py: Python<'_>, values: Vec<bool>) -> PyResult<Bound<'_, PyAny>> {
-    let bytes = values.into_iter().map(u8::from).collect::<Vec<u8>>();
-    let buffer = PyByteArray::new(py, &bytes);
-    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "bool"))
+    Ok(vec_to_numpy(py, values))
 }
 
 fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<'_, PyAny>> {
@@ -966,16 +960,7 @@ fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<
             })
         })
         .collect::<PyResult<Vec<i64>>>()?;
-    // SAFETY: values has been converted to i64 and PyByteArray owns a copy of
-    // the contiguous bytes before the local Vec is dropped.
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            values.as_ptr().cast::<u8>(),
-            values.len() * std::mem::size_of::<i64>(),
-        )
-    };
-    let buffer = PyByteArray::new(py, bytes);
-    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "int64"))
+    Ok(vec_to_numpy(py, values))
 }
 
 fn vec_to_numpy<'py, T>(py: Python<'py>, values: Vec<T>) -> Bound<'py, PyAny>
