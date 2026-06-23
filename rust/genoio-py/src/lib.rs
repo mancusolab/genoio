@@ -22,9 +22,10 @@
 //! those private classes to public `genoio` exceptions. Rust panics are treated
 //! as internal bugs and are contained at each `#[pyfunction]` entry point.
 //!
-//! NumPy arrays returned from this crate are backed by Python-owned byte
-//! buffers. Rust vectors are copied into `PyByteArray` before their memory is
-//! dropped, so Python arrays do not borrow Rust-owned memory.
+//! Numeric `f32` value arrays returned from this crate transfer Rust vector
+//! ownership to NumPy. Boolean masks still expand into Python-owned byte
+//! buffers, and `usize` indices are checked, converted, and copied to NumPy
+//! `int64` arrays.
 
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
@@ -32,6 +33,7 @@ use std::path::PathBuf;
 use std::slice;
 
 use genoio_core::GenoioError;
+use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -944,17 +946,7 @@ fn sparse_to_py(
 }
 
 fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
-    // SAFETY: f32 has a stable byte representation for NumPy's float32 view.
-    // PyByteArray owns a copy of the bytes before `values` is dropped, so the
-    // returned array does not borrow Rust memory.
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            values.as_ptr().cast::<u8>(),
-            values.len() * std::mem::size_of::<f32>(),
-        )
-    };
-    let buffer = PyByteArray::new(py, bytes);
-    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "float32"))
+    Ok(vec_to_numpy(py, values))
 }
 
 fn bool_vec_to_numpy(py: Python<'_>, values: Vec<bool>) -> PyResult<Bound<'_, PyAny>> {
@@ -984,6 +976,13 @@ fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<
     };
     let buffer = PyByteArray::new(py, bytes);
     PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "int64"))
+}
+
+fn vec_to_numpy<'py, T>(py: Python<'py>, values: Vec<T>) -> Bound<'py, PyAny>
+where
+    T: Element,
+{
+    PyArray1::from_vec(py, values).into_any()
 }
 
 fn sample_records_to_py(
