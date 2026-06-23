@@ -112,6 +112,7 @@ fn read_dense_impl(
     dense_to_py(
         py,
         output,
+        read_options.missing,
         read_options.return_samples,
         read_options.return_variants,
         false,
@@ -176,6 +177,7 @@ fn read_haplotypes_dense_impl(
     dense_to_py(
         py,
         output,
+        read_options.missing,
         read_options.return_samples,
         read_options.return_variants,
         true,
@@ -730,6 +732,7 @@ struct ReadOptions {
     variant_filter: Option<genoio_core::VariantFilter>,
     variant_window: Option<genoio_core::VariantWindow>,
     dosage: DosageSource,
+    missing: MissingPolicy,
     return_samples: bool,
     return_variants: bool,
     matrix_only: bool,
@@ -753,12 +756,33 @@ impl DosageSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingPolicy {
+    Raise,
+    Nan,
+    Impute,
+}
+
+impl MissingPolicy {
+    fn from_str(value: &str) -> Result<Self, GenoioError> {
+        match value {
+            "raise" => Ok(Self::Raise),
+            "nan" => Ok(Self::Nan),
+            "impute" => Ok(Self::Impute),
+            other => Err(GenoioError::invalid_filter(format!(
+                "unsupported missing-data policy: {other}"
+            ))),
+        }
+    }
+}
+
 fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
     Ok(ReadOptions {
         requested_samples: samples_option(options)?,
         variant_filter: variants_option(options)?,
         variant_window: variant_window_option(options)?,
         dosage: dosage_option(options)?,
+        missing: missing_policy_option(options)?,
         return_samples: bool_option(options, "return_samples")?,
         return_variants: bool_option(options, "return_variants")?,
         matrix_only: required_bool_option(options, "matrix_only")?,
@@ -819,6 +843,16 @@ fn dosage_option(options: &Bound<'_, PyDict>) -> PyResult<DosageSource> {
     DosageSource::from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
 }
 
+fn missing_policy_option(options: &Bound<'_, PyDict>) -> PyResult<MissingPolicy> {
+    let Some(value) = options.get_item("missing")? else {
+        return Ok(MissingPolicy::Raise);
+    };
+    if value.is_none() {
+        return Ok(MissingPolicy::Raise);
+    }
+    MissingPolicy::from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
+}
+
 fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
     let Some(value) = options.get_item(key)? else {
         return Ok(false);
@@ -863,44 +897,104 @@ fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResu
 fn dense_to_py(
     py: Python<'_>,
     output: genoio_core::DenseGenotypeMatrix,
+    missing: MissingPolicy,
     return_samples: bool,
     return_variants: bool,
     include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
+    let genoio_core::DenseGenotypeMatrix {
+        n_samples,
+        n_variants,
+        mut values,
+        missing_mask,
+        layout,
+        samples,
+        variants,
+        diagnostics: dense_diagnostics,
+    } = output;
+
+    // Apply the public missing-data policy before the NumPy ownership handoff.
+    // The common raise/nan paths should not materialize a Python-side mask.
+    let missing_indices = apply_dense_missing_policy(&mut values, &missing_mask, missing)?;
+
     let dict = PyDict::new(py);
-    dict.set_item("values", f32_vec_to_numpy(py, output.values)?)?;
-    dict.set_item("shape", (output.n_samples, output.n_variants))?;
+    dict.set_item("values", f32_vec_to_numpy(py, values)?)?;
+    dict.set_item("shape", (n_samples, n_variants))?;
     // Python assembly uses this tag to reshape variant-major buffers as views
     // instead of requiring Rust to allocate a physically transposed matrix.
-    dict.set_item("values_layout", dense_layout_to_py(output.layout))?;
-    dict.set_item("missing_mask", bool_vec_to_numpy(py, output.missing_mask)?)?;
+    dict.set_item("values_layout", dense_layout_to_py(layout))?;
+    if let Some(indices) = missing_indices {
+        dict.set_item("missing_indices", usize_vec_to_numpy_i64(py, indices)?)?;
+    }
     if return_samples {
         dict.set_item(
             "samples",
-            sample_records_to_py(py, output.samples, include_haplotype_sample_columns)?,
+            sample_records_to_py(py, samples, include_haplotype_sample_columns)?,
         )?;
     }
     if return_variants {
-        dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+        dict.set_item("variants", variant_records_to_py(py, variants)?)?;
     }
 
     let diagnostics = PyDict::new(py);
-    diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
-    diagnostics.set_item("retained_samples", output.diagnostics.retained_samples)?;
-    diagnostics.set_item("missing_samples", output.diagnostics.missing_samples)?;
-    diagnostics.set_item("candidate_variants", output.diagnostics.candidate_variants)?;
-    diagnostics.set_item("retained_variants", output.diagnostics.retained_variants)?;
+    diagnostics.set_item("requested_samples", dense_diagnostics.requested_samples)?;
+    diagnostics.set_item("retained_samples", dense_diagnostics.retained_samples)?;
+    diagnostics.set_item("missing_samples", dense_diagnostics.missing_samples)?;
+    diagnostics.set_item("candidate_variants", dense_diagnostics.candidate_variants)?;
+    diagnostics.set_item("retained_variants", dense_diagnostics.retained_variants)?;
     diagnostics.set_item(
         "dropped_metadata_variants",
-        output.diagnostics.dropped_metadata_variants,
+        dense_diagnostics.dropped_metadata_variants,
     )?;
     diagnostics.set_item(
         "dropped_genotype_variants",
-        output.diagnostics.dropped_genotype_variants,
+        dense_diagnostics.dropped_genotype_variants,
     )?;
     dict.set_item("diagnostics", diagnostics)?;
 
     Ok(dict.unbind())
+}
+
+fn apply_dense_missing_policy(
+    values: &mut [f32],
+    missing_mask: &[bool],
+    missing: MissingPolicy,
+) -> PyResult<Option<Vec<usize>>> {
+    if values.len() != missing_mask.len() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "dense missing mask length does not match values length",
+        ));
+    }
+    match missing {
+        MissingPolicy::Raise => {
+            if missing_mask.iter().any(|value| *value) {
+                return Err(RustMissingDataError::new_err(
+                    "missing genotype calls are present in retained data",
+                ));
+            }
+            Ok(None)
+        }
+        MissingPolicy::Nan => {
+            for (value, missing) in values.iter_mut().zip(missing_mask) {
+                if *missing {
+                    *value = f32::NAN;
+                }
+            }
+            Ok(None)
+        }
+        MissingPolicy::Impute => {
+            let indices: Vec<usize> = missing_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(index, missing)| missing.then_some(index))
+                .collect();
+            if indices.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(indices))
+            }
+        }
+    }
 }
 
 fn dense_layout_to_py(layout: DenseLayout) -> &'static str {
@@ -952,10 +1046,6 @@ fn sparse_to_py(
 }
 
 fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
-    Ok(vec_to_numpy(py, values))
-}
-
-fn bool_vec_to_numpy(py: Python<'_>, values: Vec<bool>) -> PyResult<Bound<'_, PyAny>> {
     Ok(vec_to_numpy(py, values))
 }
 
