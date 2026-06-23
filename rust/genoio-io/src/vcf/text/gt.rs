@@ -17,9 +17,13 @@ use super::format::{
     format_key_index, next_delimiter, nth_colon_field, scan_selected_format_tokens, FormatScanError,
 };
 
+/// Reused GT decode scratch for selected diploid samples.
+///
+/// Missing indices are sparse positions in `values`, which avoids allocating a
+/// dense boolean mask for large cohorts where missing calls are rare.
 pub(super) struct GtDecodeBuffers {
     values: Vec<f32>,
-    missing: Vec<bool>,
+    missing_indices: Vec<usize>,
     stats: Option<VariantStats>,
     counts: Option<HardcallCounts>,
 }
@@ -31,9 +35,12 @@ pub(super) struct HaplotypeSparseDecodeBuffers {
     stats: Option<VariantStats>,
 }
 
+/// Reused phased haplotype decode scratch for dense output.
+///
+/// Missing indices are haplotype-row positions in `values`.
 pub(super) struct HaplotypeDenseDecodeBuffers {
     values: Vec<f32>,
-    missing: Vec<bool>,
+    missing_indices: Vec<usize>,
     stats: Option<VariantStats>,
 }
 
@@ -42,23 +49,26 @@ impl HaplotypeDenseDecodeBuffers {
     pub(super) fn with_capacity(n_samples: usize) -> Self {
         Self {
             values: Vec::with_capacity(n_samples * 2),
-            missing: Vec::with_capacity(n_samples * 2),
+            missing_indices: Vec::new(),
             stats: None,
         }
     }
 
     fn clear(&mut self) {
         self.values.clear();
-        self.missing.clear();
+        self.missing_indices.clear();
         self.stats = None;
     }
 
     fn push_call(&mut self, call: HaplotypeCall) {
         for allele in call.alleles {
-            // Missing alleles carry a zero placeholder plus the mask bit, which
-            // keeps dense values rectangular without conflating missingness.
+            let row_index = self.values.len();
+            // Missing alleles carry a zero placeholder plus a sparse index,
+            // keeping dense values rectangular without a per-record mask.
             self.values.push(f32::from(allele.unwrap_or(0)));
-            self.missing.push(allele.is_none());
+            if allele.is_none() {
+                self.missing_indices.push(row_index);
+            }
         }
     }
 
@@ -66,8 +76,8 @@ impl HaplotypeDenseDecodeBuffers {
         &self.values
     }
 
-    pub(super) fn missing(&self) -> &[bool] {
-        &self.missing
+    pub(super) fn missing_indices(&self) -> &[usize] {
+        &self.missing_indices
     }
 }
 
@@ -116,7 +126,7 @@ impl GtDecodeBuffers {
     pub(super) fn with_capacity(n_samples: usize) -> Self {
         Self {
             values: Vec::with_capacity(n_samples),
-            missing: Vec::with_capacity(n_samples),
+            missing_indices: Vec::new(),
             stats: None,
             counts: None,
         }
@@ -124,7 +134,7 @@ impl GtDecodeBuffers {
 
     fn clear(&mut self) {
         self.values.clear();
-        self.missing.clear();
+        self.missing_indices.clear();
         self.stats = None;
         self.counts = None;
     }
@@ -137,8 +147,8 @@ impl GtDecodeBuffers {
         &mut self.values
     }
 
-    pub(super) fn missing(&self) -> &[bool] {
-        &self.missing
+    pub(super) fn missing_indices(&self) -> &[usize] {
+        &self.missing_indices
     }
 
     pub(super) fn stats(&self) -> Option<VariantStats> {
@@ -191,8 +201,10 @@ pub(super) fn decode_gt_record(
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
                 let call = decode_gt_token(token)?;
                 record_gt_call(&mut counts, call);
+                if call.is_missing {
+                    output.missing_indices.push(output.values.len());
+                }
                 output.values.push(call.value);
-                output.missing.push(call.is_missing);
                 Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
@@ -203,8 +215,10 @@ pub(super) fn decode_gt_record(
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
                 let call = decode_gt_token(token)?;
                 record_gt_call(&mut counts, call);
+                if call.is_missing {
+                    output.missing_indices.push(output.values.len());
+                }
                 output.values.push(call.value);
-                output.missing.push(call.is_missing);
                 Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;
@@ -213,8 +227,10 @@ pub(super) fn decode_gt_record(
         GtStatsMode::Skip => {
             scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
                 let call = decode_gt_token(token)?;
+                if call.is_missing {
+                    output.missing_indices.push(output.values.len());
+                }
                 output.values.push(call.value);
-                output.missing.push(call.is_missing);
                 Ok(())
             })
             .map_err(|reason| gt_error(path, &record_location(), reason))?;

@@ -12,12 +12,11 @@ use std::fs::File;
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
-    flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order, DenseGenotypeMatrix,
-    DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantStats,
-    VariantWindow,
+    append_sparse_column, attach_variant_stats, compute_dosage_variant_stats_with_missing_indices,
+    flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele, reject_sparse_missing,
+    select_samples_source_order, DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection,
+    GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -32,7 +31,7 @@ use crate::error::Result;
 use crate::hardcall::{evaluate_hardcall_counts_filter, HardcallCounts};
 use crate::matrix::{
     apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
-    missing_indices_from_mask, VariantMajorDenseParts,
+    VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -215,7 +214,7 @@ pub(super) fn read_sparse_windowed(
         if let Some(stats) = decoded.stats {
             attach_variant_stats(&mut variant, stats);
         }
-        reject_sparse_missing_values(&decoded.missing)?;
+        reject_sparse_missing(!decoded.missing_indices.is_empty())?;
         let mut values = decoded.values;
         flip_values_to_minor_allele(&mut values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &values);
@@ -257,7 +256,6 @@ pub(super) fn read_haplotypes_dense_windowed(
 
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
-    let mut missing_indices = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
@@ -347,10 +345,9 @@ pub(super) fn read_haplotypes_dense_windowed(
         }
 
         let mut decoded = decode_phased_haplotype_record(path, &header, &record, &source_indices)?;
-        missing_indices_from_mask(&decoded.missing, &mut missing_indices);
         apply_dense_missing_policy_to_variant(
             &mut decoded.values,
-            &missing_indices,
+            &decoded.missing_indices,
             missing_policy,
         )?;
         n_variants += 1;
@@ -454,7 +451,7 @@ pub(super) fn read_haplotypes_sparse_windowed(
             attach_variant_stats(&mut variant, stats);
         }
         let decoded = decode_phased_haplotype_record(path, &header, &record, &source_indices)?;
-        reject_sparse_missing_values(&decoded.missing)?;
+        reject_sparse_missing(!decoded.missing_indices.is_empty())?;
         let mut values = decoded.values;
         flip_haplotype_values_to_minor_allele(&mut values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &values);
@@ -503,7 +500,6 @@ fn read_dense_windowed_with_field(
 
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
-    let mut missing_indices = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
@@ -582,7 +578,7 @@ fn read_dense_windowed_with_field(
                     })?;
                     evaluate_dosage_filter(
                         &decoded.values,
-                        &decoded.missing,
+                        &decoded.missing_indices,
                         filter,
                         variant_ref,
                         !matrix_only,
@@ -611,10 +607,9 @@ fn read_dense_windowed_with_field(
         }
 
         n_variants += 1;
-        missing_indices_from_mask(&decoded.missing, &mut missing_indices);
         apply_dense_missing_policy_to_variant(
             &mut decoded.values,
-            &missing_indices,
+            &decoded.missing_indices,
             missing_policy,
         )?;
         variant_major_values.extend(decoded.values);
@@ -708,9 +703,12 @@ fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()
     ))
 }
 
+/// Dense BCF decode result for one retained variant.
+///
+/// Missing indices are sparse positions in `values` after sample selection.
 struct DecodedBcfDenseValues {
     values: Vec<f32>,
-    missing: Vec<bool>,
+    missing_indices: Vec<usize>,
     stats: Option<VariantStats>,
     counts: Option<HardcallCounts>,
 }
@@ -750,7 +748,7 @@ fn decode_gt_record(
         })?;
 
     let mut values = Vec::with_capacity(source_indices.len());
-    let mut missing = Vec::with_capacity(source_indices.len());
+    let mut missing_indices = Vec::new();
     let mut counts = HardcallCounts::default();
 
     for source_index in source_indices {
@@ -763,8 +761,10 @@ fn decode_gt_record(
                 BcfGtClass::Missing => counts.record_missing(),
             }
         }
+        if call.is_missing() {
+            missing_indices.push(values.len());
+        }
         values.push(call.value);
-        missing.push(call.is_missing());
     }
 
     let stats = if matches!(stats_mode, BcfStatsMode::Compute) {
@@ -779,7 +779,7 @@ fn decode_gt_record(
     };
     Ok(DecodedBcfDenseValues {
         values,
-        missing,
+        missing_indices,
         stats,
         counts,
     })
@@ -807,7 +807,7 @@ fn decode_ds_record(
         })?;
 
     let mut values = Vec::with_capacity(source_indices.len());
-    let mut missing = Vec::with_capacity(source_indices.len());
+    let mut missing_indices = Vec::new();
     for source_index in source_indices {
         let value = ds_series
             .get(header, *source_index)
@@ -828,8 +828,8 @@ fn decode_ds_record(
             })?;
 
         let Some(value) = value else {
+            missing_indices.push(values.len());
             values.push(0.0);
-            missing.push(true);
             continue;
         };
         let NoodlesSampleValue::Float(value) = value else {
@@ -847,25 +847,30 @@ fn decode_ds_record(
             ));
         }
         values.push(value);
-        missing.push(false);
     }
 
     let stats = if collect_stats {
-        Some(compute_dosage_variant_stats(&values, &missing)?)
+        Some(compute_dosage_variant_stats_with_missing_indices(
+            &values,
+            &missing_indices,
+        )?)
     } else {
         None
     };
     Ok(DecodedBcfDenseValues {
         values,
-        missing,
+        missing_indices,
         stats,
         counts: None,
     })
 }
 
+/// Dense phased BCF haplotype decode result for one retained variant.
+///
+/// Missing indices are haplotype-row positions in `values`.
 struct DecodedBcfHaplotypes {
     values: Vec<f32>,
-    missing: Vec<bool>,
+    missing_indices: Vec<usize>,
 }
 
 fn decode_phased_haplotype_record(
@@ -885,15 +890,23 @@ fn decode_phased_haplotype_record(
         })?;
 
     let mut values = Vec::with_capacity(source_indices.len() * 2);
-    let mut missing = Vec::with_capacity(source_indices.len() * 2);
+    let mut missing_indices = Vec::new();
     for source_index in source_indices {
         let (sample_values, sample_missing) =
             decode_phased_haplotype_call(path, header, record, &gt_series, *source_index)?;
+        let row_offset = values.len();
         values.extend(sample_values);
-        missing.extend(sample_missing);
+        for (offset, is_missing) in sample_missing.into_iter().enumerate() {
+            if is_missing {
+                missing_indices.push(row_offset + offset);
+            }
+        }
     }
 
-    Ok(DecodedBcfHaplotypes { values, missing })
+    Ok(DecodedBcfHaplotypes {
+        values,
+        missing_indices,
+    })
 }
 
 fn decode_phased_haplotype_call(

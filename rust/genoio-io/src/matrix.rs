@@ -160,15 +160,6 @@ pub(crate) fn apply_dense_missing_policy_to_variant(
     }
 }
 
-pub(crate) fn missing_indices_from_mask(mask: &[bool], indices: &mut Vec<usize>) {
-    indices.clear();
-    indices.extend(
-        mask.iter()
-            .enumerate()
-            .filter_map(|(index, missing)| missing.then_some(index)),
-    );
-}
-
 fn validate_missing_indices(values_len: usize, missing_indices: &[usize]) -> Result<()> {
     let mut previous = None;
     for &index in missing_indices {

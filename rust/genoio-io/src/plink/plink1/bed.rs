@@ -110,7 +110,7 @@ pub(super) struct Plink1DecoderState {
     payload: Vec<u8>,
     pub(super) packed: PackedHardcalls,
     pub(super) values: Vec<f32>,
-    pub(super) missing: Vec<bool>,
+    pub(super) missing_indices: Vec<usize>,
 }
 
 impl Plink1DecoderState {
@@ -127,7 +127,7 @@ impl Plink1DecoderState {
                 packed
             },
             values: Vec::with_capacity(selected_sample_ct),
-            missing: Vec::with_capacity(selected_sample_ct),
+            missing_indices: Vec::new(),
         }
     }
 }

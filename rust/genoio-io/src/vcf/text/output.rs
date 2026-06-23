@@ -12,8 +12,8 @@ use genoio_core::{
 use crate::error::Result;
 use crate::matrix::{
     apply_dense_missing_policy_to_variant, finish_dense_matrix, finish_variant_major_dense_matrix,
-    missing_indices_from_mask, shrink_sample_major_width, write_sample_major_variant_slot,
-    DenseMatrixParts, VariantMajorDenseParts,
+    shrink_sample_major_width, write_sample_major_variant_slot, DenseMatrixParts,
+    VariantMajorDenseParts,
 };
 
 pub(super) fn can_write_sample_major_directly(
@@ -74,7 +74,7 @@ impl TextDenseOutput {
         &mut self,
         variant_index: usize,
         decoded_values: &[f32],
-        decoded_missing: &[bool],
+        decoded_missing_indices: &[usize],
         missing_policy: DenseMissingPolicy,
     ) -> Result<()> {
         match self {
@@ -93,7 +93,7 @@ impl TextDenseOutput {
                     variant_values,
                     missing_indices,
                     decoded_values,
-                    decoded_missing,
+                    decoded_missing_indices,
                     missing_policy,
                 )?,
             ),
@@ -107,7 +107,7 @@ impl TextDenseOutput {
                     variant_values,
                     missing_indices,
                     decoded_values,
-                    decoded_missing,
+                    decoded_missing_indices,
                     missing_policy,
                 )?);
                 Ok(())
@@ -164,12 +164,13 @@ fn finalize_variant_values<'a>(
     scratch_values: &'a mut Vec<f32>,
     missing_indices: &mut Vec<usize>,
     decoded_values: &[f32],
-    decoded_missing: &[bool],
+    decoded_missing_indices: &[usize],
     missing_policy: DenseMissingPolicy,
 ) -> Result<&'a [f32]> {
     scratch_values.clear();
     scratch_values.extend_from_slice(decoded_values);
-    missing_indices_from_mask(decoded_missing, missing_indices);
+    missing_indices.clear();
+    missing_indices.extend_from_slice(decoded_missing_indices);
     apply_dense_missing_policy_to_variant(scratch_values, missing_indices, missing_policy)?;
     Ok(scratch_values)
 }

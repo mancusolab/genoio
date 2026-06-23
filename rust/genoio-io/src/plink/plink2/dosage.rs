@@ -15,7 +15,7 @@ use genoio_core::{
 use crate::error::Result;
 use crate::matrix::{
     apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
-    missing_indices_from_mask, VariantMajorDenseParts,
+    VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -81,7 +81,6 @@ pub fn read_plink2_dosage_dense_windowed_with_missing_policy(
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values =
         Vec::with_capacity(selection.samples.len() * output_variant_capacity);
-    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
@@ -111,7 +110,7 @@ pub fn read_plink2_dosage_dense_windowed_with_missing_policy(
             let filter = require_genotype_decision_filter(variant_filter)?;
             let (retain_variant, stats) = evaluate_dosage_filter(
                 &decoder_state.values,
-                &decoder_state.missing,
+                &decoder_state.missing_indices,
                 filter,
                 &variant,
                 !matrix_only,
@@ -131,10 +130,9 @@ pub fn read_plink2_dosage_dense_windowed_with_missing_policy(
         if !matrix_only {
             variants.push(variant);
         }
-        missing_indices_from_mask(&decoder_state.missing, &mut missing_indices);
         apply_dense_missing_policy_to_variant(
             &mut decoder_state.values,
-            &missing_indices,
+            &decoder_state.missing_indices,
             missing_policy,
         )?;
         variant_major_values.extend_from_slice(&decoder_state.values);

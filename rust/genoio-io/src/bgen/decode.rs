@@ -52,11 +52,15 @@ pub(super) struct ProbabilityPayloadBuffers {
 }
 
 /// Reused dosage decode scratch for selected diploid samples.
+///
+/// Missing indices are sparse positions in `selected_values`, not source sample
+/// IDs. They stay sorted because BGEN decoders emit selected samples in output
+/// order.
 #[derive(Default)]
 pub(super) struct DosageDecodeBuffers {
     pub(super) probability: ProbabilityPayloadBuffers,
     pub(super) selected_values: Vec<f32>,
-    pub(super) selected_missing: Vec<bool>,
+    pub(super) selected_missing_indices: Vec<usize>,
 }
 
 /// Mutable column target for BGEN paths that can decode directly into the
@@ -70,14 +74,15 @@ pub(super) struct SampleMajorSlotMut<'a> {
 /// Reused decode scratch for phased haplotype output and collapsed dosages.
 ///
 /// The selected haplotype buffers feed retained output. The collapsed buffers
-/// feed genotype-stat filters that operate on diploid dosage.
+/// feed genotype-stat filters that operate on diploid dosage. Missing indices
+/// are sparse positions into the corresponding selected-value buffers.
 #[derive(Default)]
 pub(super) struct HaplotypeDecodeBuffers {
     pub(super) probability: ProbabilityPayloadBuffers,
     pub(super) selected_haplotype_values: Vec<f32>,
-    pub(super) selected_haplotype_missing: Vec<bool>,
+    pub(super) selected_haplotype_missing_indices: Vec<usize>,
     pub(super) selected_collapsed_values: Vec<f32>,
-    pub(super) selected_collapsed_missing: Vec<bool>,
+    pub(super) selected_collapsed_missing_indices: Vec<usize>,
 }
 
 pub(super) fn decode_buffered_dosage_values(
@@ -89,7 +94,7 @@ pub(super) fn decode_buffered_dosage_values(
     let DosageDecodeBuffers {
         probability,
         selected_values,
-        selected_missing,
+        selected_missing_indices,
         ..
     } = buffers;
     let decoded = DecodedDosageVariant::decode(bgen, &probability.payload, sample_count, 2)?;
@@ -98,7 +103,7 @@ pub(super) fn decode_buffered_dosage_values(
         bgen,
         source_indices,
         selected_values,
-        selected_missing,
+        selected_missing_indices,
     )?;
     Ok(())
 }
@@ -162,7 +167,7 @@ pub(super) fn try_decode_buffered_dosage_values_with_counts(
             decoded.packed_probabilities,
             source_indices,
             &mut buffers.selected_values,
-            &mut buffers.selected_missing,
+            &mut buffers.selected_missing_indices,
         )?;
         return Ok(Some(counts));
     }
@@ -178,9 +183,9 @@ pub(super) fn decode_buffered_haplotype_values(
     let HaplotypeDecodeBuffers {
         probability,
         selected_haplotype_values,
-        selected_haplotype_missing,
+        selected_haplotype_missing_indices,
         selected_collapsed_values,
-        selected_collapsed_missing,
+        selected_collapsed_missing_indices,
         ..
     } = buffers;
     let decoded = DecodedDosageVariant::decode(bgen, &probability.payload, sample_count, 2)?;
@@ -189,9 +194,9 @@ pub(super) fn decode_buffered_haplotype_values(
         bgen,
         source_indices,
         selected_haplotype_values,
-        selected_haplotype_missing,
+        selected_haplotype_missing_indices,
         selected_collapsed_values,
-        selected_collapsed_missing,
+        selected_collapsed_missing_indices,
     )?;
     Ok(())
 }
@@ -506,21 +511,20 @@ impl<'a> DecodedDosageVariant<'a> {
         &self,
         path: &Path,
         values: &mut Vec<f32>,
-        missing: &mut Vec<bool>,
+        missing_indices: &mut Vec<usize>,
     ) -> Result<()> {
         let sample_count = usize::try_from(self.header.sample_count)
             .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
         values.clear();
-        missing.clear();
+        missing_indices.clear();
         values.reserve(sample_count);
-        missing.reserve(sample_count);
 
         let mut bit_reader = LittleEndianBitReader::new(self.packed_probabilities);
         for &ploidy_byte in self.header.sample_ploidies {
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
+                missing_indices.push(values.len());
                 values.push(0.0);
-                missing.push(true);
                 continue;
             }
 
@@ -535,7 +539,6 @@ impl<'a> DecodedDosageVariant<'a> {
                 }
             };
             values.push(value);
-            missing.push(false);
         }
 
         Ok(())
@@ -546,7 +549,7 @@ impl<'a> DecodedDosageVariant<'a> {
         path: &Path,
         source_indices: &[usize],
         values: &mut Vec<f32>,
-        missing: &mut Vec<bool>,
+        missing_indices: &mut Vec<usize>,
     ) -> Result<()> {
         if self.header.phase == BgenPhase::Unphased
             && self.header.bit_depth == 8
@@ -559,7 +562,7 @@ impl<'a> DecodedDosageVariant<'a> {
                 self.packed_probabilities,
                 source_indices,
                 values,
-                missing,
+                missing_indices,
             );
         }
         if self.header.phase == BgenPhase::Phased
@@ -573,7 +576,7 @@ impl<'a> DecodedDosageVariant<'a> {
                 self.packed_probabilities,
                 source_indices,
                 values,
-                missing,
+                missing_indices,
             );
         }
         if self.header.phase == BgenPhase::Unphased && self.header.bit_depth == UNPHASED_8_BIT_DEPTH
@@ -587,14 +590,13 @@ impl<'a> DecodedDosageVariant<'a> {
                 self.packed_probabilities,
                 source_indices,
                 values,
-                missing,
+                missing_indices,
             );
         }
 
         values.clear();
-        missing.clear();
+        missing_indices.clear();
         values.reserve(source_indices.len());
-        missing.reserve(source_indices.len());
 
         let mut selected_cursor = 0_usize;
         let mut bit_reader = LittleEndianBitReader::new(self.packed_probabilities);
@@ -605,8 +607,8 @@ impl<'a> DecodedDosageVariant<'a> {
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
                 if is_selected {
+                    missing_indices.push(values.len());
                     values.push(0.0);
-                    missing.push(true);
                     selected_cursor += 1;
                 }
                 continue;
@@ -627,7 +629,6 @@ impl<'a> DecodedDosageVariant<'a> {
                     }
                 };
                 values.push(value);
-                missing.push(false);
                 selected_cursor += 1;
             }
         }
@@ -641,9 +642,9 @@ impl<'a> DecodedDosageVariant<'a> {
         path: &Path,
         source_indices: &[usize],
         haplotype_values: &mut Vec<f32>,
-        haplotype_missing: &mut Vec<bool>,
+        haplotype_missing_indices: &mut Vec<usize>,
         collapsed_values: &mut Vec<f32>,
-        collapsed_missing: &mut Vec<bool>,
+        collapsed_missing_indices: &mut Vec<usize>,
     ) -> Result<()> {
         if self.header.phase != BgenPhase::Phased {
             return Err(GenoioError::unsupported(
@@ -651,13 +652,11 @@ impl<'a> DecodedDosageVariant<'a> {
             ));
         }
         haplotype_values.clear();
-        haplotype_missing.clear();
+        haplotype_missing_indices.clear();
         collapsed_values.clear();
-        collapsed_missing.clear();
+        collapsed_missing_indices.clear();
         haplotype_values.reserve(source_indices.len() * 2);
-        haplotype_missing.reserve(source_indices.len() * 2);
         collapsed_values.reserve(source_indices.len());
-        collapsed_missing.reserve(source_indices.len());
 
         let mut selected_cursor = 0_usize;
         let mut bit_reader = LittleEndianBitReader::new(self.packed_probabilities);
@@ -668,10 +667,12 @@ impl<'a> DecodedDosageVariant<'a> {
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
                 if is_selected {
+                    let haplotype_row = haplotype_values.len();
+                    haplotype_missing_indices
+                        .extend_from_slice(&[haplotype_row, haplotype_row + 1]);
+                    collapsed_missing_indices.push(collapsed_values.len());
                     haplotype_values.extend_from_slice(&[0.0, 0.0]);
-                    haplotype_missing.extend_from_slice(&[true, true]);
                     collapsed_values.push(0.0);
-                    collapsed_missing.push(true);
                     selected_cursor += 1;
                 }
                 continue;
@@ -683,9 +684,7 @@ impl<'a> DecodedDosageVariant<'a> {
                 let first = decode_phased_a1_haplotype_dosage(self.header.bit_depth, first_raw);
                 let second = decode_phased_a1_haplotype_dosage(self.header.bit_depth, second_raw);
                 haplotype_values.extend_from_slice(&[first, second]);
-                haplotype_missing.extend_from_slice(&[false, false]);
                 collapsed_values.push((first + second).clamp(0.0, 2.0));
-                collapsed_missing.push(false);
                 selected_cursor += 1;
             }
         }
@@ -701,12 +700,11 @@ fn decode_selected_unphased_8bit_a1_dosages(
     packed_probabilities: &[u8],
     source_indices: &[usize],
     values: &mut Vec<f32>,
-    missing: &mut Vec<bool>,
+    missing_indices: &mut Vec<usize>,
 ) -> Result<()> {
     values.clear();
-    missing.clear();
+    missing_indices.clear();
     values.reserve(source_indices.len());
-    missing.reserve(source_indices.len());
     debug_assert!(source_indices
         .windows(2)
         .all(|window| window[0] < window[1]));
@@ -721,8 +719,8 @@ fn decode_selected_unphased_8bit_a1_dosages(
         let is_missing = ploidy_byte & 0b1000_0000 != 0;
         if is_missing {
             if is_selected {
+                missing_indices.push(values.len());
                 values.push(0.0);
-                missing.push(true);
                 selected_cursor += 1;
             }
             continue;
@@ -741,7 +739,6 @@ fn decode_selected_unphased_8bit_a1_dosages(
 
         if is_selected {
             values.push(unphased_8bit_a1_dosage(path, p_aa, p_ab)?);
-            missing.push(false);
             selected_cursor += 1;
         }
     }
@@ -754,12 +751,11 @@ fn decode_selected_called_unphased_8bit_a1_dosages(
     packed_probabilities: &[u8],
     source_indices: &[usize],
     values: &mut Vec<f32>,
-    missing: &mut Vec<bool>,
+    missing_indices: &mut Vec<usize>,
 ) -> Result<()> {
     values.clear();
-    missing.clear();
+    missing_indices.clear();
     values.reserve(source_indices.len());
-    missing.reserve(source_indices.len());
     let lut = unphased_8bit_a1_dosage_lut();
 
     for &source_index in source_indices {
@@ -776,7 +772,6 @@ fn decode_selected_called_unphased_8bit_a1_dosages(
             ));
         };
         values.push(unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, lut)?);
-        missing.push(false);
     }
 
     Ok(())
@@ -816,17 +811,15 @@ fn decode_selected_called_phased_16bit_a1_dosages(
     packed_probabilities: &[u8],
     source_indices: &[usize],
     values: &mut Vec<f32>,
-    missing: &mut Vec<bool>,
+    missing_indices: &mut Vec<usize>,
 ) -> Result<()> {
     values.clear();
-    missing.clear();
+    missing_indices.clear();
     values.reserve(source_indices.len());
-    missing.reserve(source_indices.len());
 
     for &source_index in source_indices {
         let (first, second) = phased_16bit_raw_pair(path, packed_probabilities, source_index)?;
         values.push(decode_phased_16bit_a1_dosage(first, second));
-        missing.push(false);
     }
 
     Ok(())
@@ -837,12 +830,11 @@ fn decode_selected_called_phased_16bit_a1_dosages_with_counts(
     packed_probabilities: &[u8],
     source_indices: &[usize],
     values: &mut Vec<f32>,
-    missing: &mut Vec<bool>,
+    missing_indices: &mut Vec<usize>,
 ) -> Result<DosageFilterCounts> {
     values.clear();
-    missing.clear();
+    missing_indices.clear();
     values.reserve(source_indices.len());
-    missing.reserve(source_indices.len());
     let mut counts = DosageFilterCounts::default();
 
     for &source_index in source_indices {
@@ -850,7 +842,6 @@ fn decode_selected_called_phased_16bit_a1_dosages_with_counts(
         let dosage = decode_phased_16bit_a1_dosage(first, second);
         counts.record_called_dosage(dosage);
         values.push(dosage);
-        missing.push(false);
     }
 
     Ok(counts)
@@ -1256,7 +1247,7 @@ mod tests {
             .expect("dosages should unpack");
 
         let expected = [expected_dosage(3, 5, 2), 0.0, expected_dosage(3, 1, 4)];
-        assert_eq!(missing, vec![false, true, false]);
+        assert_eq!(missing, vec![1]);
         for (observed, expected) in values.iter().zip(expected) {
             assert!((observed - expected).abs() <= f32::EPSILON);
         }
@@ -1281,7 +1272,7 @@ mod tests {
 
         let denominator = 7.0_f32;
         let expected = [1.0, 0.0, 2.0 - 4.0 / denominator - 2.0 / denominator];
-        assert_eq!(missing, vec![false, true, false]);
+        assert_eq!(missing, vec![1]);
         for (observed, expected) in values.iter().zip(expected) {
             assert!((observed - expected).abs() <= f32::EPSILON);
         }
@@ -1319,7 +1310,7 @@ mod tests {
         )
         .expect("8-bit fast path should decode");
 
-        assert_eq!(missing, vec![true, false]);
+        assert_eq!(missing, vec![0]);
         assert_eq!(values[0], 0.0);
         assert!((values[1] - expected_dosage(8, 64, 64)).abs() <= f32::EPSILON);
     }
@@ -1355,7 +1346,7 @@ mod tests {
         )
         .expect("16-bit phased fast path should decode");
 
-        assert_eq!(missing, vec![false, false]);
+        assert!(missing.is_empty());
         assert!((values[0] - test_phased16_mid_dosage()).abs() <= f32::EPSILON);
         assert_eq!(values[1], 0.0);
     }
@@ -1374,7 +1365,7 @@ mod tests {
         )
         .expect("16-bit phased fast path should decode and count");
 
-        assert_eq!(missing, vec![false, false]);
+        assert!(missing.is_empty());
         assert_eq!(values[0], 1.0);
         assert!((values[1] - test_phased16_mid_dosage()).abs() <= f32::EPSILON);
         assert_eq!(counts.called_count, 2);

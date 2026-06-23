@@ -13,7 +13,7 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,
+    flip_variant_metadata_to_minor_allele, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
     PartialFilterDecision, RegionPredicate, SparseGenotypeMatrix, VariantFilter, VariantRecord,
     VariantWindow,
@@ -109,7 +109,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
             }
         }
 
-        reject_sparse_missing_values(decoded.missing())?;
+        reject_sparse_missing(!decoded.missing_indices().is_empty())?;
         // Genotype sparse columns store minor-allele dosage by convention.
         flip_values_to_minor_allele(decoded.values_mut(), &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, decoded.values());

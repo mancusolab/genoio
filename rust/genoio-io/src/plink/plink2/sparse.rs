@@ -8,9 +8,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    reject_sparse_missing_values, GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantWindow,
+    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
+    GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantRecord,
+    VariantWindow,
 };
 
 use crate::error::Result;
@@ -35,7 +35,7 @@ fn append_decoded_sparse_column(
     indices: &mut Vec<usize>,
     data: &mut Vec<f32>,
 ) -> Result<()> {
-    reject_sparse_missing_values(&decoder_state.missing)?;
+    reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
     flip_values_to_minor_allele(&mut decoder_state.values, variant);
     append_sparse_column(indptr, indices, data, &decoder_state.values);
     Ok(())
@@ -156,10 +156,10 @@ pub fn read_plink2_sparse_windowed(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        decoder_state.packed.expand_selected(
+        decoder_state.packed.expand_selected_with_missing_indices(
             &selection.source_indices,
             &mut decoder_state.values,
-            &mut decoder_state.missing,
+            &mut decoder_state.missing_indices,
         );
         append_decoded_sparse_column(
             &mut decoder_state,

@@ -6,8 +6,9 @@
 //! complete stats to retained variants.
 
 use genoio_core::{
-    compute_dosage_variant_stats, is_dosage_polymorphic, GenoioError, GenotypeFilterConjunction,
-    GenotypeFilterPlan, VariantFilter, VariantRecord, VariantStats,
+    compute_dosage_variant_stats_with_missing_indices, is_dosage_polymorphic_with_missing_indices,
+    GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan, VariantFilter, VariantRecord,
+    VariantStats,
 };
 
 use crate::error::Result;
@@ -127,18 +128,25 @@ impl DosageFilterCounts {
     }
 }
 
-fn dosage_counts_for_filter(values: &[f32], missing: &[bool]) -> Result<DosageFilterCounts> {
-    if values.len() != missing.len() {
-        return Err(GenoioError::invalid_source(
-            "<filter>",
-            "variant values and missing mask lengths differ",
-        ));
-    }
+fn dosage_counts_for_filter(
+    values: &[f32],
+    missing_indices: &[usize],
+) -> Result<DosageFilterCounts> {
+    validate_missing_indices(values.len(), missing_indices)?;
+    let mut counts = DosageFilterCounts {
+        missing_count: u64::try_from(missing_indices.len()).map_err(|_| {
+            GenoioError::invalid_source("<filter>", "missing genotype count is out of range")
+        })?,
+        ..DosageFilterCounts::default()
+    };
 
-    let mut counts = DosageFilterCounts::default();
-    for (value, is_missing) in values.iter().zip(missing) {
-        if *is_missing {
-            counts.missing_count += 1;
+    let mut missing_cursor = 0_usize;
+    for (index, value) in values.iter().enumerate() {
+        if missing_indices
+            .get(missing_cursor)
+            .is_some_and(|&missing_index| missing_index == index)
+        {
+            missing_cursor += 1;
             continue;
         }
         if !(0.0..=2.0).contains(value) {
@@ -152,9 +160,29 @@ fn dosage_counts_for_filter(values: &[f32], missing: &[bool]) -> Result<DosageFi
     Ok(counts)
 }
 
+fn validate_missing_indices(values_len: usize, missing_indices: &[usize]) -> Result<()> {
+    let mut previous = None;
+    for &index in missing_indices {
+        if index >= values_len {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                "missing genotype index is outside variant values",
+            ));
+        }
+        if previous.is_some_and(|previous| index <= previous) {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                "missing genotype indices must be sorted and unique",
+            ));
+        }
+        previous = Some(index);
+    }
+    Ok(())
+}
+
 pub(crate) fn evaluate_dosage_filter(
     values: &[f32],
-    missing: &[bool],
+    missing_indices: &[usize],
     filter: &VariantFilter,
     variant: &VariantRecord,
     require_stats: bool,
@@ -165,14 +193,19 @@ pub(crate) fn evaluate_dosage_filter(
         // already run metadata partial evaluation, so compiled genotype plans
         // can bypass `VariantStats` construction for common dosage predicates.
         if matches!(plan, GenotypeFilterPlan::Polymorphic) {
-            return Ok((is_dosage_polymorphic(values, missing)?, None));
+            return Ok((
+                is_dosage_polymorphic_with_missing_indices(values, missing_indices)?,
+                None,
+            ));
         }
-        if let Some(retain) = dosage_counts_for_filter(values, missing)?.evaluate_plan(plan)? {
+        if let Some(retain) =
+            dosage_counts_for_filter(values, missing_indices)?.evaluate_plan(plan)?
+        {
             return Ok((retain, None));
         }
     }
 
-    let stats = compute_dosage_variant_stats(values, missing)?;
+    let stats = compute_dosage_variant_stats_with_missing_indices(values, missing_indices)?;
     Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
 }
 
@@ -211,8 +244,8 @@ mod tests {
         .unwrap()
     }
 
-    fn dosage_fixture() -> ([f32; 4], [bool; 4]) {
-        ([0.0, 1.0, 2.0, 2.0], [false, false, false, true])
+    fn dosage_fixture() -> ([f32; 4], [usize; 1]) {
+        ([0.0, 1.0, 2.0, 2.0], [3])
     }
 
     #[test]
@@ -306,7 +339,7 @@ mod tests {
     fn dosage_filter_counts_match_variant_stats_thresholds() {
         let (values, missing) = dosage_fixture();
         let counts = dosage_counts_for_filter(&values, &missing).unwrap();
-        let stats = compute_dosage_variant_stats(&values, &missing).unwrap();
+        let stats = compute_dosage_variant_stats_with_missing_indices(&values, &missing).unwrap();
 
         assert_eq!(counts.is_polymorphic().unwrap(), stats.polymorphic);
         assert_eq!(counts.missing_rate().unwrap(), stats.missing_rate);
@@ -316,7 +349,7 @@ mod tests {
     #[test]
     fn dosage_filter_counts_handle_monomorphic_and_missing_variants() {
         let values = [0.0, 0.0, 0.0];
-        let missing = [false, true, false];
+        let missing = [1];
         let counts = dosage_counts_for_filter(&values, &missing).unwrap();
 
         assert_eq!(counts.called_count, 2);
@@ -366,7 +399,7 @@ mod tests {
     #[test]
     fn dosage_filter_counts_handle_all_missing_variants() {
         let values = [0.0, 1.0, 2.0];
-        let missing = [true, true, true];
+        let missing = [0, 1, 2];
         let counts = dosage_counts_for_filter(&values, &missing).unwrap();
 
         assert_eq!(counts.called_count, 0);
@@ -401,18 +434,18 @@ mod tests {
 
     #[test]
     fn dosage_filter_counts_reject_invalid_inputs() {
-        let length_error = dosage_counts_for_filter(&[0.0, 1.0], &[false])
-            .expect_err("mismatched value and missing lengths should fail");
+        let length_error = dosage_counts_for_filter(&[0.0, 1.0], &[2])
+            .expect_err("out-of-range index should fail");
         assert!(length_error
             .to_string()
-            .contains("variant values and missing mask lengths differ"));
+            .contains("missing genotype index is outside variant values"));
 
         let high_value =
-            dosage_counts_for_filter(&[2.1], &[false]).expect_err("dosage above two should fail");
+            dosage_counts_for_filter(&[2.1], &[]).expect_err("dosage above two should fail");
         assert!(high_value.to_string().contains("values in [0, 2]"));
 
         let low_value =
-            dosage_counts_for_filter(&[-0.1], &[false]).expect_err("negative dosage should fail");
+            dosage_counts_for_filter(&[-0.1], &[]).expect_err("negative dosage should fail");
         assert!(low_value.to_string().contains("values in [0, 2]"));
     }
 }

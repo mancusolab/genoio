@@ -20,9 +20,9 @@ use super::bitpack::{bit_is_set, ensure_record_bits, ensure_record_bytes};
 use super::io::read_fixed_width_phased_dosage_variant_record;
 use super::main_track::decode_variable_width_main_track;
 use super::{
-    PgenDecoderState, PgenHaplotypeDecodeState, PgenHeader, PgenLayout, SelectedSampleCursor,
-    PGEN_DOSAGE_SCALE, PGEN_MAX_DOSAGE_RAW, PGEN_MAX_PHASE_RAW, PGEN_MIN_PHASE_RAW,
-    PGEN_PHASE_SCALE,
+    insert_sorted_unique_index, PgenDecoderState, PgenHaplotypeDecodeState, PgenHeader, PgenLayout,
+    SelectedSampleCursor, PGEN_DOSAGE_SCALE, PGEN_MAX_DOSAGE_RAW, PGEN_MAX_PHASE_RAW,
+    PGEN_MIN_PHASE_RAW, PGEN_PHASE_SCALE,
 };
 
 pub(in crate::plink::plink2) fn read_plink2_variant_haplotype_main_track(
@@ -228,15 +228,12 @@ fn decode_hardcall_phase_track(
     ensure_record_bits(path, record, phaseinfo_start_bit, heterozygote_ct)?;
 
     haplotype_state.selected_haplotype_values.clear();
-    haplotype_state.selected_haplotype_missing.clear();
+    haplotype_state.selected_haplotype_missing_indices.clear();
     haplotype_state.selected_collapsed_values.clear();
-    haplotype_state.selected_collapsed_missing.clear();
+    haplotype_state.selected_collapsed_missing_indices.clear();
     haplotype_state
         .selected_haplotype_values
         .resize(source_indices.len() * 2, 0.0);
-    haplotype_state
-        .selected_haplotype_missing
-        .resize(source_indices.len() * 2, false);
 
     let mut selected_cursor = SelectedSampleCursor::new(source_indices);
     let mut heterozygote_index = 0_usize;
@@ -343,9 +340,9 @@ fn decode_full_phased_dosage_tracks(
     }
 
     haplotype_state.selected_haplotype_values.clear();
-    haplotype_state.selected_haplotype_missing.clear();
+    haplotype_state.selected_haplotype_missing_indices.clear();
     haplotype_state.selected_collapsed_values.clear();
-    haplotype_state.selected_collapsed_missing.clear();
+    haplotype_state.selected_collapsed_missing_indices.clear();
     for source_index in source_indices {
         let dosage_offset = cursor + source_index * 2;
         let phase_offset = phase_cursor + source_index * 2;
@@ -358,10 +355,11 @@ fn decode_full_phased_dosage_tracks(
             i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]),
         )?;
         let (Some(total), Some(delta)) = (dosage, phase_delta) else {
-            haplotype_state.selected_haplotype_values.extend([0.0, 0.0]);
+            let row_offset = haplotype_state.selected_haplotype_values.len();
             haplotype_state
-                .selected_haplotype_missing
-                .extend([true, true]);
+                .selected_haplotype_missing_indices
+                .extend([row_offset, row_offset + 1]);
+            haplotype_state.selected_haplotype_values.extend([0.0, 0.0]);
             push_collapsed_dosage(haplotype_state, 0.0, true);
             continue;
         };
@@ -371,9 +369,6 @@ fn decode_full_phased_dosage_tracks(
         haplotype_state
             .selected_haplotype_values
             .extend([left, right]);
-        haplotype_state
-            .selected_haplotype_missing
-            .extend([false, false]);
         push_collapsed_dosage(haplotype_state, total, false);
     }
     Ok(())
@@ -427,8 +422,16 @@ fn set_selected_haplotype_pair(
     let offset = selected_index * 2;
     haplotype_state.selected_haplotype_values[offset] = left;
     haplotype_state.selected_haplotype_values[offset + 1] = right;
-    haplotype_state.selected_haplotype_missing[offset] = missing;
-    haplotype_state.selected_haplotype_missing[offset + 1] = missing;
+    if missing {
+        insert_sorted_unique_index(
+            &mut haplotype_state.selected_haplotype_missing_indices,
+            offset,
+        );
+        insert_sorted_unique_index(
+            &mut haplotype_state.selected_haplotype_missing_indices,
+            offset + 1,
+        );
+    }
 }
 
 fn push_collapsed_dosage(
@@ -436,6 +439,11 @@ fn push_collapsed_dosage(
     value: f32,
     missing: bool,
 ) {
+    let index = haplotype_state.selected_collapsed_values.len();
     haplotype_state.selected_collapsed_values.push(value);
-    haplotype_state.selected_collapsed_missing.push(missing);
+    if missing {
+        haplotype_state
+            .selected_collapsed_missing_indices
+            .push(index);
+    }
 }

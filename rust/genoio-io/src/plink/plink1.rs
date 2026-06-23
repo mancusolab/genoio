@@ -9,11 +9,10 @@ use std::fs::{self, File};
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order, DenseDiagnostics,
-    DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan,
-    MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
-    VariantRecord, VariantWindow,
+    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataOutput, PartialFilterDecision,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -622,12 +621,12 @@ pub fn read_plink1_sparse_windowed(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        decoder_state.packed.expand_selected(
+        decoder_state.packed.expand_selected_with_missing_indices(
             &selection.source_indices,
             &mut decoder_state.values,
-            &mut decoder_state.missing,
+            &mut decoder_state.missing_indices,
         );
-        reject_sparse_missing_values(&decoder_state.missing)?;
+        reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);

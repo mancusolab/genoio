@@ -854,7 +854,7 @@ fn read_dense_records<R: BufRead>(
         output.write_variant(
             output_variant_count,
             decoded.values(),
-            decoded.missing(),
+            decoded.missing_indices(),
             missing_policy,
         )?;
         output_variant_count += 1;
@@ -935,7 +935,7 @@ fn read_dosage_dense_records<R: BufRead>(
             })?;
             let (retain_variant, stats) = evaluate_dosage_filter(
                 decoded.values(),
-                decoded.missing(),
+                decoded.missing_indices(),
                 filter,
                 &variant,
                 !matrix_only,
@@ -958,7 +958,7 @@ fn read_dosage_dense_records<R: BufRead>(
         output.write_variant(
             output_variant_count,
             decoded.values(),
-            decoded.missing(),
+            decoded.missing_indices(),
             missing_policy,
         )?;
         output_variant_count += 1;
@@ -1087,7 +1087,7 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
         output.write_variant(
             output_variant_count,
             decoded.values(),
-            decoded.missing(),
+            decoded.missing_indices(),
             missing_policy,
         )?;
         output_variant_count += 1;

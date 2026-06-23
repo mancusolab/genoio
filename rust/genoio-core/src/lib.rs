@@ -30,10 +30,11 @@ pub use dense::{
 };
 pub use error::GenoioError;
 pub use filter::{
-    attach_variant_stats, compute_dosage_variant_stats, compute_variant_stats,
-    is_dosage_polymorphic, variant_stats_from_counts, GenotypeFilterConjunction,
-    GenotypeFilterPlan, PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats,
-    VariantWindow,
+    attach_variant_stats, compute_dosage_variant_stats,
+    compute_dosage_variant_stats_with_missing_indices, compute_variant_stats,
+    is_dosage_polymorphic, is_dosage_polymorphic_with_missing_indices, variant_stats_from_counts,
+    GenotypeFilterConjunction, GenotypeFilterPlan, PartialFilterDecision, RegionPredicate,
+    VariantFilter, VariantStats, VariantWindow,
 };
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 pub use sparse::{

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, reject_sparse_missing_values, DenseGenotypeMatrix, DenseMissingPolicy,
+    attach_variant_stats, reject_sparse_missing, DenseGenotypeMatrix, DenseMissingPolicy,
     GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 
@@ -16,7 +16,7 @@ use crate::error::Result;
 use crate::hardcall::evaluate_packed_hardcall_filter;
 use crate::matrix::{
     apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
-    missing_indices_from_mask, VariantMajorDenseParts,
+    VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -89,7 +89,6 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
@@ -155,13 +154,9 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
         if !matrix_only {
             variants.push(variant);
         }
-        missing_indices_from_mask(
-            &haplotype_state.selected_haplotype_missing,
-            &mut missing_indices,
-        );
         apply_dense_missing_policy_to_variant(
             &mut haplotype_state.selected_haplotype_values,
-            &missing_indices,
+            &haplotype_state.selected_haplotype_missing_indices,
             missing_policy,
         )?;
         variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
@@ -247,7 +242,6 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
@@ -290,7 +284,7 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
             let filter = require_genotype_decision_filter(variant_filter)?;
             let (retain_variant, stats) = evaluate_dosage_filter(
                 &haplotype_state.selected_collapsed_values,
-                &haplotype_state.selected_collapsed_missing,
+                &haplotype_state.selected_collapsed_missing_indices,
                 filter,
                 &variant,
                 !matrix_only,
@@ -310,13 +304,9 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
         if !matrix_only {
             variants.push(variant);
         }
-        missing_indices_from_mask(
-            &haplotype_state.selected_haplotype_missing,
-            &mut missing_indices,
-        );
         apply_dense_missing_policy_to_variant(
             &mut haplotype_state.selected_haplotype_values,
-            &missing_indices,
+            &haplotype_state.selected_haplotype_missing_indices,
             missing_policy,
         )?;
         variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
@@ -466,7 +456,7 @@ pub fn read_plink2_haplotypes_sparse_windowed(
             &mut indices,
             &mut data,
             &haplotype_state.selected_haplotype_values,
-            &haplotype_state.selected_haplotype_missing,
+            &haplotype_state.selected_haplotype_missing_indices,
         )?;
         variants.push(variant);
         if retention.window_is_satisfied() {
@@ -499,9 +489,9 @@ fn append_haplotype_sparse_column(
     indices: &mut Vec<usize>,
     data: &mut Vec<f32>,
     values: &[f32],
-    missing: &[bool],
+    missing_indices: &[usize],
 ) -> Result<()> {
-    reject_sparse_missing_values(missing)?;
+    reject_sparse_missing(!missing_indices.is_empty())?;
     for (row, &value) in values.iter().enumerate() {
         if value != 0.0 {
             indices.push(row);

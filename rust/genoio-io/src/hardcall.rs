@@ -291,6 +291,7 @@ impl PackedHardcalls {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn expand_selected(
         &self,
         source_indices: &[usize],

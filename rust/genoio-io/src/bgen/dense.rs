@@ -13,8 +13,8 @@ use genoio_core::{
 
 use crate::error::Result;
 use crate::matrix::{
-    apply_dense_missing_policy_to_variant, finish_dense_matrix, missing_indices_from_mask,
-    shrink_sample_major_width, write_sample_major_variant_slot, DenseMatrixParts,
+    apply_dense_missing_policy_to_variant, finish_dense_matrix, shrink_sample_major_width,
+    write_sample_major_variant_slot, DenseMatrixParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -126,7 +126,6 @@ pub fn read_bgen_dosage_dense_windowed_with_missing_policy(
     let mut values = sample_major_buffer(n_samples, output_variant_capacity)?;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut decode_buffers = DosageDecodeBuffers::default();
-    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
@@ -193,7 +192,6 @@ pub fn read_bgen_dosage_dense_windowed_with_missing_policy(
                 row_width: output_variant_capacity,
                 variant_index: output_variant_count,
                 missing_policy,
-                missing_indices: &mut missing_indices,
             },
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
         )?;
@@ -237,7 +235,6 @@ fn read_bgen_dosage_dense_matrix_only_unfiltered(
     let n_samples = selection.samples.len();
     let mut values = sample_major_buffer(n_samples, output_variant_capacity)?;
     let mut decode_buffers = DosageDecodeBuffers::default();
-    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
@@ -265,7 +262,6 @@ fn read_bgen_dosage_dense_matrix_only_unfiltered(
                         row_width: output_variant_capacity,
                         variant_index: output_variant_count,
                         missing_policy,
-                        missing_indices: &mut missing_indices,
                     },
                     false,
                 )?;
@@ -317,7 +313,6 @@ struct BgenDosageSlotWrite<'a> {
     row_width: usize,
     variant_index: usize,
     missing_policy: DenseMissingPolicy,
-    missing_indices: &'a mut Vec<usize>,
 }
 
 fn write_dosage_slot(
@@ -333,7 +328,6 @@ fn write_dosage_slot(
         row_width,
         variant_index,
         missing_policy,
-        missing_indices,
     } = request;
 
     if !already_decoded_for_filter {
@@ -356,10 +350,9 @@ fn write_dosage_slot(
         decode_buffered_dosage_values(bgen, sample_count, source_indices, buffers)?;
     }
 
-    missing_indices_from_mask(&buffers.selected_missing, missing_indices);
     apply_dense_missing_policy_to_variant(
         &mut buffers.selected_values,
-        missing_indices,
+        &buffers.selected_missing_indices,
         missing_policy,
     )?;
     write_sample_major_variant_slot(
@@ -393,7 +386,6 @@ fn read_bgen_dosage_dense_indexed(
     let mut values = sample_major_buffer(n_samples, output_variant_capacity)?;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut decode_buffers = DosageDecodeBuffers::default();
-    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
 
@@ -467,7 +459,6 @@ fn read_bgen_dosage_dense_indexed(
                 row_width: output_variant_capacity,
                 variant_index: output_variant_count,
                 missing_policy,
-                missing_indices: &mut missing_indices,
             },
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
         )?;

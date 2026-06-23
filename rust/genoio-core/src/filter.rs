@@ -1069,6 +1069,44 @@ pub fn compute_dosage_variant_stats(
     variant_stats_from_dosage_count(allele_count, called_count, missing_count)
 }
 
+/// Compute frequency and missingness statistics from sparse missing indices.
+///
+/// `missing_indices` must be sorted and unique. The corresponding `values`
+/// entries are ignored, allowing decoders to use any placeholder for missing
+/// calls without materializing a full boolean mask.
+pub fn compute_dosage_variant_stats_with_missing_indices(
+    values: &[f32],
+    missing_indices: &[usize],
+) -> Result<VariantStats, GenoioError> {
+    validate_missing_indices(values.len(), missing_indices)?;
+
+    let mut allele_count = 0.0_f64;
+    let mut called_count = 0_u64;
+    let mut missing_cursor = 0_usize;
+    for (index, value) in values.iter().enumerate() {
+        if missing_indices
+            .get(missing_cursor)
+            .is_some_and(|&missing_index| missing_index == index)
+        {
+            missing_cursor += 1;
+            continue;
+        }
+        if !(0.0..=2.0).contains(value) {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                format!("dosage statistics require values in [0, 2]; observed {value}"),
+            ));
+        }
+        allele_count += f64::from(*value);
+        called_count += 1;
+    }
+
+    let missing_count = u64::try_from(missing_indices.len()).map_err(|_| {
+        GenoioError::invalid_source("<filter>", "missing genotype count is out of range")
+    })?;
+    variant_stats_from_dosage_count(allele_count, called_count, missing_count)
+}
+
 /// Return true when called dosage values contain both alleles.
 pub fn is_dosage_polymorphic(values: &[f32], missing_mask: &[bool]) -> Result<bool, GenoioError> {
     if values.len() != missing_mask.len() {
@@ -1097,6 +1135,64 @@ pub fn is_dosage_polymorphic(values: &[f32], missing_mask: &[bool]) -> Result<bo
         }
     }
     Ok(false)
+}
+
+/// Return true when called dosage values contain both alleles.
+///
+/// This is the sparse-missing counterpart to [`is_dosage_polymorphic`].
+pub fn is_dosage_polymorphic_with_missing_indices(
+    values: &[f32],
+    missing_indices: &[usize],
+) -> Result<bool, GenoioError> {
+    validate_missing_indices(values.len(), missing_indices)?;
+
+    let mut allele_count = 0.0_f64;
+    let mut called_count = 0_u64;
+    let mut missing_cursor = 0_usize;
+    for (index, value) in values.iter().enumerate() {
+        if missing_indices
+            .get(missing_cursor)
+            .is_some_and(|&missing_index| missing_index == index)
+        {
+            missing_cursor += 1;
+            continue;
+        }
+        if !(0.0..=2.0).contains(value) {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                format!("dosage statistics require values in [0, 2]; observed {value}"),
+            ));
+        }
+        allele_count += f64::from(*value);
+        called_count += 1;
+        if allele_count > 0.0 && allele_count < 2.0 * called_count as f64 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_missing_indices(
+    values_len: usize,
+    missing_indices: &[usize],
+) -> Result<(), GenoioError> {
+    let mut previous = None;
+    for &index in missing_indices {
+        if index >= values_len {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                "missing genotype index is outside variant values",
+            ));
+        }
+        if previous.is_some_and(|previous| index <= previous) {
+            return Err(GenoioError::invalid_source(
+                "<filter>",
+                "missing genotype indices must be sorted and unique",
+            ));
+        }
+        previous = Some(index);
+    }
+    Ok(())
 }
 
 /// Compute variant statistics from hard-call category counts.
