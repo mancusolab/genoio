@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use genoio_core::VariantWindow;
+use genoio_core::{DenseLayout, VariantWindow};
 
 mod common;
 
@@ -246,7 +246,8 @@ fn vcf_dense_window_uses_retained_variant_order_after_filters() {
             .collect::<Vec<_>>(),
         vec!["rs2", "rs4"]
     );
-    assert_eq!(block.values, vec![1.0, 0.0, 2.0, 0.0]);
+    assert_eq!(block.values, vec![1.0, 2.0, 0.0, 0.0]);
+    assert_eq!(block.layout, DenseLayout::VariantMajor);
 }
 
 #[test]

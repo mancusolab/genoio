@@ -82,11 +82,12 @@ def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
 
 def dense_array_from_rust(
     *,
-    values: list[float],
+    values: Sequence[float] | NDArray[Any],
     shape: tuple[int, int],
-    missing_mask: list[bool],
+    missing_mask: Sequence[bool] | NDArray[Any],
     missing: str,
     dtype: np.dtype[Any],
+    values_layout: str = "sample_major",
 ) -> NDArray[Any]:
     r"""Convert a flat Rust dense matrix payload into a NumPy array.
 
@@ -95,9 +96,11 @@ def dense_array_from_rust(
 
     **Arguments:**
 
-    - `values`: flat sample-major matrix values.
+    - `values`: flat matrix values in `values_layout` order.
     - `shape`: `(n_samples, n_variants)`.
     - `missing_mask`: flat boolean mask aligned with `values`.
+    - `values_layout`: flat buffer layout, either `"sample_major"` or
+      `"variant_major"`.
     - `missing`: validated missing-data policy.
     - `dtype`: output NumPy dtype.
 
@@ -105,8 +108,8 @@ def dense_array_from_rust(
 
     Dense NumPy matrix with shape `shape`.
     """
-    array = np.asarray(values, dtype=dtype).reshape(shape)
-    mask = np.asarray(missing_mask, dtype=bool).reshape(shape)
+    array = _reshape_dense_payload(np.asarray(values, dtype=dtype), shape, values_layout)
+    mask = _reshape_dense_payload(np.asarray(missing_mask, dtype=bool), shape, values_layout)
     if missing == "nan":
         array[mask] = np.nan
         return array
@@ -117,6 +120,18 @@ def dense_array_from_rust(
     if missing == "impute":
         return _impute_missing_by_variant(array, mask)
     raise AssertionError(f"unvalidated missing-data policy: {missing}")
+
+
+def _reshape_dense_payload(array: NDArray[Any], shape: tuple[int, int], values_layout: str) -> NDArray[Any]:
+    """Return the public sample-by-variant view for a Rust dense payload."""
+    if values_layout == "sample_major":
+        return array.reshape(shape)
+    if values_layout == "variant_major":
+        n_samples, n_variants = shape
+        # Variant-major buffers are already Python-owned NumPy arrays here; the
+        # transpose is a strided view, not another Rust-side materialization.
+        return array.reshape((n_variants, n_samples)).T
+    raise AssertionError(f"unvalidated dense value layout: {values_layout}")
 
 
 def sparse_matrix_from_rust(

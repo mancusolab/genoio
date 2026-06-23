@@ -21,8 +21,39 @@ def _write_tiny_vcf(tmp_path: Path) -> Path:
     return path
 
 
+def _write_tiny_phased_vcf(tmp_path: Path) -> Path:
+    path = tmp_path / "tiny_phased.vcf"
+    path.write_text(
+        """\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|1
+1\t20\trs2\tA\tG\t.\tPASS\t.\tGT\t1|0\t0|0
+"""
+    )
+    return path
+
+
 def _read_private_dense_values(path: Path) -> dict[str, object]:
     return _rust.read_dense(
+        "vcf",
+        {"vcf": str(path)},
+        {
+            "samples": None,
+            "variants": None,
+            "variant_window": None,
+            "dosage": "hardcall",
+            "return_samples": False,
+            "return_variants": False,
+            "matrix_only": True,
+        },
+    )
+
+
+def _read_private_haplotype_dense_values(path: Path) -> dict[str, object]:
+    return _rust.read_haplotypes_dense(
         "vcf",
         {"vcf": str(path)},
         {
@@ -90,3 +121,15 @@ def test_rust_sparse_indices_transfer_ownership_to_numpy_without_bytearray_base(
     assert indices.dtype == np.dtype("int64")
     assert not _is_bytearray_backed(indptr)
     assert not _is_bytearray_backed(indices)
+
+
+def test_rust_variant_major_haplotype_values_report_layout_without_transpose(tmp_path):
+    result = _read_private_haplotype_dense_values(_write_tiny_phased_vcf(tmp_path))
+
+    values = result["values"]
+
+    assert result["values_layout"] == "variant_major"
+    np.testing.assert_array_equal(
+        values,
+        np.array([0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )

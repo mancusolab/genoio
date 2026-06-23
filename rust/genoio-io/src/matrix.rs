@@ -2,12 +2,12 @@
 //! Matrix assembly helpers shared by format readers.
 //!
 //! Format modules decode variants in the order that is cheapest for their
-//! source files. These helpers validate shapes, transpose variant-major staging
-//! when needed, and construct the public dense or sparse core structs.
+//! source files. These helpers validate shapes, preserve explicit dense buffer
+//! layouts, and construct the public dense or sparse core structs.
 
 use genoio_core::{
-    transpose_variant_major_to_sample_major, DenseDiagnostics, DenseGenotypeMatrix, GenoioError,
-    SampleRecord, SparseGenotypeMatrix, VariantRecord,
+    DenseDiagnostics, DenseGenotypeMatrix, DenseLayout, GenoioError, SampleRecord,
+    SparseGenotypeMatrix, VariantRecord,
 };
 
 use crate::error::Result;
@@ -26,9 +26,11 @@ pub(crate) struct DenseMatrixParts {
     pub(crate) diagnostics: DenseDiagnostics,
 }
 
-/// Variant-major dense matrix components that need one final transpose.
+/// Variant-major dense matrix components.
 ///
 /// Use this when a decoder naturally appends one complete variant at a time.
+/// The layout tag lets Python expose the public sample-by-variant shape without
+/// forcing Rust to materialize a second transposed buffer.
 pub(crate) struct VariantMajorDenseParts {
     pub(crate) n_samples: usize,
     pub(crate) n_variants: usize,
@@ -93,23 +95,30 @@ pub(crate) fn finish_variant_major_dense_matrix(
         n_samples,
         n_variants,
     )?;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
 
-    finish_dense_matrix(
-        DenseMatrixParts {
+    // Preserve the decoder's natural order. The Python bridge uses this tag to
+    // build a strided NumPy view in public sample-by-variant order.
+    if matrix_only {
+        DenseGenotypeMatrix::new_matrix_only_with_layout(
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            variant_major_missing,
+            DenseLayout::VariantMajor,
+            diagnostics,
+        )
+    } else {
+        DenseGenotypeMatrix::new_with_layout(
+            n_samples,
+            n_variants,
+            variant_major_values,
+            variant_major_missing,
+            DenseLayout::VariantMajor,
             samples,
             variants,
             diagnostics,
-        },
-        matrix_only,
-    )
+        )
+    }
 }
 
 pub(crate) fn shrink_sample_major_width<T: Copy>(
@@ -265,19 +274,20 @@ mod tests {
     }
 
     #[test]
-    fn finish_variant_major_dense_matrix_transposes_valid_buffers() {
+    fn finish_variant_major_dense_matrix_preserves_variant_major_layout() {
         let matrix = finish_variant_major_dense_matrix(
             variant_major_parts(vec![0.0, 1.0, 2.0, 3.0], vec![false, true, false, false]),
             false,
         )
         .expect("valid variant-major buffers should build a dense matrix");
 
-        assert_eq!(matrix.values, vec![0.0, 2.0, 1.0, 3.0]);
-        assert_eq!(matrix.missing_mask, vec![false, false, true, false]);
+        assert_eq!(matrix.values, vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(matrix.missing_mask, vec![false, true, false, false]);
+        assert_eq!(matrix.layout, DenseLayout::VariantMajor);
     }
 
     #[test]
-    fn finish_variant_major_dense_matrix_rejects_short_values_before_transpose() {
+    fn finish_variant_major_dense_matrix_rejects_short_values_before_layout_tagging() {
         let error = finish_variant_major_dense_matrix(
             variant_major_parts(vec![0.0, 1.0, 2.0], vec![false, true, false, false]),
             false,

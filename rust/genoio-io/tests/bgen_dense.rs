@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use genoio_core::{VariantFilter, VariantWindow};
+use genoio_core::{DenseLayout, VariantFilter, VariantWindow};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -1104,18 +1104,19 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
 
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.layout, DenseLayout::VariantMajor);
     let expected = vec![
         expected_phased_a1_haplotype_dosage(8, 255),
         expected_phased_a1_haplotype_dosage(8, 0),
-        expected_phased_a1_haplotype_dosage(8, 0),
-        expected_phased_a1_haplotype_dosage(8, 255),
         expected_phased_a1_haplotype_dosage(8, 128),
-        0.0,
         expected_phased_a1_haplotype_dosage(8, 64),
-        0.0,
+        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 255),
-        expected_phased_a1_haplotype_dosage(8, 0),
+        0.0,
+        0.0,
+        expected_phased_a1_haplotype_dosage(8, 255),
         expected_phased_a1_haplotype_dosage(8, 255),
     ];
     for (observed, expected) in dense.values.iter().zip(expected) {
@@ -1123,7 +1124,7 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     }
     assert_eq!(
         dense.missing_mask,
-        vec![false, false, false, false, false, true, false, true, false, false, false, false]
+        vec![false, false, false, false, false, false, false, false, true, true, false, false]
     );
     assert_eq!(
         dense
@@ -1229,14 +1230,15 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
             .collect::<Vec<_>>(),
         vec![Some(0), Some(1), Some(0), Some(1)]
     );
+    assert_eq!(dense.layout, DenseLayout::VariantMajor);
     let expected = vec![
         expected_phased_a1_haplotype_dosage(8, 255),
         expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 0),
-        expected_phased_a1_haplotype_dosage(8, 255),
+        expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 255),
-        expected_phased_a1_haplotype_dosage(8, 0),
+        expected_phased_a1_haplotype_dosage(8, 255),
         expected_phased_a1_haplotype_dosage(8, 255),
     ];
     for (observed, expected) in dense.values.iter().zip(expected) {
@@ -1260,9 +1262,10 @@ fn bgen_haplotype_dosage_preserves_missing_sample_calls() {
 
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.layout, DenseLayout::VariantMajor);
     assert_eq!(
         dense.missing_mask,
-        vec![false, false, false, false, true, false, true, false, false, false, false, false]
+        vec![false, false, true, true, false, false, false, false, false, false, false, false]
     );
 }
 

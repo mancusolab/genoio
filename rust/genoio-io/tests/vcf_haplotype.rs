@@ -5,6 +5,7 @@ use std::io::Write;
 
 mod common;
 
+use common::dense::dense_values_sample_major;
 use common::unique_dir;
 
 fn phased_vcf() -> String {
@@ -85,7 +86,7 @@ fn phased_vcf_haplotype_dense_counts_a1_by_sample_haplotype_rows() {
     assert_eq!(haplotypes.n_samples, 4);
     assert_eq!(haplotypes.n_variants, 2);
     assert_eq!(
-        haplotypes.values,
+        dense_values_sample_major(&haplotypes),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
     );
     assert_eq!(
@@ -110,7 +111,7 @@ fn phased_vcf_haplotype_dense_matrix_only_omits_metadata() {
     assert_eq!(haplotypes.n_samples, 4);
     assert_eq!(haplotypes.n_variants, 2);
     assert_eq!(
-        haplotypes.values,
+        dense_values_sample_major(&haplotypes),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
     );
     assert!(haplotypes.samples.is_empty());
@@ -140,7 +141,7 @@ fn compressed_vcf_haplotype_dense_uses_text_backend_semantics() {
     assert_eq!(haplotypes.n_samples, 4);
     assert_eq!(haplotypes.n_variants, 2);
     assert_eq!(
-        haplotypes.values,
+        dense_values_sample_major(&haplotypes),
         vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
     );
     assert_eq!(
@@ -375,7 +376,10 @@ fn haplotype_stat_filter_drops_unphased_genotype_before_separator_check() {
             .collect::<Vec<_>>(),
         vec!["rs_phased"]
     );
-    assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(
+        dense_values_sample_major(&haplotypes),
+        vec![0.0, 1.0, 1.0, 0.0]
+    );
 }
 
 #[test]
@@ -398,5 +402,8 @@ fn haplotype_matrix_only_stat_filter_drops_unphased_genotype_before_separator_ch
     assert_eq!(haplotypes.n_variants, 1);
     assert!(haplotypes.samples.is_empty());
     assert!(haplotypes.variants.is_empty());
-    assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(
+        dense_values_sample_major(&haplotypes),
+        vec![0.0, 1.0, 1.0, 0.0]
+    );
 }

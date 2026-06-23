@@ -7,6 +7,7 @@ use genoio_core::VariantWindow;
 
 mod common;
 
+use common::dense::{dense_missing_sample_major, dense_values_sample_major};
 use common::{unique_dir, TestDir};
 
 fn write_text(path: &Path, contents: &str) {
@@ -420,9 +421,9 @@ fn plink2_dosage_dense_decodes_variable_width_full_dosage_records() {
         f32::from(u16::from_le_bytes(scaled_dosage(0.7))) * scale,
         0.0,
     ];
-    assert_eq!(dense.values, expected);
+    assert_eq!(dense_values_sample_major(&dense), expected);
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, false, false, false, true, false, false, false, false]
     );
 }
@@ -452,11 +453,11 @@ fn plink2_haplotype_dense_decodes_explicit_phased_hardcalls() {
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 2);
     assert_eq!(
-        dense.values,
+        dense_values_sample_major(&dense),
         vec![0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]
     );
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, false, false, false, false, false, false, false, false, true, false, true]
     );
     assert_eq!(
@@ -538,9 +539,12 @@ fn plink2_haplotype_dense_sample_filter_uses_source_order_and_haplotype_order() 
             .collect::<Vec<_>>(),
         vec![Some(0), Some(1), Some(0), Some(1)]
     );
-    assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
     assert_eq!(
-        dense.missing_mask,
+        dense_values_sample_major(&dense),
+        vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    );
+    assert_eq!(
+        dense_missing_sample_major(&dense),
         vec![false, false, false, false, false, true, false, true]
     );
 }
@@ -576,13 +580,15 @@ fn plink2_haplotype_dense_ld_compressed_window_matches_full_read_slice() {
 
     assert_eq!(block.n_variants, 1);
     assert_eq!(block.variants[0].id, "rs2");
+    let full_values = dense_values_sample_major(&full);
+    let full_missing = dense_missing_sample_major(&full);
     assert_eq!(
-        block.values,
-        sample_major_window(&full.values, full.n_samples, full.n_variants, 1, 1)
+        dense_values_sample_major(&block),
+        sample_major_window(&full_values, full.n_samples, full.n_variants, 1, 1)
     );
     assert_eq!(
-        block.missing_mask,
-        sample_major_window(&full.missing_mask, full.n_samples, full.n_variants, 1, 1)
+        dense_missing_sample_major(&block),
+        sample_major_window(&full_missing, full.n_samples, full.n_variants, 1, 1)
     );
 }
 
@@ -625,7 +631,7 @@ fn plink2_haplotype_sparse_reconstructs_dense_hardcalls() {
 
     assert_eq!(sparse.n_rows, dense.n_samples);
     assert_eq!(sparse.n_cols, dense.n_variants);
-    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(csc_to_dense(&sparse), dense_values_sample_major(&dense));
     assert_eq!(
         sparse
             .samples
@@ -1020,13 +1026,15 @@ fn plink2_haplotype_dosage_ld_compressed_window_matches_full_read_slice() {
 
     assert_eq!(block.n_variants, 1);
     assert_eq!(block.variants[0].id, "rs2");
+    let full_values = dense_values_sample_major(&full);
+    let full_missing = dense_missing_sample_major(&full);
     assert_eq!(
-        block.values,
-        sample_major_window(&full.values, full.n_samples, full.n_variants, 1, 1)
+        dense_values_sample_major(&block),
+        sample_major_window(&full_values, full.n_samples, full.n_variants, 1, 1)
     );
     assert_eq!(
-        block.missing_mask,
-        sample_major_window(&full.missing_mask, full.n_samples, full.n_variants, 1, 1)
+        dense_missing_sample_major(&block),
+        sample_major_window(&full_missing, full.n_samples, full.n_variants, 1, 1)
     );
 }
 

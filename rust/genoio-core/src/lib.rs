@@ -26,7 +26,7 @@ pub mod sparse;
 pub use capabilities::SourceCapabilities;
 pub use dense::{
     select_samples_source_order, transpose_variant_major_to_sample_major, DenseDiagnostics,
-    DenseGenotypeMatrix, DenseSampleSelection,
+    DenseGenotypeMatrix, DenseLayout, DenseSampleSelection,
 };
 pub use error::GenoioError;
 pub use filter::{

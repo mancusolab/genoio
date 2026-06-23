@@ -1,9 +1,12 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 mod common;
 
+use common::dense::{dense_missing_sample_major, dense_values_sample_major};
 use common::unique_dir;
 
 fn write_file(path: &Path, contents: &str) {
@@ -47,8 +50,11 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]);
-    assert_eq!(dense.missing_mask, vec![false; 6]);
+    assert_eq!(
+        dense_values_sample_major(&dense),
+        vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]
+    );
+    assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
     assert_eq!(
         dense
             .samples
@@ -87,8 +93,11 @@ fn plain_vcf_dense_uses_permissive_text_header_path() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
-    assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, true]
+    );
     assert_eq!(
         dense
             .samples
@@ -152,8 +161,11 @@ fn vcf_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]);
-    assert_eq!(dense.missing_mask, vec![false; 6]);
+    assert_eq!(
+        dense_values_sample_major(&dense),
+        vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]
+    );
+    assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
     assert!(dense.samples.is_empty());
     assert!(dense.variants.is_empty());
 }
@@ -180,9 +192,12 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.2, 0.0, 1.4, 0.0, 1.8, 0.7]);
     assert_eq!(
-        dense.missing_mask,
+        dense_values_sample_major(&dense),
+        vec![0.2, 0.0, 1.4, 0.0, 1.8, 0.7]
+    );
+    assert_eq!(
+        dense_missing_sample_major(&dense),
         vec![false, false, false, true, false, false]
     );
     assert!(dense.samples.is_empty());
@@ -210,8 +225,11 @@ fn compressed_vcf_dosage_dense_uses_text_backend_semantics() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.2, 0.0, 1.8, 0.7]);
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(dense_values_sample_major(&dense), vec![0.2, 0.0, 1.8, 0.7]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
     assert_eq!(
         dense
             .samples
@@ -260,8 +278,11 @@ fn threaded_compressed_vcf_dosage_uses_text_backend_semantics() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.2, 0.0, 1.8, 0.7]);
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(dense_values_sample_major(&dense), vec![0.2, 0.0, 1.8, 0.7]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
     assert_eq!(
         dense
             .samples
@@ -387,8 +408,11 @@ fn compressed_vcf_matrix_only_uses_text_backend_semantics() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
-    assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, true]
+    );
     assert!(dense.samples.is_empty());
     assert!(dense.variants.is_empty());
 }
@@ -415,8 +439,11 @@ fn compressed_vcf_dense_with_metadata_uses_text_backend_semantics() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
-    assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, true]
+    );
     assert_eq!(
         dense
             .samples
@@ -457,7 +484,7 @@ fn vcf_dense_sample_subset_preserves_source_order() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
+    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
     assert_eq!(
         dense
             .samples

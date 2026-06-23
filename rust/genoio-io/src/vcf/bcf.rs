@@ -1065,6 +1065,7 @@ mod tests {
 
     use super::super::read_vcf_dense_windowed_with_threads;
     use super::*;
+    use genoio_core::DenseLayout;
     use noodles_core::Position;
     use noodles_vcf::{
         self as noodles_vcf,
@@ -1284,8 +1285,9 @@ mod tests {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 2);
-        assert_eq!(dense.values, vec![0.0, 2.0, 1.0, 0.0]);
+        assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
         assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+        assert_eq!(dense.layout, DenseLayout::VariantMajor);
         assert_eq!(
             dense
                 .variants
@@ -1403,8 +1405,9 @@ mod tests {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 2);
-        assert_eq!(dense.values, vec![0.2, 2.0, 1.4, 0.0]);
+        assert_eq!(dense.values, vec![0.2, 1.4, 2.0, 0.0]);
         assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+        assert_eq!(dense.layout, DenseLayout::VariantMajor);
         assert_eq!(
             dense
                 .variants
@@ -1478,8 +1481,9 @@ mod tests {
 
         assert_eq!(dense.n_samples, 4);
         assert_eq!(dense.n_variants, 2);
-        assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         assert_eq!(dense.missing_mask, vec![false; 8]);
+        assert_eq!(dense.layout, DenseLayout::VariantMajor);
         assert_eq!(dense.samples[0].iid, "s1");
         assert_eq!(dense.samples[0].haplotype_index, Some(0));
         assert_eq!(dense.samples[1].haplotype_index, Some(1));

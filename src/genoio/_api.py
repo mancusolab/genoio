@@ -655,6 +655,7 @@ class Dataset:
                 missing_mask=rust_result["missing_mask"],
                 missing=validated_options.missing,
                 dtype=validated_options.dtype,
+                values_layout=str(rust_result.get("values_layout", "sample_major")),
             )
         else:
             rust_result = self._read_from_rust(read_options.kind, True, members, options)

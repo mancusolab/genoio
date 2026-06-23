@@ -17,16 +17,28 @@ pub struct DenseDiagnostics {
     pub dropped_genotype_variants: usize,
 }
 
-/// Dense genotype matrix in sample-by-variant order.
+/// Flat buffer layout used by a dense genotype matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseLayout {
+    /// Flat values are stored in public sample-by-variant order.
+    SampleMajor,
+    /// Flat values are stored as one complete variant after another.
+    VariantMajor,
+}
+
+/// Dense genotype matrix with layout-tagged flat buffers.
 ///
-/// `values` and `missing_mask` are both flat sample-major buffers with length
-/// `n_samples * n_variants`.
+/// `values` and `missing_mask` use the same layout and both have length
+/// `n_samples * n_variants`. Consumers that read flat buffers directly must
+/// inspect `layout`; Python assembly converts either layout into the public
+/// sample-by-variant array shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DenseGenotypeMatrix {
     pub n_samples: usize,
     pub n_variants: usize,
     pub values: Vec<f32>,
     pub missing_mask: Vec<bool>,
+    pub layout: DenseLayout,
     pub samples: Vec<SampleRecord>,
     pub variants: Vec<VariantRecord>,
     pub diagnostics: DenseDiagnostics,
@@ -39,6 +51,33 @@ impl DenseGenotypeMatrix {
         n_variants: usize,
         values: Vec<f32>,
         missing_mask: Vec<bool>,
+        samples: Vec<SampleRecord>,
+        variants: Vec<VariantRecord>,
+        diagnostics: DenseDiagnostics,
+    ) -> Result<Self, GenoioError> {
+        Self::new_with_layout(
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            DenseLayout::SampleMajor,
+            samples,
+            variants,
+            diagnostics,
+        )
+    }
+
+    /// Build a dense matrix with an explicit flat-buffer layout.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "dense matrix constructors validate the full flat-buffer contract at one boundary"
+    )]
+    pub fn new_with_layout(
+        n_samples: usize,
+        n_variants: usize,
+        values: Vec<f32>,
+        missing_mask: Vec<bool>,
+        layout: DenseLayout,
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
         diagnostics: DenseDiagnostics,
@@ -89,6 +128,7 @@ impl DenseGenotypeMatrix {
             n_variants,
             values,
             missing_mask,
+            layout,
             samples,
             variants,
             diagnostics,
@@ -101,6 +141,25 @@ impl DenseGenotypeMatrix {
         n_variants: usize,
         values: Vec<f32>,
         missing_mask: Vec<bool>,
+        diagnostics: DenseDiagnostics,
+    ) -> Result<Self, GenoioError> {
+        Self::new_matrix_only_with_layout(
+            n_samples,
+            n_variants,
+            values,
+            missing_mask,
+            DenseLayout::SampleMajor,
+            diagnostics,
+        )
+    }
+
+    /// Build a dense matrix with explicit layout when callers omitted metadata.
+    pub fn new_matrix_only_with_layout(
+        n_samples: usize,
+        n_variants: usize,
+        values: Vec<f32>,
+        missing_mask: Vec<bool>,
+        layout: DenseLayout,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
         let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
@@ -131,6 +190,7 @@ impl DenseGenotypeMatrix {
             n_variants,
             values,
             missing_mask,
+            layout,
             samples: Vec::new(),
             variants: Vec::new(),
             diagnostics,
@@ -211,9 +271,9 @@ pub fn transpose_variant_major_to_sample_major<T: Copy>(
     n_samples: usize,
     n_variants: usize,
 ) -> Vec<T> {
-    // Readers append one variant at a time because source formats are
-    // variant-major. Python callers expect sample rows, so transpose once at
-    // the core boundary instead of reshaping incorrectly downstream.
+    // Keep this helper available for callers that truly need a physically
+    // sample-major buffer. The Python bridge usually keeps variant-major
+    // buffers and exposes the public shape with NumPy strides instead.
     let mut transposed = Vec::with_capacity(values.len());
     for sample_index in 0..n_samples {
         for variant_index in 0..n_variants {

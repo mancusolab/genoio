@@ -30,7 +30,7 @@ use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use genoio_core::GenoioError;
+use genoio_core::{DenseLayout, GenoioError};
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -870,6 +870,9 @@ fn dense_to_py(
     let dict = PyDict::new(py);
     dict.set_item("values", f32_vec_to_numpy(py, output.values)?)?;
     dict.set_item("shape", (output.n_samples, output.n_variants))?;
+    // Python assembly uses this tag to reshape variant-major buffers as views
+    // instead of requiring Rust to allocate a physically transposed matrix.
+    dict.set_item("values_layout", dense_layout_to_py(output.layout))?;
     dict.set_item("missing_mask", bool_vec_to_numpy(py, output.missing_mask)?)?;
     if return_samples {
         dict.set_item(
@@ -898,6 +901,13 @@ fn dense_to_py(
     dict.set_item("diagnostics", diagnostics)?;
 
     Ok(dict.unbind())
+}
+
+fn dense_layout_to_py(layout: DenseLayout) -> &'static str {
+    match layout {
+        DenseLayout::SampleMajor => "sample_major",
+        DenseLayout::VariantMajor => "variant_major",
+    }
 }
 
 fn sparse_to_py(

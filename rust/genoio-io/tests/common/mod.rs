@@ -1,7 +1,15 @@
+// pattern: Imperative Shell
+
 use std::ops::Deref;
 use std::path::Path;
 
 use tempfile::TempDir;
+
+#[allow(
+    dead_code,
+    reason = "shared integration-test helpers are compiled per test target"
+)]
+pub(crate) mod dense;
 
 pub struct TestDir {
     inner: TempDir,
