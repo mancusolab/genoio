@@ -133,16 +133,14 @@ def test_rust_dense_nan_policy_writes_nan_without_missing_payload(tmp_path):
     np.testing.assert_array_equal(values, np.array([0.0, np.nan], dtype=np.float32))
 
 
-def test_rust_dense_impute_policy_returns_missing_indices(tmp_path):
+def test_rust_dense_impute_policy_writes_imputed_values_without_missing_payload(tmp_path):
     result = _read_private_dense_values(_write_missing_vcf(tmp_path), missing="impute")
 
-    indices = result["missing_indices"]
+    values = result["values"]
 
     assert "missing_mask" not in result
-    assert isinstance(indices, np.ndarray)
-    assert indices.dtype == np.dtype("int64")
-    assert not _is_bytearray_backed(indices)
-    np.testing.assert_array_equal(indices, np.array([1], dtype=np.int64))
+    assert "missing_indices" not in result
+    np.testing.assert_array_equal(values, np.array([0.0, 0.0], dtype=np.float32))
 
 
 def test_rust_dense_impute_policy_omits_missing_indices_when_no_calls_are_missing(tmp_path):

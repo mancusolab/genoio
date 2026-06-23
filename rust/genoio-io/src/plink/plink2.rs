@@ -27,12 +27,19 @@ mod source;
 mod sparse;
 
 #[doc(inline)]
-pub use dense::{read_plink2_dense, read_plink2_dense_windowed};
+pub use dense::{
+    read_plink2_dense, read_plink2_dense_windowed, read_plink2_dense_windowed_with_missing_policy,
+};
 #[doc(inline)]
-pub use dosage::read_plink2_dosage_dense_windowed;
+pub use dosage::{
+    read_plink2_dosage_dense_windowed, read_plink2_dosage_dense_windowed_with_missing_policy,
+};
 #[doc(inline)]
 pub use haplotype::{
-    read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_dense_windowed,
+    read_plink2_haplotypes_dense_windowed_with_missing_policy,
+    read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy,
     read_plink2_haplotypes_sparse, read_plink2_haplotypes_sparse_windowed,
 };
 #[doc(inline)]

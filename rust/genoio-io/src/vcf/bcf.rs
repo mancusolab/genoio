@@ -15,8 +15,9 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
     reject_sparse_missing_values, select_samples_source_order, DenseGenotypeMatrix,
-    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantStats, VariantWindow,
+    DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantStats,
+    VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -29,7 +30,10 @@ use noodles_vcf::variant::record::{
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::hardcall::{evaluate_hardcall_counts_filter, HardcallCounts};
-use crate::matrix::{finish_variant_major_dense_matrix, VariantMajorDenseParts};
+use crate::matrix::{
+    apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
+    missing_indices_from_mask, VariantMajorDenseParts,
+};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use super::text::variant_record_from_noodles_variant_record;
@@ -88,6 +92,7 @@ pub(super) fn read_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     read_dense_windowed_with_field(
@@ -95,6 +100,7 @@ pub(super) fn read_dense_windowed(
         requested_samples,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
         DenseField::Gt,
     )
@@ -105,6 +111,7 @@ pub(super) fn read_dosage_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     read_dense_windowed_with_field(
@@ -112,6 +119,7 @@ pub(super) fn read_dosage_dense_windowed(
         requested_samples,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
         DenseField::Ds,
     )
@@ -233,6 +241,7 @@ pub(super) fn read_haplotypes_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let BcfInput {
@@ -248,7 +257,7 @@ pub(super) fn read_haplotypes_dense_windowed(
 
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
-    let mut variant_major_missing = Vec::new();
+    let mut missing_indices = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
@@ -337,10 +346,15 @@ pub(super) fn read_haplotypes_dense_windowed(
             variants.push(variant);
         }
 
-        let decoded = decode_phased_haplotype_record(path, &header, &record, &source_indices)?;
+        let mut decoded = decode_phased_haplotype_record(path, &header, &record, &source_indices)?;
+        missing_indices_from_mask(&decoded.missing, &mut missing_indices);
+        apply_dense_missing_policy_to_variant(
+            &mut decoded.values,
+            &missing_indices,
+            missing_policy,
+        )?;
         n_variants += 1;
         variant_major_values.extend(decoded.values);
-        variant_major_missing.extend(decoded.missing);
     }
 
     let samples = if matrix_only {
@@ -355,7 +369,6 @@ pub(super) fn read_haplotypes_dense_windowed(
             n_samples,
             n_variants,
             variant_major_values,
-            variant_major_missing,
             samples,
             variants,
             diagnostics,
@@ -473,6 +486,7 @@ fn read_dense_windowed_with_field(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     field: DenseField,
 ) -> Result<DenseGenotypeMatrix> {
@@ -489,7 +503,7 @@ fn read_dense_windowed_with_field(
 
     let mut variants = Vec::new();
     let mut variant_major_values = Vec::new();
-    let mut variant_major_missing = Vec::new();
+    let mut missing_indices = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
@@ -532,7 +546,7 @@ fn read_dense_windowed_with_field(
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        let decoded = match field {
+        let mut decoded = match field {
             DenseField::Gt => decode_gt_record(
                 path,
                 &header,
@@ -597,8 +611,13 @@ fn read_dense_windowed_with_field(
         }
 
         n_variants += 1;
+        missing_indices_from_mask(&decoded.missing, &mut missing_indices);
+        apply_dense_missing_policy_to_variant(
+            &mut decoded.values,
+            &missing_indices,
+            missing_policy,
+        )?;
         variant_major_values.extend(decoded.values);
-        variant_major_missing.extend(decoded.missing);
     }
 
     let n_samples = samples.len();
@@ -608,7 +627,6 @@ fn read_dense_windowed_with_field(
             n_samples,
             n_variants,
             variant_major_values,
-            variant_major_missing,
             samples,
             variants,
             diagnostics,
@@ -1083,6 +1101,17 @@ mod tests {
         },
     };
 
+    fn assert_values_with_nan(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
     fn write_test_bcf(path: &Path) {
         let file = fs::File::create(path).expect("test BCF should be created");
         let mut writer = noodles_bcf::io::Writer::new(file);
@@ -1280,13 +1309,19 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let dense = read_dense_windowed(file.path(), None, None, None, false)
-            .expect("BCF dense GT should decode");
+        let dense = read_dense_windowed(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            false,
+        )
+        .expect("BCF dense GT should decode");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 2);
-        assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
-        assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+        assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
         assert_eq!(
             dense
@@ -1328,14 +1363,14 @@ mod tests {
             None,
             None,
             Some(VariantWindow { start: 1, len: 1 }),
+            DenseMissingPolicy::Nan,
             false,
         )
         .expect("BCF dense GT window should decode");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
-        assert_eq!(dense.values, vec![2.0, 0.0]);
-        assert_eq!(dense.missing_mask, vec![false, true]);
+        assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
         assert_eq!(dense.variants[0].id, "rs2");
     }
 
@@ -1354,13 +1389,19 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dense_windowed(file.path(), Some(&samples), Some(&filter), None, false)
-            .expect("BCF dense GT filter should decode");
+        let dense = read_dense_windowed(
+            file.path(),
+            Some(&samples),
+            Some(&filter),
+            None,
+            DenseMissingPolicy::Raise,
+            false,
+        )
+        .expect("BCF dense GT filter should decode");
 
         assert_eq!(dense.n_samples, 1);
         assert_eq!(dense.n_variants, 1);
         assert_eq!(dense.values, vec![1.0]);
-        assert_eq!(dense.missing_mask, vec![false]);
         assert_eq!(dense.samples[0].iid, "s2");
         assert_eq!(dense.variants[0].id, "rs1");
         assert_eq!(dense.variants[0].mac, Some(1));
@@ -1381,15 +1422,21 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dense_windowed(file.path(), None, Some(&filter), None, true)
-            .expect("matrix-only BCF dense GT should filter");
+        let dense = read_dense_windowed(
+            file.path(),
+            None,
+            Some(&filter),
+            None,
+            DenseMissingPolicy::Raise,
+            true,
+        )
+        .expect("matrix-only BCF dense GT should filter");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert!(dense.samples.is_empty());
         assert!(dense.variants.is_empty());
         assert_eq!(dense.values, vec![0.0, 1.0]);
-        assert_eq!(dense.missing_mask, vec![false, false]);
     }
 
     #[test]
@@ -1400,13 +1447,19 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_with_ds(file.path());
 
-        let dense = read_dosage_dense_windowed(file.path(), None, None, None, false)
-            .expect("BCF dense DS should decode");
+        let dense = read_dosage_dense_windowed(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            false,
+        )
+        .expect("BCF dense DS should decode");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 2);
-        assert_eq!(dense.values, vec![0.2, 1.4, 2.0, 0.0]);
-        assert_eq!(dense.missing_mask, vec![false, false, false, true]);
+        assert_values_with_nan(&dense.values, &[0.2, 1.4, 2.0, f32::NAN]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
         assert_eq!(
             dense
@@ -1432,15 +1485,21 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dosage_dense_windowed(file.path(), None, Some(&filter), None, true)
-            .expect("matrix-only BCF dense DS should filter");
+        let dense = read_dosage_dense_windowed(
+            file.path(),
+            None,
+            Some(&filter),
+            None,
+            DenseMissingPolicy::Nan,
+            true,
+        )
+        .expect("matrix-only BCF dense DS should filter");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert!(dense.samples.is_empty());
         assert!(dense.variants.is_empty());
-        assert_eq!(dense.values, vec![2.0, 0.0]);
-        assert_eq!(dense.missing_mask, vec![false, true]);
+        assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
     }
 
     #[test]
@@ -1476,13 +1535,19 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_phased(file.path());
 
-        let dense = read_haplotypes_dense_windowed(file.path(), None, None, None, false)
-            .expect("BCF dense haplotypes should decode");
+        let dense = read_haplotypes_dense_windowed(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Raise,
+            false,
+        )
+        .expect("BCF dense haplotypes should decode");
 
         assert_eq!(dense.n_samples, 4);
         assert_eq!(dense.n_variants, 2);
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(dense.missing_mask, vec![false; 8]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
         assert_eq!(dense.samples[0].iid, "s1");
         assert_eq!(dense.samples[0].haplotype_index, Some(0));
@@ -1503,15 +1568,21 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_haplotypes_dense_windowed(file.path(), None, Some(&filter), None, true)
-            .expect("matrix-only BCF haplotypes should prefilter before phased decode");
+        let dense = read_haplotypes_dense_windowed(
+            file.path(),
+            None,
+            Some(&filter),
+            None,
+            DenseMissingPolicy::Raise,
+            true,
+        )
+        .expect("matrix-only BCF haplotypes should prefilter before phased decode");
 
         assert_eq!(dense.n_samples, 4);
         assert_eq!(dense.n_variants, 1);
         assert!(dense.samples.is_empty());
         assert!(dense.variants.is_empty());
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
-        assert_eq!(dense.missing_mask, vec![false; 4]);
     }
 
     #[test]

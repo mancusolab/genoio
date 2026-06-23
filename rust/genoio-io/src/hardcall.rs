@@ -6,11 +6,12 @@
 //! checks, and the stats used by genotype filters.
 
 use genoio_core::{
-    variant_stats_from_counts, GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan,
-    VariantFilter, VariantRecord, VariantStats,
+    variant_stats_from_counts, DenseMissingPolicy, GenoioError, GenotypeFilterConjunction,
+    GenotypeFilterPlan, VariantFilter, VariantRecord, VariantStats,
 };
 
 use crate::error::Result;
+use crate::matrix::{apply_dense_missing_policy_to_variant, write_sample_major_variant_slot};
 
 pub(crate) const HARDCALL_BATCH_SIZE: usize = 64;
 
@@ -305,6 +306,23 @@ impl PackedHardcalls {
         }
     }
 
+    pub(crate) fn expand_selected_with_missing_indices(
+        &self,
+        source_indices: &[usize],
+        values: &mut Vec<f32>,
+        missing_indices: &mut Vec<usize>,
+    ) {
+        values.clear();
+        missing_indices.clear();
+        for (sample_index, source_index) in source_indices.iter().enumerate() {
+            let (value, is_missing) = decode_hardcall_code(self.get(*source_index));
+            values.push(value);
+            if is_missing {
+                missing_indices.push(sample_index);
+            }
+        }
+    }
+
     pub(crate) fn stats_for_selected(&self, source_indices: &[usize]) -> Result<VariantStats> {
         let counts = self.counts_for_selected(source_indices)?;
         variant_stats_from_counts(counts.hom_ref, counts.het, counts.hom_alt, counts.missing)
@@ -551,6 +569,7 @@ impl HardcallBatch {
         self.variants.clear();
     }
 
+    #[cfg(test)]
     pub(crate) fn expand_into_sample_major(
         &self,
         source_indices: &[usize],
@@ -577,26 +596,42 @@ impl HardcallBatch {
 }
 
 #[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "batch flushing keeps output buffers and reusable scratch explicit on the hot path"
+)]
 pub(crate) fn flush_hardcall_batch_into_sample_major(
     batch: &mut HardcallBatch,
     source_indices: &[usize],
     batch_start: &mut usize,
     n_variants: usize,
     values: &mut [f32],
-    missing_mask: &mut [bool],
-) {
+    missing_policy: DenseMissingPolicy,
+    variant_values: &mut Vec<f32>,
+    missing_indices: &mut Vec<usize>,
+) -> Result<()> {
     if batch.is_empty() {
-        return;
+        return Ok(());
     }
-    batch.expand_into_sample_major(
-        source_indices,
-        *batch_start,
-        n_variants,
-        values,
-        missing_mask,
-    );
+    for (batch_variant_index, packed) in batch.variants.iter().enumerate() {
+        let variant_index = *batch_start + batch_variant_index;
+        packed.expand_selected_with_missing_indices(
+            source_indices,
+            variant_values,
+            missing_indices,
+        );
+        apply_dense_missing_policy_to_variant(variant_values, missing_indices, missing_policy)?;
+        write_sample_major_variant_slot(
+            values,
+            source_indices.len(),
+            n_variants,
+            variant_index,
+            variant_values,
+        )?;
+    }
     *batch_start += batch.len();
     batch.clear();
+    Ok(())
 }
 
 pub(crate) fn decode_hardcall_code(code: u8) -> (f32, bool) {

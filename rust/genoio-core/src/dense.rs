@@ -26,18 +26,27 @@ pub enum DenseLayout {
     VariantMajor,
 }
 
+/// Dense missing-call policy applied while readers build matrix values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseMissingPolicy {
+    /// Reject retained missing calls before returning the matrix.
+    Raise,
+    /// Store retained missing calls as `NaN` in the value buffer.
+    Nan,
+    /// Replace retained missing calls with the retained variant mean.
+    Impute,
+}
+
 /// Dense genotype matrix with layout-tagged flat buffers.
 ///
-/// `values` and `missing_mask` use the same layout and both have length
-/// `n_samples * n_variants`. Consumers that read flat buffers directly must
-/// inspect `layout`; Python assembly converts either layout into the public
-/// sample-by-variant array shape.
+/// `values` has length `n_samples * n_variants`. Consumers that read flat
+/// buffers directly must inspect `layout`; Python assembly converts either
+/// layout into the public sample-by-variant array shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DenseGenotypeMatrix {
     pub n_samples: usize,
     pub n_variants: usize,
     pub values: Vec<f32>,
-    pub missing_mask: Vec<bool>,
     pub layout: DenseLayout,
     pub samples: Vec<SampleRecord>,
     pub variants: Vec<VariantRecord>,
@@ -50,7 +59,6 @@ impl DenseGenotypeMatrix {
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
         diagnostics: DenseDiagnostics,
@@ -59,7 +67,6 @@ impl DenseGenotypeMatrix {
             n_samples,
             n_variants,
             values,
-            missing_mask,
             DenseLayout::SampleMajor,
             samples,
             variants,
@@ -68,42 +75,16 @@ impl DenseGenotypeMatrix {
     }
 
     /// Build a dense matrix with an explicit flat-buffer layout.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "dense matrix constructors validate the full flat-buffer contract at one boundary"
-    )]
     pub fn new_with_layout(
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
         layout: DenseLayout,
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
-        let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
-            GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
-        })?;
-        if values.len() != expected_len {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense values length {} does not match shape {n_samples} x {n_variants}",
-                    values.len()
-                ),
-            ));
-        }
-        if missing_mask.len() != values.len() {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense missing mask length {} does not match values length {}",
-                    missing_mask.len(),
-                    values.len()
-                ),
-            ));
-        }
+        validate_dense_values(n_samples, n_variants, values.len())?;
         if samples.len() != n_samples {
             return Err(GenoioError::invalid_source(
                 "<dense>",
@@ -127,7 +108,6 @@ impl DenseGenotypeMatrix {
             n_samples,
             n_variants,
             values,
-            missing_mask,
             layout,
             samples,
             variants,
@@ -140,14 +120,12 @@ impl DenseGenotypeMatrix {
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
         Self::new_matrix_only_with_layout(
             n_samples,
             n_variants,
             values,
-            missing_mask,
             DenseLayout::SampleMajor,
             diagnostics,
         )
@@ -158,44 +136,40 @@ impl DenseGenotypeMatrix {
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
         layout: DenseLayout,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
-        let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
-            GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
-        })?;
-        if values.len() != expected_len {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense values length {} does not match shape {n_samples} x {n_variants}",
-                    values.len()
-                ),
-            ));
-        }
-        if missing_mask.len() != values.len() {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense missing mask length {} does not match values length {}",
-                    missing_mask.len(),
-                    values.len()
-                ),
-            ));
-        }
+        validate_dense_values(n_samples, n_variants, values.len())?;
 
         Ok(Self {
             n_samples,
             n_variants,
             values,
-            missing_mask,
             layout,
             samples: Vec::new(),
             variants: Vec::new(),
             diagnostics,
         })
     }
+}
+
+fn validate_dense_values(
+    n_samples: usize,
+    n_variants: usize,
+    values_len: usize,
+) -> Result<(), GenoioError> {
+    let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
+        GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
+    })?;
+    if values_len != expected_len {
+        return Err(GenoioError::invalid_source(
+            "<dense>",
+            format!(
+                "dense values length {values_len} does not match shape {n_samples} x {n_variants}",
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Result of applying an optional sample keep list to source sample metadata.

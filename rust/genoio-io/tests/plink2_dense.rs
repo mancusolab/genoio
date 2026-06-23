@@ -7,7 +7,9 @@ use genoio_core::VariantWindow;
 
 mod common;
 
-use common::dense::{dense_missing_sample_major, dense_values_sample_major};
+use common::dense::{
+    assert_values_with_nan, dense_missing_sample_major, dense_values_sample_major,
+};
 use common::{unique_dir, TestDir};
 
 fn write_text(path: &Path, contents: &str) {
@@ -276,12 +278,12 @@ fn plink2_dense_decodes_fixed_width_unphased_biallelic_hardcalls() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 3);
-    assert_eq!(
-        dense.values,
-        vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0]
+    assert_values_with_nan(
+        &dense.values,
+        &[0.0, 1.0, 2.0, f32::NAN, 0.0, 1.0, 2.0, 1.0, 0.0],
     );
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, false, false, true, false, false, false, false, false]
     );
     assert_eq!(
@@ -315,7 +317,7 @@ fn plink2_dense_filters_samples_in_source_order() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 2.0, 1.0, 0.0]);
+    assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, 2.0, 1.0, 0.0]);
 }
 
 #[test]
@@ -368,15 +370,33 @@ S4
     let dense = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, None)
         .expect("variable-width pgen should decode");
 
-    assert_eq!(
-        dense.values,
-        vec![
-            0.0, 0.0, 2.0, 2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 2.0,
-            0.0, 0.0, 2.0,
-        ]
+    assert_values_with_nan(
+        &dense.values,
+        &[
+            0.0,
+            0.0,
+            2.0,
+            2.0,
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            f32::NAN,
+            2.0,
+            2.0,
+            0.0,
+            2.0,
+            2.0,
+            0.0,
+            f32::NAN,
+            2.0,
+            0.0,
+            0.0,
+            2.0,
+        ],
     );
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![
             false, false, false, false, false, false, false, false, true, false, false, false,
             false, false, false, true, false, false, false, false,
@@ -415,13 +435,13 @@ fn plink2_dosage_dense_decodes_variable_width_full_dosage_records() {
         0.0,
         2.0,
         f32::from(u16::from_le_bytes(scaled_dosage(1.4))) * scale,
-        0.0,
+        f32::NAN,
         1.0,
         f32::from(u16::from_le_bytes(scaled_dosage(1.8))) * scale,
         f32::from(u16::from_le_bytes(scaled_dosage(0.7))) * scale,
         0.0,
     ];
-    assert_eq!(dense_values_sample_major(&dense), expected);
+    assert_values_with_nan(&dense_values_sample_major(&dense), &expected);
     assert_eq!(
         dense_missing_sample_major(&dense),
         vec![false, false, false, false, true, false, false, false, false]
@@ -452,9 +472,22 @@ fn plink2_haplotype_dense_decodes_explicit_phased_hardcalls() {
 
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(
-        dense_values_sample_major(&dense),
-        vec![0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]
+    assert_values_with_nan(
+        &dense_values_sample_major(&dense),
+        &[
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            f32::NAN,
+            1.0,
+            f32::NAN,
+        ],
     );
     assert_eq!(
         dense_missing_sample_major(&dense),
@@ -539,9 +572,9 @@ fn plink2_haplotype_dense_sample_filter_uses_source_order_and_haplotype_order() 
             .collect::<Vec<_>>(),
         vec![Some(0), Some(1), Some(0), Some(1)]
     );
-    assert_eq!(
-        dense_values_sample_major(&dense),
-        vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    assert_values_with_nan(
+        &dense_values_sample_major(&dense),
+        &[0.0, 1.0, 1.0, 0.0, 1.0, f32::NAN, 1.0, f32::NAN],
     );
     assert_eq!(
         dense_missing_sample_major(&dense),
@@ -582,9 +615,9 @@ fn plink2_haplotype_dense_ld_compressed_window_matches_full_read_slice() {
     assert_eq!(block.variants[0].id, "rs2");
     let full_values = dense_values_sample_major(&full);
     let full_missing = dense_missing_sample_major(&full);
-    assert_eq!(
-        dense_values_sample_major(&block),
-        sample_major_window(&full_values, full.n_samples, full.n_variants, 1, 1)
+    assert_values_with_nan(
+        &dense_values_sample_major(&block),
+        &sample_major_window(&full_values, full.n_samples, full.n_variants, 1, 1),
     );
     assert_eq!(
         dense_missing_sample_major(&block),
@@ -804,7 +837,7 @@ fn plink2_haplotype_dosage_dense_decodes_explicit_phased_dosage() {
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.values, vec![s1_l, s1_r, s2_l, s2_r, s3_l, s3_r]);
-    assert_eq!(dense.missing_mask, vec![false; 6]);
+    assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
 }
 
 #[test]
@@ -838,11 +871,11 @@ fn plink2_haplotype_dosage_dense_decodes_fixed_width_phased_dosage() {
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.values, vec![s1_l, s1_r, s2_l, s2_r, s3_l, s3_r]);
-    assert_eq!(dense.missing_mask, vec![false; 6]);
+    assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
 }
 
 #[test]
-fn plink2_haplotype_dosage_missing_values_set_missing_mask() {
+fn plink2_haplotype_dosage_missing_values_emit_nan() {
     let dir = unique_dir("plink2-haplo-dosage-missing");
     let (s1_l, s1_r) = expected_pgen_haplotype_dosages(0.25, 0.75);
     let (s3_l, s3_r) = expected_pgen_haplotype_dosages(1.0, 1.0);
@@ -868,9 +901,9 @@ fn plink2_haplotype_dosage_missing_values_set_missing_mask() {
     )
     .expect("explicit phased dosage pgen should decode missing values");
 
-    assert_eq!(dense.values, vec![s1_l, s1_r, 0.0, 0.0, s3_l, s3_r]);
+    assert_values_with_nan(&dense.values, &[s1_l, s1_r, f32::NAN, f32::NAN, s3_l, s3_r]);
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, false, true, true, false, false]
     );
 }
@@ -1094,7 +1127,10 @@ fn plink2_dosage_dense_still_decodes_unphased_dosage_records() {
             expected_pgen_dosage(scaled_dosage(1.8)),
         ]
     );
-    assert_eq!(dense.missing_mask, vec![false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false]
+    );
 }
 
 #[test]
@@ -1136,7 +1172,7 @@ S3
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs1");
-    assert_eq!(dense.values, vec![0.0, 0.0, 2.0]);
+    assert_values_with_nan(&dense.values, &[0.0, f32::NAN, 2.0]);
 
     let matrix_only = genoio_io::read_plink2_dense_windowed(
         &pgen,
@@ -1150,7 +1186,7 @@ S3
     .expect("matrix-only first window may skip later pvar records");
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.variants.is_empty());
-    assert_eq!(matrix_only.values, vec![0.0, 0.0, 2.0]);
+    assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 2.0]);
 }
 
 #[test]
@@ -1221,7 +1257,7 @@ fn plink2_dense_window_aligns_variant_metadata_with_source_window() {
     );
     assert_eq!(dense.values, vec![1.0, 2.0, 0.0, 1.0, 1.0, 0.0]);
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, false, false, false, false, false]
     );
 }
@@ -1266,7 +1302,7 @@ S4
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs1");
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 0.0]);
+    assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
 }
 
 #[test]
@@ -1302,7 +1338,7 @@ fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.samples.is_empty());
     assert!(matrix_only.variants.is_empty());
-    assert_eq!(matrix_only.values, vec![0.0, 0.0, 2.0]);
+    assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 2.0]);
 
     write_text(
         &pvar,
@@ -1436,8 +1472,11 @@ S4
 
     assert_eq!(matrix_only.n_samples, metadata_bearing.n_samples);
     assert_eq!(matrix_only.n_variants, metadata_bearing.n_variants);
-    assert_eq!(matrix_only.values, metadata_bearing.values);
-    assert_eq!(matrix_only.missing_mask, metadata_bearing.missing_mask);
+    assert_values_with_nan(&matrix_only.values, &metadata_bearing.values);
+    assert_eq!(
+        dense_missing_sample_major(&matrix_only),
+        dense_missing_sample_major(&metadata_bearing)
+    );
     assert!(matrix_only.samples.is_empty());
     assert!(matrix_only.variants.is_empty());
 }
@@ -1507,18 +1546,21 @@ S3
         ]
     );
     assert_eq!(
-        window.missing_mask,
+        dense_missing_sample_major(&window),
         vec![
-            full.missing_mask[1],
-            full.missing_mask[2],
-            full.missing_mask[5],
-            full.missing_mask[6],
-            full.missing_mask[9],
-            full.missing_mask[10]
+            dense_missing_sample_major(&full)[1],
+            dense_missing_sample_major(&full)[2],
+            dense_missing_sample_major(&full)[5],
+            dense_missing_sample_major(&full)[6],
+            dense_missing_sample_major(&full)[9],
+            dense_missing_sample_major(&full)[10]
         ]
     );
-    assert_eq!(matrix_only.values, window.values);
-    assert_eq!(matrix_only.missing_mask, window.missing_mask);
+    assert_values_with_nan(&matrix_only.values, &window.values);
+    assert_eq!(
+        dense_missing_sample_major(&matrix_only),
+        dense_missing_sample_major(&window)
+    );
 }
 
 #[test]
@@ -1570,16 +1612,19 @@ S3
         window.len,
     );
     let expected_missing = sample_major_window(
-        &full.missing_mask,
+        &dense_missing_sample_major(&full),
         full.n_samples,
         full.n_variants,
         window.start,
         window.len,
     );
-    assert_eq!(metadata_bearing.values, expected_values);
-    assert_eq!(metadata_bearing.missing_mask, expected_missing);
-    assert_eq!(matrix_only.values, expected_values);
-    assert_eq!(matrix_only.missing_mask, expected_missing);
+    assert_values_with_nan(&metadata_bearing.values, &expected_values);
+    assert_eq!(
+        dense_missing_sample_major(&metadata_bearing),
+        expected_missing
+    );
+    assert_values_with_nan(&matrix_only.values, &expected_values);
+    assert_eq!(dense_missing_sample_major(&matrix_only), expected_missing);
     assert_eq!(
         metadata_bearing
             .variants
@@ -1661,16 +1706,19 @@ S4
         window.len,
     );
     let expected_missing = sample_major_window(
-        &full.missing_mask,
+        &dense_missing_sample_major(&full),
         full.n_samples,
         full.n_variants,
         window.start,
         window.len,
     );
-    assert_eq!(metadata_bearing.values, expected_values);
-    assert_eq!(metadata_bearing.missing_mask, expected_missing);
-    assert_eq!(matrix_only.values, expected_values);
-    assert_eq!(matrix_only.missing_mask, expected_missing);
+    assert_values_with_nan(&metadata_bearing.values, &expected_values);
+    assert_eq!(
+        dense_missing_sample_major(&metadata_bearing),
+        expected_missing
+    );
+    assert_values_with_nan(&matrix_only.values, &expected_values);
+    assert_eq!(dense_missing_sample_major(&matrix_only), expected_missing);
 
     let expected_filtered_values = sample_major_window(
         &filtered_full.values,
@@ -1680,14 +1728,17 @@ S4
         window.len,
     );
     let expected_filtered_missing = sample_major_window(
-        &filtered_full.missing_mask,
+        &dense_missing_sample_major(&filtered_full),
         filtered_full.n_samples,
         filtered_full.n_variants,
         window.start,
         window.len,
     );
-    assert_eq!(filtered_window.values, expected_filtered_values);
-    assert_eq!(filtered_window.missing_mask, expected_filtered_missing);
+    assert_values_with_nan(&filtered_window.values, &expected_filtered_values);
+    assert_eq!(
+        dense_missing_sample_major(&filtered_window),
+        expected_filtered_missing
+    );
     assert_eq!(
         filtered_window
             .samples

@@ -10,8 +10,6 @@ import polars as pl
 from numpy.typing import NDArray
 from scipy import sparse as scipy_sparse
 
-from ._errors import MissingDataError
-
 SparseMatrixResult = scipy_sparse.csc_matrix | scipy_sparse.csr_matrix
 MatrixResult = NDArray[Any] | SparseMatrixResult
 ReadResult = MatrixResult | tuple[MatrixResult, pl.DataFrame] | tuple[MatrixResult, pl.DataFrame, pl.DataFrame]
@@ -24,6 +22,8 @@ _VARIANT_COLUMNS = [
     "a0",
     "a1",
 ]
+_DENSE_LAYOUT_SAMPLE_MAJOR = "sample_major"
+_DENSE_LAYOUT_VARIANT_MAJOR = "variant_major"
 
 
 MetadataColumns = dict[str, Sequence[Any]]
@@ -84,194 +84,51 @@ def dense_array_from_rust(
     *,
     values: Sequence[float] | NDArray[Any],
     shape: tuple[int, int],
-    missing: str,
     dtype: np.dtype[Any],
     values_layout: str = "sample_major",
-    missing_mask: Sequence[bool] | NDArray[Any] | None = None,
-    missing_indices: Sequence[int] | NDArray[Any] | None = None,
 ) -> NDArray[Any]:
     r"""Convert a flat Rust dense matrix payload into a NumPy array.
 
-    Rust returns Python-owned NumPy buffers through the extension boundary; this
-    function applies the public dtype and missing-data policy.
+    Rust returns Python-owned NumPy buffers through the extension boundary with
+    dense missing-data policy already applied. This function handles dtype
+    conversion and layout views.
 
     **Arguments:**
 
     - `values`: flat matrix values in `values_layout` order.
     - `shape`: `(n_samples, n_variants)`.
-    - `missing`: validated missing-data policy.
     - `dtype`: output NumPy dtype.
     - `values_layout`: flat buffer layout, either `"sample_major"` or
       `"variant_major"`.
-    - `missing_mask`: optional flat boolean mask aligned with `values`.
-    - `missing_indices`: optional flat indices aligned with `values`.
 
     **Returns:**
 
     Dense NumPy matrix with shape `shape`.
     """
+    values_layout = _validate_dense_layout(values_layout)
     values_array = np.asarray(values, dtype=dtype)
-    array = _reshape_dense_payload(values_array, shape, values_layout)
-    if missing_mask is not None and missing_indices is not None:
-        raise AssertionError("dense missing payload must use mask or indices, not both")
-    if missing_indices is not None:
-        return _apply_dense_missing_indices(
-            values_array,
-            array,
-            shape,
-            values_layout,
-            missing,
-            missing_indices,
-        )
-    if missing_mask is None:
-        return array
-    mask = _dense_missing_mask_from_flat(
-        np.asarray(missing_mask, dtype=bool),
-        values_array.size,
-        shape,
-        values_layout,
-    )
-    return _apply_dense_missing_mask(array, mask, missing)
-
-
-def _apply_dense_missing_mask(
-    array: NDArray[Any],
-    mask: NDArray[np.bool_],
-    missing: str,
-) -> NDArray[Any]:
-    """Apply a dense missing mask after both payloads have public matrix shape."""
-    if missing == "nan":
-        array[mask] = np.nan
-        return array
-    if missing == "raise":
-        if mask.any():
-            raise MissingDataError("missing genotype calls are present in retained data")
-        return array
-    if missing == "impute":
-        return _impute_missing_by_variant(array, mask)
-    raise AssertionError(f"unvalidated missing-data policy: {missing}")
-
-
-def _dense_missing_mask_from_flat(
-    mask_values: NDArray[np.bool_],
-    values_size: int,
-    shape: tuple[int, int],
-    values_layout: str,
-) -> NDArray[np.bool_]:
-    """Return a public-shaped missing mask aligned with a flat Rust values buffer."""
-    if mask_values.size != values_size:
-        raise AssertionError("dense missing mask length does not match values length")
-    return _reshape_dense_payload(mask_values, shape, values_layout)
-
-
-def _apply_dense_missing_indices(
-    flat_values: NDArray[Any],
-    array: NDArray[Any],
-    shape: tuple[int, int],
-    values_layout: str,
-    missing: str,
-    missing_indices: Sequence[int] | NDArray[Any],
-) -> NDArray[Any]:
-    """Apply sparse missing-value positions aligned with the flat Rust buffer."""
-    indices = _dense_missing_indices_from_flat(missing_indices)
-    if np.any(indices < 0) or np.any(indices >= flat_values.size):
-        raise AssertionError("dense missing index is outside values buffer")
-    if missing == "nan":
-        flat_values[indices] = np.nan
-        return array
-    if missing == "raise":
-        if indices.size:
-            raise MissingDataError("missing genotype calls are present in retained data")
-        return array
-    if missing == "impute":
-        return _impute_missing_by_variant_indices(array, indices, shape, values_layout)
-    raise AssertionError(f"unvalidated missing-data policy: {missing}")
-
-
-def _dense_missing_indices_from_flat(
-    missing_indices: Sequence[int] | NDArray[Any],
-) -> NDArray[np.int64]:
-    """Return validated int64 indices into the flat Rust values buffer."""
-    indices = np.asarray(missing_indices)
-    if indices.ndim != 1:
-        raise AssertionError("dense missing indices must be one-dimensional")
-    if indices.size == 0:
-        return indices.astype(np.int64, copy=False)
-    if not np.issubdtype(indices.dtype, np.integer):
-        raise AssertionError("dense missing indices must be integers")
-    return indices.astype(np.int64, copy=False)
-
-
-def _impute_missing_by_variant_indices(
-    array: NDArray[Any],
-    flat_indices: NDArray[np.int64],
-    shape: tuple[int, int],
-    values_layout: str,
-) -> NDArray[Any]:
-    """Impute sparse missing positions without expanding them to a dense mask."""
-    if not flat_indices.size:
-        return array
-    if np.unique(flat_indices).size != flat_indices.size:
-        raise AssertionError("dense missing indices must be unique")
-
-    missing_rows, missing_columns = _flat_indices_to_matrix_coordinates(
-        flat_indices,
-        shape,
-        values_layout,
-    )
-    n_samples, n_variants = shape
-
-    missing_counts = np.bincount(missing_columns, minlength=n_variants)
-    called_counts = n_samples - missing_counts
-    all_missing_columns = np.flatnonzero((missing_counts != 0) & (called_counts == 0))
-    if all_missing_columns.size:
-        first_all_missing_column = int(all_missing_columns[0])
-        raise MissingDataError(f"cannot impute all-missing variant at column {first_all_missing_column}")
-
-    # Missing positions can contain backend-specific placeholder values. Column
-    # means must be based only on called entries, so subtract sparse missing
-    # contributions instead of first materializing a dense missing mask.
-    column_sums = array.sum(axis=0)
-    missing_sums = np.bincount(
-        missing_columns,
-        weights=array[missing_rows, missing_columns],
-        minlength=n_variants,
-    )
-    called_sums = column_sums - missing_sums
-    means = np.divide(
-        called_sums,
-        called_counts,
-        out=np.zeros_like(called_sums),
-        where=called_counts != 0,
-    )
-
-    array[missing_rows, missing_columns] = means[missing_columns]
-    return array
-
-
-def _flat_indices_to_matrix_coordinates(
-    indices: NDArray[np.int64],
-    shape: tuple[int, int],
-    values_layout: str,
-) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
-    """Map Rust flat-buffer indices to public sample-by-variant coordinates."""
-    n_samples, n_variants = shape
-    if values_layout == "sample_major":
-        return indices // n_variants, indices % n_variants
-    if values_layout == "variant_major":
-        return indices % n_samples, indices // n_samples
-    raise AssertionError(f"unvalidated dense value layout: {values_layout}")
+    return _reshape_dense_payload(values_array, shape, values_layout)
 
 
 def _reshape_dense_payload(array: NDArray[Any], shape: tuple[int, int], values_layout: str) -> NDArray[Any]:
     """Return the public sample-by-variant view for a Rust dense payload."""
-    if values_layout == "sample_major":
+    expected_size = shape[0] * shape[1]
+    if array.size != expected_size:
+        raise AssertionError(f"dense values length {array.size} does not match shape {shape}")
+    if values_layout == _DENSE_LAYOUT_SAMPLE_MAJOR:
         return array.reshape(shape)
-    if values_layout == "variant_major":
+    if values_layout == _DENSE_LAYOUT_VARIANT_MAJOR:
         n_samples, n_variants = shape
         # Variant-major buffers are already Python-owned NumPy arrays here; the
         # transpose is a strided view, not another Rust-side materialization.
         return array.reshape((n_variants, n_samples)).T
+    raise AssertionError(f"unvalidated dense value layout: {values_layout}")
+
+
+def _validate_dense_layout(values_layout: str) -> str:
+    """Return a known dense layout tag or fail at the private bridge boundary."""
+    if values_layout in {_DENSE_LAYOUT_SAMPLE_MAJOR, _DENSE_LAYOUT_VARIANT_MAJOR}:
+        return values_layout
     raise AssertionError(f"unvalidated dense value layout: {values_layout}")
 
 
@@ -349,29 +206,3 @@ def read_result_tuple(
         assert variants is not None
         return genotype_matrix, variants
     return genotype_matrix
-
-
-def _impute_missing_by_variant(array: NDArray[Any], mask: NDArray[np.bool_]) -> NDArray[Any]:
-    if not mask.any():
-        return array
-
-    called_mask = ~mask
-    called_counts = called_mask.sum(axis=0)
-    all_missing_columns = np.flatnonzero(mask.any(axis=0) & (called_counts == 0))
-    if all_missing_columns.size:
-        raise MissingDataError(f"cannot impute all-missing variant at column {int(all_missing_columns[0])}")
-
-    called_sums = np.where(mask, 0, array).sum(axis=0)
-    means = np.divide(
-        called_sums,
-        called_counts,
-        out=np.zeros_like(called_sums),
-        where=called_counts != 0,
-    )
-
-    # Each missing entry receives the mean of its own variant column. The
-    # indexed assignment avoids per-variant Python loops on large matrices.
-    missing_rows, missing_columns = np.nonzero(mask)
-    imputed = array.copy()
-    imputed[missing_rows, missing_columns] = means[missing_columns]
-    return imputed

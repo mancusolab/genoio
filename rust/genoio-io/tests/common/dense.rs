@@ -12,12 +12,27 @@ pub fn dense_values_sample_major(matrix: &DenseGenotypeMatrix) -> Vec<f32> {
 }
 
 pub fn dense_missing_sample_major(matrix: &DenseGenotypeMatrix) -> Vec<bool> {
-    dense_buffer_sample_major(
-        &matrix.missing_mask,
-        matrix.n_samples,
-        matrix.n_variants,
-        matrix.layout,
-    )
+    let missing = matrix
+        .values
+        .iter()
+        .map(|value| value.is_nan())
+        .collect::<Vec<_>>();
+    dense_buffer_sample_major(&missing, matrix.n_samples, matrix.n_variants, matrix.layout)
+}
+
+pub fn assert_values_with_nan(actual: &[f32], expected: &[f32]) {
+    assert_values_close_with_nan(actual, expected, 0.0);
+}
+
+pub fn assert_values_close_with_nan(actual: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (observed, expected) in actual.iter().zip(expected) {
+        if expected.is_nan() {
+            assert!(observed.is_nan(), "expected NaN, observed {observed}");
+        } else {
+            assert!((observed - expected).abs() <= tolerance);
+        }
+    }
 }
 
 fn dense_buffer_sample_major<T: Copy>(

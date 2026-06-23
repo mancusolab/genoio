@@ -7,6 +7,7 @@ const PGEN_DOSAGE_TOLERANCE: f32 = 2.0 / 32768.0;
 
 mod common;
 
+use common::dense::{assert_values_with_nan, dense_missing_sample_major};
 use common::unique_dir;
 
 fn write_vcf(path: &Path) {
@@ -212,9 +213,9 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs2");
-    assert_eq!(dense.values[..2], [0.0, 0.0]);
+    assert_values_with_nan(&dense.values[..2], &[0.0, f32::NAN]);
     assert_pgen_dosage_close(dense.values[2], 0.7);
-    assert_eq!(dense.missing_mask, vec![false, true, false]);
+    assert_eq!(dense_missing_sample_major(&dense), vec![false, true, false]);
     assert!(dense.variants[0]
         .af
         .is_some_and(|af| (af - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE));
@@ -246,8 +247,8 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
 
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs2");
-    assert_eq!(dense.values, vec![0.0, 0.0, 0.7]);
-    assert_eq!(dense.missing_mask, vec![false, true, false]);
+    assert_values_with_nan(&dense.values, &[0.0, f32::NAN, 0.7]);
+    assert_eq!(dense_missing_sample_major(&dense), vec![false, true, false]);
     assert_eq!(dense.variants[0].af, Some(0.175));
     assert_eq!(dense.variants[0].maf, Some(0.175));
     assert_eq!(dense.variants[0].mac, None);
@@ -265,8 +266,11 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.samples.is_empty());
     assert!(matrix_only.variants.is_empty());
-    assert_eq!(matrix_only.values, vec![0.0, 0.0, 0.7]);
-    assert_eq!(matrix_only.missing_mask, vec![false, true, false]);
+    assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 0.7]);
+    assert_eq!(
+        dense_missing_sample_major(&matrix_only),
+        vec![false, true, false]
+    );
 }
 
 #[test]
@@ -303,7 +307,10 @@ fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
     assert!(matrix_only.samples.is_empty());
     assert!(matrix_only.variants.is_empty());
     assert_eq!(matrix_only.values, vec![0.0, 1.0, 2.0]);
-    assert_eq!(matrix_only.missing_mask, vec![false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&matrix_only),
+        vec![false, false, false]
+    );
 }
 
 #[test]
@@ -329,9 +336,9 @@ fn filter_genotype_stats_plink2_match_expanded_stats_and_attach_metadata() {
             .collect::<Vec<_>>(),
         vec!["rs1", "rs2", "rs3"]
     );
-    assert_eq!(
-        dense.values,
-        vec![0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0]
+    assert_values_with_nan(
+        &dense.values,
+        &[0.0, 1.0, 2.0, f32::NAN, 0.0, 1.0, 2.0, 1.0, 0.0],
     );
     assert_eq!(dense.variants[0].af, Some(0.5));
     assert_eq!(dense.variants[0].maf, Some(0.5));
@@ -385,8 +392,11 @@ fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
             .collect::<Vec<_>>(),
         vec!["rs1", "rs2"]
     );
-    assert_eq!(dense.values, vec![1.0, 1.0, 0.0, 2.0]);
-    assert_eq!(dense.missing_mask, vec![false, false, true, false]);
+    assert_values_with_nan(&dense.values, &[1.0, 1.0, f32::NAN, 2.0]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, true, false]
+    );
     assert_eq!(dense.variants[0].af, Some(0.5));
     assert_eq!(dense.variants[0].maf, Some(0.5));
     assert_eq!(dense.variants[0].mac, Some(1));

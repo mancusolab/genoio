@@ -102,7 +102,6 @@ pub(super) fn empty_dense_for_samples(
             n_samples: samples.len(),
             n_variants: 0,
             values: Vec::new(),
-            missing_mask: Vec::new(),
             samples,
             variants: Vec::new(),
             diagnostics,

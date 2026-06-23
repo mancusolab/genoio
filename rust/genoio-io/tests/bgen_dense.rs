@@ -12,6 +12,9 @@ use serde_json::json;
 
 mod common;
 
+use common::dense::{
+    assert_values_close_with_nan as assert_values_with_nan, dense_missing_sample_major,
+};
 use common::unique_dir;
 
 const FLAG_LAYOUT2: u32 = 2 << 2;
@@ -995,7 +998,10 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_8() {
     for (observed, expected) in dense.values.iter().zip(expected) {
         assert!((observed - expected).abs() <= 2.0 / 255.0);
     }
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
 }
 
 #[test]
@@ -1022,7 +1028,10 @@ fn bgen_dosage_dense_decodes_uncompressed_bit_depth_16() {
     for (observed, expected) in dense.values.iter().zip(expected) {
         assert!((observed - expected).abs() <= 2.0 / 65_535.0);
     }
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
 }
 
 #[test]
@@ -1044,15 +1053,13 @@ fn bgen_dosage_dense_decodes_phased_as_collapsed_a1_dosage() {
         expected_phased_a1_dosage(8, 255, 0),
         expected_phased_a1_dosage(8, 0, 255),
         expected_phased_a1_dosage(8, 128, 64),
-        0.0,
+        f32::NAN,
         expected_phased_a1_dosage(8, 0, 0),
         expected_phased_a1_dosage(8, 255, 255),
     ];
-    for (observed, expected) in dense.values.iter().zip(expected) {
-        assert!((observed - expected).abs() <= 2.0 / 255.0);
-    }
+    assert_values_with_nan(&dense.values, &expected, 2.0 / 255.0);
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, false, false, true, false, false]
     );
 }
@@ -1114,17 +1121,15 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
         expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 0),
         expected_phased_a1_haplotype_dosage(8, 255),
-        0.0,
-        0.0,
+        f32::NAN,
+        f32::NAN,
         expected_phased_a1_haplotype_dosage(8, 255),
         expected_phased_a1_haplotype_dosage(8, 255),
     ];
-    for (observed, expected) in dense.values.iter().zip(expected) {
-        assert!((observed - expected).abs() <= 1.0 / 255.0);
-    }
+    assert_values_with_nan(&dense.values, &expected, 1.0 / 255.0);
     assert_eq!(
-        dense.missing_mask,
-        vec![false, false, false, false, false, false, false, false, true, true, false, false]
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false, false, true, false, true, false, false, false, false]
     );
     assert_eq!(
         dense
@@ -1264,8 +1269,8 @@ fn bgen_haplotype_dosage_preserves_missing_sample_calls() {
     assert_eq!(dense.n_variants, 2);
     assert_eq!(dense.layout, DenseLayout::VariantMajor);
     assert_eq!(
-        dense.missing_mask,
-        vec![false, false, true, true, false, false, false, false, false, false, false, false]
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false, true, false, true, false, false, false, false, false]
     );
 }
 
@@ -1325,8 +1330,11 @@ fn bgen_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() {
     assert_eq!(dense.n_samples, 4);
     assert_eq!(dense.n_variants, 1);
     assert_eq!(dense.variants[0].id, "rs2");
-    assert_eq!(dense.values, vec![1.0, 0.0, 0.0, 0.0]);
-    assert_eq!(dense.missing_mask, vec![false, false, true, true]);
+    assert_values_with_nan(&dense.values, &[1.0, 0.0, f32::NAN, f32::NAN], 0.0);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, true, true]
+    );
     assert_eq!(dense.variants[0].maf, Some(0.5));
     assert_eq!(dense.variants[0].mac, Some(1));
     assert_eq!(dense.variants[0].missing_rate, Some(0.5));
@@ -1451,7 +1459,7 @@ fn bgen_dosage_dense_empty_for_always_false_filter() {
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 0);
     assert!(dense.values.is_empty());
-    assert!(dense.missing_mask.is_empty());
+    assert!(dense_missing_sample_major(&dense).is_empty());
     assert_eq!(
         dense
             .samples
@@ -1485,7 +1493,7 @@ fn bgen_dosage_dense_empty_for_metadata_filter_with_no_matches() {
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 0);
     assert!(dense.values.is_empty());
-    assert!(dense.missing_mask.is_empty());
+    assert!(dense_missing_sample_major(&dense).is_empty());
     assert!(dense.variants.is_empty());
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 0);
@@ -1504,7 +1512,7 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
         (
             genotype_stat_filter("maf", json!({"min": 0.2})),
             "rs2",
-            vec![1.0, 0.0],
+            vec![1.0, f32::NAN],
             vec![false, true],
             Some(0.5),
             Some(1),
@@ -1514,7 +1522,7 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
         (
             genotype_stat_filter("mac", json!({"min": 1, "max": 1})),
             "rs2",
-            vec![1.0, 0.0],
+            vec![1.0, f32::NAN],
             vec![false, true],
             Some(0.5),
             Some(1),
@@ -1534,7 +1542,7 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
         (
             genotype_stat_filter("polymorphic", json!({})),
             "rs2",
-            vec![1.0, 0.0],
+            vec![1.0, f32::NAN],
             vec![false, true],
             Some(0.5),
             Some(1),
@@ -1567,8 +1575,8 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert_eq!(dense.variants[0].id, expected_id);
-        assert_eq!(dense.values, expected_values);
-        assert_eq!(dense.missing_mask, expected_missing);
+        assert_values_with_nan(&dense.values, &expected_values, 2.0 / 255.0);
+        assert_eq!(dense_missing_sample_major(&dense), expected_missing);
         assert_eq!(dense.variants[0].maf, expected_maf);
         assert_eq!(dense.variants[0].mac, expected_mac);
         assert_eq!(dense.variants[0].missing_rate, expected_missing_rate);
@@ -1591,16 +1599,20 @@ fn bgen_dosage_dense_preserves_missing_sample_calls() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(
-        dense.values,
-        vec![
+    assert_values_with_nan(
+        &dense.values,
+        &[
             expected_dosage(8, 204, 26),
             expected_dosage(8, 0, 255),
-            0.0,
+            f32::NAN,
             expected_dosage(8, 102, 102),
-        ]
+        ],
+        0.0,
     );
-    assert_eq!(dense.missing_mask, vec![false, false, true, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, true, false]
+    );
 }
 
 #[test]
@@ -1629,7 +1641,10 @@ fn bgen_dosage_dense_matrix_only_omits_metadata() {
             expected_dosage(8, 102, 102),
         ]
     );
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
 }
 
 #[test]
@@ -1688,7 +1703,7 @@ fn bgen_dosage_dense_matrix_only_preserves_variant_count_with_no_selected_sample
     assert!(dense.samples.is_empty());
     assert!(dense.variants.is_empty());
     assert!(dense.values.is_empty());
-    assert!(dense.missing_mask.is_empty());
+    assert!(dense_missing_sample_major(&dense).is_empty());
 }
 
 #[test]
@@ -1731,7 +1746,10 @@ fn bgen_dosage_dense_sample_filter_uses_source_order() {
             expected_dosage(8, 255, 0),
         ]
     );
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
 }
 
 #[test]
@@ -1774,7 +1792,10 @@ fn bgen_dosage_dense_phased_sample_filter_uses_source_order() {
     for (observed, expected) in dense.values.iter().zip(expected) {
         assert!((observed - expected).abs() <= 2.0 / 255.0);
     }
-    assert_eq!(dense.missing_mask, vec![false, false, false, false]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, false, false, false]
+    );
 }
 
 #[test]
@@ -1804,7 +1825,7 @@ fn bgen_dosage_dense_window_reads_unfiltered_retained_variants() {
         dense.values,
         vec![expected_dosage(8, 0, 255), expected_dosage(8, 102, 102)]
     );
-    assert_eq!(dense.missing_mask, vec![false, false]);
+    assert_eq!(dense_missing_sample_major(&dense), vec![false, false]);
 }
 
 #[test]

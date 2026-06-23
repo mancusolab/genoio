@@ -5,6 +5,7 @@ use genoio_core::{DenseLayout, VariantWindow};
 
 mod common;
 
+use common::dense::assert_values_with_nan;
 use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {
@@ -314,7 +315,7 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
             .collect::<Vec<_>>(),
         vec!["rs2", "rs4"]
     );
-    assert_eq!(block.values, vec![0.0, 2.0, 0.0, 2.0]);
+    assert_values_with_nan(&block.values, &[f32::NAN, 2.0, 0.0, 2.0]);
 }
 
 #[test]
@@ -341,7 +342,7 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
             .collect::<Vec<_>>(),
         vec!["rs1"]
     );
-    assert_eq!(block.values, vec![2.0, 0.0]);
+    assert_values_with_nan(&block.values, &[2.0, f32::NAN]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 
@@ -369,7 +370,7 @@ malformed
 
     assert_eq!(block.n_variants, 1);
     assert!(block.variants.is_empty());
-    assert_eq!(block.values, vec![2.0, 0.0]);
+    assert_values_with_nan(&block.values, &[2.0, f32::NAN]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 

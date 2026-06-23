@@ -653,11 +653,8 @@ class Dataset:
             genotype_matrix = dense_array_from_rust(
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
-                missing=validated_options.missing,
                 dtype=validated_options.dtype,
                 values_layout=str(rust_result.get("values_layout", "sample_major")),
-                missing_mask=rust_result.get("missing_mask"),
-                missing_indices=rust_result.get("missing_indices"),
             )
         else:
             rust_result = self._read_from_rust(read_options.kind, True, members, options)

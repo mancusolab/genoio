@@ -23,14 +23,16 @@
 //! as internal bugs and are contained at each `#[pyfunction]` entry point.
 //!
 //! Numeric arrays returned from this crate transfer Rust vector ownership to
-//! NumPy. `usize` indices are checked and converted to NumPy-compatible `int64`
-//! values before ownership transfer.
+//! NumPy. Dense missing policies are resolved while the IO layer builds matrix
+//! values, so dense reads do not materialize Python missing masks. `usize`
+//! indices are checked and converted to NumPy-compatible `int64` values before
+//! ownership transfer.
 
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use genoio_core::{DenseLayout, GenoioError};
+use genoio_core::{DenseLayout, DenseMissingPolicy, GenoioError};
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -112,7 +114,6 @@ fn read_dense_impl(
     dense_to_py(
         py,
         output,
-        read_options.missing,
         read_options.return_samples,
         read_options.return_variants,
         false,
@@ -177,7 +178,6 @@ fn read_haplotypes_dense_impl(
     dense_to_py(
         py,
         output,
-        read_options.missing,
         read_options.return_samples,
         read_options.return_variants,
         true,
@@ -498,40 +498,44 @@ fn read_dense_matrix(
     validate_read_support_impl(source.format(), kind, options.dosage, false)?;
     match (source, kind, options.dosage) {
         (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_dense_windowed(
+            genoio_io::read_vcf_dense_windowed_with_missing_policy(
                 path,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_vcf_dosage_dense_windowed(
+            genoio_io::read_vcf_dosage_dense_windowed_with_missing_policy(
                 path,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Vcf { path, .. }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_haplotypes_dense_windowed(
+            genoio_io::read_vcf_haplotypes_dense_windowed_with_missing_policy(
                 path,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_plink1_dense_windowed(
+            genoio_io::read_plink1_dense_windowed_with_missing_policy(
                 bed,
                 bim,
                 fam,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
@@ -539,71 +543,77 @@ fn read_dense_matrix(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_dense_windowed(
+        ) => genoio_io::read_plink2_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_dosage_dense_windowed(
+        ) => genoio_io::read_plink2_dosage_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_haplotypes_dense_windowed(
+        ) => genoio_io::read_plink2_haplotypes_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_dosage_dense_windowed(
+            genoio_io::read_bgen_dosage_dense_windowed_with_missing_policy(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Haplotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+            genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
@@ -732,7 +742,7 @@ struct ReadOptions {
     variant_filter: Option<genoio_core::VariantFilter>,
     variant_window: Option<genoio_core::VariantWindow>,
     dosage: DosageSource,
-    missing: MissingPolicy,
+    missing: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
     matrix_only: bool,
@@ -751,26 +761,6 @@ impl DosageSource {
             "dosage" => Ok(Self::Dosage),
             other => Err(GenoioError::invalid_filter(format!(
                 "unsupported dosage source: {other}"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MissingPolicy {
-    Raise,
-    Nan,
-    Impute,
-}
-
-impl MissingPolicy {
-    fn from_str(value: &str) -> Result<Self, GenoioError> {
-        match value {
-            "raise" => Ok(Self::Raise),
-            "nan" => Ok(Self::Nan),
-            "impute" => Ok(Self::Impute),
-            other => Err(GenoioError::invalid_filter(format!(
-                "unsupported missing-data policy: {other}"
             ))),
         }
     }
@@ -843,14 +833,25 @@ fn dosage_option(options: &Bound<'_, PyDict>) -> PyResult<DosageSource> {
     DosageSource::from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
 }
 
-fn missing_policy_option(options: &Bound<'_, PyDict>) -> PyResult<MissingPolicy> {
+fn missing_policy_option(options: &Bound<'_, PyDict>) -> PyResult<DenseMissingPolicy> {
     let Some(value) = options.get_item("missing")? else {
-        return Ok(MissingPolicy::Raise);
+        return Ok(DenseMissingPolicy::Raise);
     };
     if value.is_none() {
-        return Ok(MissingPolicy::Raise);
+        return Ok(DenseMissingPolicy::Raise);
     }
-    MissingPolicy::from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
+    dense_missing_policy_from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
+}
+
+fn dense_missing_policy_from_str(value: &str) -> Result<DenseMissingPolicy, GenoioError> {
+    match value {
+        "raise" => Ok(DenseMissingPolicy::Raise),
+        "nan" => Ok(DenseMissingPolicy::Nan),
+        "impute" => Ok(DenseMissingPolicy::Impute),
+        other => Err(GenoioError::invalid_filter(format!(
+            "unsupported missing-data policy: {other}"
+        ))),
+    }
 }
 
 fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
@@ -897,7 +898,6 @@ fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResu
 fn dense_to_py(
     py: Python<'_>,
     output: genoio_core::DenseGenotypeMatrix,
-    missing: MissingPolicy,
     return_samples: bool,
     return_variants: bool,
     include_haplotype_sample_columns: bool,
@@ -905,17 +905,12 @@ fn dense_to_py(
     let genoio_core::DenseGenotypeMatrix {
         n_samples,
         n_variants,
-        mut values,
-        missing_mask,
+        values,
         layout,
         samples,
         variants,
         diagnostics: dense_diagnostics,
     } = output;
-
-    // Apply the public missing-data policy before the NumPy ownership handoff.
-    // The common raise/nan paths should not materialize a Python-side mask.
-    let missing_indices = apply_dense_missing_policy(&mut values, &missing_mask, missing)?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", f32_vec_to_numpy(py, values)?)?;
@@ -923,9 +918,6 @@ fn dense_to_py(
     // Python assembly uses this tag to reshape variant-major buffers as views
     // instead of requiring Rust to allocate a physically transposed matrix.
     dict.set_item("values_layout", dense_layout_to_py(layout))?;
-    if let Some(indices) = missing_indices {
-        dict.set_item("missing_indices", usize_vec_to_numpy_i64(py, indices)?)?;
-    }
     if return_samples {
         dict.set_item(
             "samples",
@@ -953,48 +945,6 @@ fn dense_to_py(
     dict.set_item("diagnostics", diagnostics)?;
 
     Ok(dict.unbind())
-}
-
-fn apply_dense_missing_policy(
-    values: &mut [f32],
-    missing_mask: &[bool],
-    missing: MissingPolicy,
-) -> PyResult<Option<Vec<usize>>> {
-    if values.len() != missing_mask.len() {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "dense missing mask length does not match values length",
-        ));
-    }
-    match missing {
-        MissingPolicy::Raise => {
-            if missing_mask.iter().any(|value| *value) {
-                return Err(RustMissingDataError::new_err(
-                    "missing genotype calls are present in retained data",
-                ));
-            }
-            Ok(None)
-        }
-        MissingPolicy::Nan => {
-            for (value, missing) in values.iter_mut().zip(missing_mask) {
-                if *missing {
-                    *value = f32::NAN;
-                }
-            }
-            Ok(None)
-        }
-        MissingPolicy::Impute => {
-            let indices: Vec<usize> = missing_mask
-                .iter()
-                .enumerate()
-                .filter_map(|(index, missing)| missing.then_some(index))
-                .collect();
-            if indices.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(indices))
-            }
-        }
-    }
 }
 
 fn dense_layout_to_py(layout: DenseLayout) -> &'static str {

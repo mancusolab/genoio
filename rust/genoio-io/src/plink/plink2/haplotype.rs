@@ -8,13 +8,16 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, reject_sparse_missing_values, DenseGenotypeMatrix, GenotypeFilterPlan,
-    PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    attach_variant_stats, reject_sparse_missing_values, DenseGenotypeMatrix, DenseMissingPolicy,
+    GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 
 use crate::error::Result;
 use crate::hardcall::evaluate_packed_hardcall_filter;
-use crate::matrix::{finish_variant_major_dense_matrix, VariantMajorDenseParts};
+use crate::matrix::{
+    apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
+    missing_indices_from_mask, VariantMajorDenseParts,
+};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use super::evaluate_dosage_filter;
@@ -40,6 +43,32 @@ pub fn read_plink2_haplotypes_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
+    read_plink2_haplotypes_dense_windowed_with_missing_policy(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        DenseMissingPolicy::Nan,
+        matrix_only,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
+)]
+pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
     let Plink2ReadContext {
         header,
         selection,
@@ -60,7 +89,7 @@ pub fn read_plink2_haplotypes_dense_windowed(
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
@@ -126,8 +155,16 @@ pub fn read_plink2_haplotypes_dense_windowed(
         if !matrix_only {
             variants.push(variant);
         }
+        missing_indices_from_mask(
+            &haplotype_state.selected_haplotype_missing,
+            &mut missing_indices,
+        );
+        apply_dense_missing_policy_to_variant(
+            &mut haplotype_state.selected_haplotype_values,
+            &missing_indices,
+            missing_policy,
+        )?;
         variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
-        variant_major_missing.extend_from_slice(&haplotype_state.selected_haplotype_missing);
         output_variant_count += 1;
         if retention.window_is_satisfied() {
             stopped_after_window = true;
@@ -146,7 +183,6 @@ pub fn read_plink2_haplotypes_dense_windowed(
             n_samples,
             n_variants,
             variant_major_values,
-            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,
@@ -163,6 +199,32 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
+    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        DenseMissingPolicy::Nan,
+        matrix_only,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
+)]
+pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let Plink2ReadContext {
@@ -185,7 +247,7 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
+    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let mut output_variant_count = 0_usize;
@@ -248,8 +310,16 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
         if !matrix_only {
             variants.push(variant);
         }
+        missing_indices_from_mask(
+            &haplotype_state.selected_haplotype_missing,
+            &mut missing_indices,
+        );
+        apply_dense_missing_policy_to_variant(
+            &mut haplotype_state.selected_haplotype_values,
+            &missing_indices,
+            missing_policy,
+        )?;
         variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
-        variant_major_missing.extend_from_slice(&haplotype_state.selected_haplotype_missing);
         output_variant_count += 1;
         if retention.window_is_satisfied() {
             stopped_after_window = true;
@@ -268,7 +338,6 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
             n_samples,
             n_variants,
             variant_major_values,
-            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,

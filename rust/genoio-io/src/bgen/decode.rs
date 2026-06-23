@@ -63,7 +63,6 @@ pub(super) struct DosageDecodeBuffers {
 /// caller's preallocated sample-major matrix.
 pub(super) struct SampleMajorSlotMut<'a> {
     pub(super) values: &'a mut [f32],
-    pub(super) missing_mask: &'a mut [bool],
     pub(super) row_width: usize,
     pub(super) variant_index: usize,
 }
@@ -140,19 +139,7 @@ pub(super) fn try_decode_buffered_dosage_values_into_sample_major_slot(
             _ => {}
         }
     }
-    if decoded.header.phase != BgenPhase::Unphased
-        || decoded.header.bit_depth != UNPHASED_8_BIT_DEPTH
-    {
-        return Ok(false);
-    }
-    decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
-        bgen,
-        decoded.header.sample_ploidies,
-        decoded.packed_probabilities,
-        source_indices,
-        slot,
-    )?;
-    Ok(true)
+    Ok(false)
 }
 
 /// Try a genotype-filter hot path that decodes and accumulates simple dosage
@@ -795,59 +782,6 @@ fn decode_selected_called_unphased_8bit_a1_dosages(
     Ok(())
 }
 
-fn decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
-    path: &Path,
-    ploidies: &[u8],
-    packed_probabilities: &[u8],
-    source_indices: &[usize],
-    slot: &mut SampleMajorSlotMut<'_>,
-) -> Result<()> {
-    debug_assert!(source_indices
-        .windows(2)
-        .all(|window| window[0] < window[1]));
-    validate_sample_major_slot_shape(source_indices.len(), slot)?;
-    let lut = unphased_8bit_a1_dosage_lut();
-
-    let mut selected_cursor = 0_usize;
-    let mut probability_cursor = 0_usize;
-    for (sample_index, &ploidy_byte) in ploidies.iter().enumerate() {
-        if selected_cursor == source_indices.len() {
-            break;
-        }
-        let is_selected = source_indices[selected_cursor] == sample_index;
-        let is_missing = ploidy_byte & 0b1000_0000 != 0;
-        if is_missing {
-            if is_selected {
-                let target_index = selected_cursor * slot.row_width + slot.variant_index;
-                slot.values[target_index] = 0.0;
-                slot.missing_mask[target_index] = true;
-                selected_cursor += 1;
-            }
-            continue;
-        }
-
-        let Some((&p_aa, &p_ab)) = packed_probabilities
-            .get(probability_cursor)
-            .zip(packed_probabilities.get(probability_cursor + 1))
-        else {
-            return Err(GenoioError::invalid_source(
-                path,
-                "bgen packed probability bytes are truncated",
-            ));
-        };
-        probability_cursor += 2;
-
-        if is_selected {
-            let target_index = selected_cursor * slot.row_width + slot.variant_index;
-            slot.values[target_index] = unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, lut)?;
-            slot.missing_mask[target_index] = false;
-            selected_cursor += 1;
-        }
-    }
-    debug_assert_eq!(selected_cursor, source_indices.len());
-    Ok(())
-}
-
 fn decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
     path: &Path,
     packed_probabilities: &[u8],
@@ -872,7 +806,6 @@ fn decode_selected_called_unphased_8bit_a1_dosages_into_sample_major_slot(
         };
         let target_index = selected_cursor * slot.row_width + slot.variant_index;
         slot.values[target_index] = unphased_8bit_a1_dosage_from_lut(path, p_aa, p_ab, lut)?;
-        slot.missing_mask[target_index] = false;
     }
 
     Ok(())
@@ -935,7 +868,6 @@ fn decode_selected_called_phased_16bit_a1_dosages_into_sample_major_slot(
         let (first, second) = phased_16bit_raw_pair(path, packed_probabilities, source_index)?;
         let target_index = selected_cursor * slot.row_width + slot.variant_index;
         slot.values[target_index] = decode_phased_16bit_a1_dosage(first, second);
-        slot.missing_mask[target_index] = false;
     }
 
     Ok(())
@@ -980,9 +912,9 @@ fn validate_sample_major_slot_shape(
         .ok_or_else(|| {
             GenoioError::internal_contract("sample-major dense matrix shape is out of range")
         })?;
-    if slot.values.len() != expected_len || slot.missing_mask.len() != expected_len {
+    if slot.values.len() != expected_len {
         return Err(GenoioError::internal_contract(
-            "sample-major dense buffers do not match declared shape",
+            "sample-major dense buffer does not match declared shape",
         ));
     }
     if slot.variant_index >= slot.row_width {
@@ -1393,34 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn unphased_8bit_fast_path_writes_sample_major_slot() {
-        let ploidies = [2, 0b1000_0010, 2, 2];
-        let packed = [255, 0, 0, 255, 64, 64];
-        let mut values = vec![0.0; 6];
-        let mut missing = vec![false; 6];
-
-        decode_selected_unphased_8bit_a1_dosages_into_sample_major_slot(
-            Path::new("test.bgen"),
-            &ploidies,
-            &packed,
-            &[1, 3],
-            &mut SampleMajorSlotMut {
-                values: &mut values,
-                missing_mask: &mut missing,
-                row_width: 3,
-                variant_index: 1,
-            },
-        )
-        .expect("8-bit fast path should decode into sample-major slot");
-
-        assert_eq!(
-            values,
-            vec![0.0, 0.0, 0.0, 0.0, expected_dosage(8, 64, 64), 0.0]
-        );
-        assert_eq!(missing, vec![false, true, false, false, false, false]);
-    }
-
-    #[test]
     fn unphased_8bit_fast_path_rejects_impossible_probability_sum() {
         let mut values = Vec::new();
         let mut missing = Vec::new();
@@ -1481,7 +1385,6 @@ mod tests {
     #[test]
     fn phased_16bit_fast_path_writes_sample_major_slot() {
         let mut values = vec![0.0; 6];
-        let mut missing = vec![true; 6];
 
         decode_selected_called_phased_16bit_a1_dosages_into_sample_major_slot(
             Path::new("test.bgen"),
@@ -1489,7 +1392,6 @@ mod tests {
             &[1, 2],
             &mut SampleMajorSlotMut {
                 values: &mut values,
-                missing_mask: &mut missing,
                 row_width: 3,
                 variant_index: 1,
             },
@@ -1500,7 +1402,6 @@ mod tests {
             values,
             vec![0.0, test_phased16_mid_dosage(), 0.0, 0.0, 0.0, 0.0]
         );
-        assert_eq!(missing, vec![true, false, true, true, false, true]);
     }
 
     #[test]

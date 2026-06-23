@@ -365,7 +365,6 @@ def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_pat
         return {
             "values": [0.0, 1.0],
             "shape": (1, 2),
-            "missing_mask": [False, False],
             "diagnostics": {},
         }
 
@@ -395,7 +394,6 @@ def test_dataset_read_validates_source_support_with_rust(monkeypatch, tmp_path):
         return {
             "values": np.array([0.0], dtype=np.float32),
             "shape": (1, 1),
-            "missing_mask": np.array([False], dtype=bool),
         }
 
     monkeypatch.setattr(api._rust, "validate_read_support", fake_validate_read_support)

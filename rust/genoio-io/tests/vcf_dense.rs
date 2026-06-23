@@ -6,7 +6,9 @@ use std::path::Path;
 
 mod common;
 
-use common::dense::{dense_missing_sample_major, dense_values_sample_major};
+use common::dense::{
+    assert_values_with_nan, dense_missing_sample_major, dense_values_sample_major,
+};
 use common::unique_dir;
 
 fn write_file(path: &Path, contents: &str) {
@@ -93,7 +95,10 @@ fn plain_vcf_dense_uses_permissive_text_header_path() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
+    assert_values_with_nan(
+        &dense_values_sample_major(&dense),
+        &[0.0, 1.0, 2.0, f32::NAN],
+    );
     assert_eq!(
         dense_missing_sample_major(&dense),
         vec![false, false, false, true]
@@ -128,7 +133,7 @@ this record is intentionally not valid VCF and should not be decoded
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 0);
     assert!(dense.values.is_empty());
-    assert!(dense.missing_mask.is_empty());
+    assert!(dense_missing_sample_major(&dense).is_empty());
     assert_eq!(
         dense
             .samples
@@ -192,9 +197,9 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(
-        dense_values_sample_major(&dense),
-        vec![0.2, 0.0, 1.4, 0.0, 1.8, 0.7]
+    assert_values_with_nan(
+        &dense_values_sample_major(&dense),
+        &[0.2, 0.0, 1.4, f32::NAN, 1.8, 0.7],
     );
     assert_eq!(
         dense_missing_sample_major(&dense),
@@ -408,7 +413,10 @@ fn compressed_vcf_matrix_only_uses_text_backend_semantics() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
+    assert_values_with_nan(
+        &dense_values_sample_major(&dense),
+        &[0.0, 1.0, 2.0, f32::NAN],
+    );
     assert_eq!(
         dense_missing_sample_major(&dense),
         vec![false, false, false, true]
@@ -439,7 +447,10 @@ fn compressed_vcf_dense_with_metadata_uses_text_backend_semantics() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(dense_values_sample_major(&dense), vec![0.0, 1.0, 2.0, 0.0]);
+    assert_values_with_nan(
+        &dense_values_sample_major(&dense),
+        &[0.0, 1.0, 2.0, f32::NAN],
+    );
     assert_eq!(
         dense_missing_sample_major(&dense),
         vec![false, false, false, true]
@@ -520,8 +531,8 @@ fn vcf_dense_marks_missing_gt_calls() {
 
     let dense = genoio_io::read_vcf_dense(&path, None, None).expect("dense vcf should decode");
 
-    assert_eq!(dense.values, vec![1.0, 0.0]);
-    assert_eq!(dense.missing_mask, vec![false, true]);
+    assert_values_with_nan(&dense.values, &[1.0, f32::NAN]);
+    assert_eq!(dense_missing_sample_major(&dense), vec![false, true]);
 }
 
 #[test]
@@ -559,7 +570,6 @@ fn vcf_dense_contract_validates_shape_and_metadata_lengths() {
         1,
         2,
         vec![0.0],
-        vec![false],
         vec![sample],
         vec![variant],
         genoio_core::DenseDiagnostics::default(),
