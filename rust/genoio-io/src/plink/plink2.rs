@@ -27,12 +27,19 @@ mod source;
 mod sparse;
 
 #[doc(inline)]
-pub use dense::{read_plink2_dense, read_plink2_dense_windowed};
+pub use dense::{
+    read_plink2_dense, read_plink2_dense_windowed, read_plink2_dense_windowed_with_missing_policy,
+};
 #[doc(inline)]
-pub use dosage::read_plink2_dosage_dense_windowed;
+pub use dosage::{
+    read_plink2_dosage_dense_windowed, read_plink2_dosage_dense_windowed_with_missing_policy,
+};
 #[doc(inline)]
 pub use haplotype::{
-    read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_dense_windowed,
+    read_plink2_haplotypes_dense_windowed_with_missing_policy,
+    read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy,
     read_plink2_haplotypes_sparse, read_plink2_haplotypes_sparse_windowed,
 };
 #[doc(inline)]
@@ -43,27 +50,6 @@ use pgen::{read_supported_pgen_header, validate_plink2_dimensions};
 
 #[cfg(test)]
 const PGEN_PACKED_TRANSPOSE_BATCH: usize = HARDCALL_BATCH_SIZE;
-
-#[cfg(test)]
-fn append_variant_to_sample_major(
-    values: &[f32],
-    missing: &[bool],
-    variant_index: usize,
-    n_variants: usize,
-    out_values: &mut [f32],
-    out_missing: &mut [bool],
-) {
-    debug_assert_eq!(values.len(), missing.len());
-    debug_assert!(variant_index < n_variants);
-    debug_assert_eq!(out_values.len(), values.len() * n_variants);
-    debug_assert_eq!(out_missing.len(), missing.len() * n_variants);
-
-    for (sample_index, (&value, &is_missing)) in values.iter().zip(missing).enumerate() {
-        let offset = sample_index * n_variants + variant_index;
-        out_values[offset] = value;
-        out_missing[offset] = is_missing;
-    }
-}
 
 pub(super) fn require_genotype_decision_filter(
     variant_filter: Option<&VariantFilter>,
@@ -90,6 +76,50 @@ pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<Met
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::{apply_dense_missing_policy_to_variant, write_sample_major_variant_slot};
+
+    fn stats_from_expanded_hardcalls(
+        values: &[f32],
+        missing_indices: &[usize],
+    ) -> genoio_core::VariantStats {
+        let mut hom_ref = 0_u64;
+        let mut het = 0_u64;
+        let mut hom_alt = 0_u64;
+        let mut missing_cursor = 0_usize;
+        for (index, value) in values.iter().enumerate() {
+            if missing_indices
+                .get(missing_cursor)
+                .is_some_and(|&missing_index| missing_index == index)
+            {
+                missing_cursor += 1;
+                continue;
+            }
+            match *value as u8 {
+                0 => hom_ref += 1,
+                1 => het += 1,
+                2 => hom_alt += 1,
+                _ => panic!("test hardcall value must be in {{0, 1, 2}}"),
+            }
+        }
+        genoio_core::variant_stats_from_counts(
+            hom_ref,
+            het,
+            hom_alt,
+            u64::try_from(missing_indices.len()).expect("test missing count fits in u64"),
+        )
+        .expect("test hardcall stats should compute")
+    }
+
+    fn assert_values_with_nan(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "expected NaN, observed {actual}");
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[test]
     fn packed_genotypes_round_trip_and_expand_selected() {
@@ -109,11 +139,11 @@ mod tests {
         assert_eq!(packed.get(34), 2);
 
         let mut values = vec![99.0];
-        let mut missing = vec![true];
-        packed.expand_selected(&[3, 1, 34, 0], &mut values, &mut missing);
+        let mut missing_indices = vec![99];
+        packed.expand_selected(&[3, 1, 34, 0], &mut values, &mut missing_indices);
 
         assert_eq!(values, vec![0.0, 1.0, 2.0, 0.0]);
-        assert_eq!(missing, vec![true, false, false, false]);
+        assert_eq!(missing_indices, vec![0]);
     }
 
     #[test]
@@ -123,9 +153,8 @@ mod tests {
         let n_variants = PGEN_PACKED_TRANSPOSE_BATCH + 3;
         let mut packed_variants = Vec::with_capacity(n_variants);
         let mut expected_values = vec![0.0; sample_ct * n_variants];
-        let mut expected_missing = vec![false; sample_ct * n_variants];
         let mut scratch_values = Vec::new();
-        let mut scratch_missing = Vec::new();
+        let mut scratch_missing_indices = Vec::new();
 
         for variant_index in 0..n_variants {
             let mut packed = PackedGenotypes::default();
@@ -133,46 +162,62 @@ mod tests {
             for sample_index in 0..sample_ct {
                 packed.set(sample_index, ((variant_index + sample_index) % 4) as u8);
             }
-            packed.expand_selected(&source_indices, &mut scratch_values, &mut scratch_missing);
-            append_variant_to_sample_major(
-                &scratch_values,
-                &scratch_missing,
-                variant_index,
-                n_variants,
-                &mut expected_values,
-                &mut expected_missing,
+            packed.expand_selected(
+                &source_indices,
+                &mut scratch_values,
+                &mut scratch_missing_indices,
             );
+            apply_dense_missing_policy_to_variant(
+                &mut scratch_values,
+                &scratch_missing_indices,
+                genoio_core::DenseMissingPolicy::Nan,
+            )
+            .expect("test missing policy should apply");
+            write_sample_major_variant_slot(
+                &mut expected_values,
+                sample_ct,
+                n_variants,
+                variant_index,
+                &scratch_values,
+            )
+            .expect("expected dense slot should write");
             packed_variants.push(packed);
         }
 
         let mut batch = PackedVariantBatch::new(sample_ct);
         let mut actual_values = vec![0.0; sample_ct * n_variants];
-        let mut actual_missing = vec![false; sample_ct * n_variants];
+        let mut variant_values = Vec::with_capacity(sample_ct);
+        let mut missing_indices = Vec::new();
         let mut batch_start = 0;
         for packed in &packed_variants {
             batch.push(packed);
             if batch.is_full() {
-                batch.expand_into_sample_major(
+                crate::hardcall::flush_hardcall_batch_into_sample_major(
+                    &mut batch,
                     &source_indices,
-                    batch_start,
+                    &mut batch_start,
                     n_variants,
                     &mut actual_values,
-                    &mut actual_missing,
-                );
-                batch_start += batch.len();
-                batch.clear();
+                    genoio_core::DenseMissingPolicy::Nan,
+                    &mut variant_values,
+                    &mut missing_indices,
+                )
+                .expect("batch flush should succeed");
             }
         }
-        batch.expand_into_sample_major(
+        crate::hardcall::flush_hardcall_batch_into_sample_major(
+            &mut batch,
             &source_indices,
-            batch_start,
+            &mut batch_start,
             n_variants,
             &mut actual_values,
-            &mut actual_missing,
-        );
+            genoio_core::DenseMissingPolicy::Nan,
+            &mut variant_values,
+            &mut missing_indices,
+        )
+        .expect("batch flush should succeed");
 
-        assert_eq!(actual_values, expected_values);
-        assert_eq!(actual_missing, expected_missing);
+        assert_values_with_nan(&actual_values, &expected_values);
     }
 
     #[test]
@@ -233,11 +278,10 @@ mod tests {
 
         for source_indices in [&[0, 1, 2, 3, 4, 5, 6, 7][..], &[7, 3][..], &[][..]] {
             let mut values = Vec::new();
-            let mut missing = Vec::new();
-            packed.expand_selected(source_indices, &mut values, &mut missing);
+            let mut missing_indices = Vec::new();
+            packed.expand_selected(source_indices, &mut values, &mut missing_indices);
 
-            let expected = genoio_core::compute_variant_stats(&values, &missing)
-                .expect("expanded stats should compute");
+            let expected = stats_from_expanded_hardcalls(&values, &missing_indices);
             let actual = packed
                 .stats_for_selected(source_indices)
                 .expect("packed stats should compute");

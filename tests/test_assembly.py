@@ -1,12 +1,41 @@
+# pattern: Imperative Shell
+
 import numpy as np
+import pytest
 
-from genoio._assembly import _impute_missing_by_variant
+from genoio._assembly import dense_array_from_rust
 
 
-def test_impute_missing_by_variant_returns_original_array_when_no_values_are_missing():
-    array = np.array([[0.0, 1.0], [2.0, 0.0]], dtype=np.float32)
-    mask = np.zeros(array.shape, dtype=bool)
+def test_dense_array_from_rust_assembles_variant_major_payload_as_strided_view():
+    array = dense_array_from_rust(
+        values=np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
+        shape=(2, 2),
+        values_layout="variant_major",
+        dtype=np.dtype("float32"),
+    )
 
-    imputed = _impute_missing_by_variant(array, mask)
+    np.testing.assert_array_equal(
+        array,
+        np.array([[0.0, 2.0], [1.0, 3.0]], dtype=np.float32),
+    )
+    assert array.flags.writeable
+    assert not array.flags.c_contiguous
 
-    assert imputed is array
+
+def test_dense_array_from_rust_rejects_unknown_dense_layout():
+    with pytest.raises(AssertionError, match="dense value layout"):
+        dense_array_from_rust(
+            values=np.array([0.0], dtype=np.float32),
+            shape=(1, 1),
+            dtype=np.dtype("float32"),
+            values_layout="columnar",
+        )
+
+
+def test_dense_array_from_rust_rejects_values_that_do_not_match_shape():
+    with pytest.raises(AssertionError, match="does not match shape"):
+        dense_array_from_rust(
+            values=np.array([0.0, 1.0], dtype=np.float32),
+            shape=(1, 1),
+            dtype=np.dtype("float32"),
+        )

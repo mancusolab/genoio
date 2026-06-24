@@ -65,7 +65,7 @@ pub(super) fn decode_and_evaluate_dosage_filter(
     }
     evaluate_dosage_filter(
         &buffers.selected_values,
-        &buffers.selected_missing,
+        &buffers.selected_missing_indices,
         filter,
         variant,
         !matrix_only,

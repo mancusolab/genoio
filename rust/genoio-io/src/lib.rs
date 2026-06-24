@@ -34,22 +34,32 @@ mod vcf;
 
 pub use bgen::{
     read_bgen_dosage_dense, read_bgen_dosage_dense_windowed,
-    read_bgen_haplotypes_dosage_dense_windowed, read_bgen_metadata,
+    read_bgen_dosage_dense_windowed_with_missing_policy,
+    read_bgen_haplotypes_dosage_dense_windowed,
+    read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy, read_bgen_metadata,
 };
 pub use error::Result;
 pub use plink::{
-    read_plink1_dense, read_plink1_dense_windowed, read_plink1_metadata, read_plink1_sparse,
-    read_plink1_sparse_windowed, read_plink2_dense, read_plink2_dense_windowed,
-    read_plink2_dosage_dense_windowed, read_plink2_haplotypes_dense_windowed,
-    read_plink2_haplotypes_dosage_dense_windowed, read_plink2_haplotypes_sparse,
-    read_plink2_haplotypes_sparse_windowed, read_plink2_metadata, read_plink2_sparse,
-    read_plink2_sparse_windowed,
+    read_plink1_dense, read_plink1_dense_windowed, read_plink1_dense_windowed_with_missing_policy,
+    read_plink1_metadata, read_plink1_sparse, read_plink1_sparse_windowed, read_plink2_dense,
+    read_plink2_dense_windowed, read_plink2_dense_windowed_with_missing_policy,
+    read_plink2_dosage_dense_windowed, read_plink2_dosage_dense_windowed_with_missing_policy,
+    read_plink2_haplotypes_dense_windowed,
+    read_plink2_haplotypes_dense_windowed_with_missing_policy,
+    read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy,
+    read_plink2_haplotypes_sparse, read_plink2_haplotypes_sparse_windowed, read_plink2_metadata,
+    read_plink2_sparse, read_plink2_sparse_windowed,
 };
 pub use vcf::{
-    read_vcf_dense, read_vcf_dense_windowed, read_vcf_dense_windowed_with_threads,
-    read_vcf_dosage_dense_windowed, read_vcf_dosage_dense_windowed_with_threads,
-    read_vcf_haplotypes_dense, read_vcf_haplotypes_dense_windowed,
-    read_vcf_haplotypes_dense_windowed_with_threads, read_vcf_haplotypes_sparse,
+    read_vcf_dense, read_vcf_dense_windowed, read_vcf_dense_windowed_with_missing_policy,
+    read_vcf_dense_windowed_with_threads, read_vcf_dense_windowed_with_threads_and_missing_policy,
+    read_vcf_dosage_dense_windowed, read_vcf_dosage_dense_windowed_with_missing_policy,
+    read_vcf_dosage_dense_windowed_with_threads,
+    read_vcf_dosage_dense_windowed_with_threads_and_missing_policy, read_vcf_haplotypes_dense,
+    read_vcf_haplotypes_dense_windowed, read_vcf_haplotypes_dense_windowed_with_missing_policy,
+    read_vcf_haplotypes_dense_windowed_with_threads,
+    read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy, read_vcf_haplotypes_sparse,
     read_vcf_haplotypes_sparse_windowed, read_vcf_haplotypes_sparse_windowed_with_threads,
     read_vcf_metadata, read_vcf_sparse, read_vcf_sparse_windowed,
     read_vcf_sparse_windowed_with_threads,

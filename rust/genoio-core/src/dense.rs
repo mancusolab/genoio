@@ -17,16 +17,37 @@ pub struct DenseDiagnostics {
     pub dropped_genotype_variants: usize,
 }
 
-/// Dense genotype matrix in sample-by-variant order.
+/// Flat buffer layout used by a dense genotype matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseLayout {
+    /// Flat values are stored in public sample-by-variant order.
+    SampleMajor,
+    /// Flat values are stored as one complete variant after another.
+    VariantMajor,
+}
+
+/// Dense missing-call policy applied while readers build matrix values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseMissingPolicy {
+    /// Reject retained missing calls before returning the matrix.
+    Raise,
+    /// Store retained missing calls as `NaN` in the value buffer.
+    Nan,
+    /// Replace retained missing calls with the retained variant mean.
+    Impute,
+}
+
+/// Dense genotype matrix with layout-tagged flat buffers.
 ///
-/// `values` and `missing_mask` are both flat sample-major buffers with length
-/// `n_samples * n_variants`.
+/// `values` has length `n_samples * n_variants`. Consumers that read flat
+/// buffers directly must inspect `layout`; Python assembly converts either
+/// layout into the public sample-by-variant array shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DenseGenotypeMatrix {
     pub n_samples: usize,
     pub n_variants: usize,
     pub values: Vec<f32>,
-    pub missing_mask: Vec<bool>,
+    pub layout: DenseLayout,
     pub samples: Vec<SampleRecord>,
     pub variants: Vec<VariantRecord>,
     pub diagnostics: DenseDiagnostics,
@@ -38,33 +59,32 @@ impl DenseGenotypeMatrix {
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
-        let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
-            GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
-        })?;
-        if values.len() != expected_len {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense values length {} does not match shape {n_samples} x {n_variants}",
-                    values.len()
-                ),
-            ));
-        }
-        if missing_mask.len() != values.len() {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense missing mask length {} does not match values length {}",
-                    missing_mask.len(),
-                    values.len()
-                ),
-            ));
-        }
+        Self::new_with_layout(
+            n_samples,
+            n_variants,
+            values,
+            DenseLayout::SampleMajor,
+            samples,
+            variants,
+            diagnostics,
+        )
+    }
+
+    /// Build a dense matrix with an explicit flat-buffer layout.
+    pub fn new_with_layout(
+        n_samples: usize,
+        n_variants: usize,
+        values: Vec<f32>,
+        layout: DenseLayout,
+        samples: Vec<SampleRecord>,
+        variants: Vec<VariantRecord>,
+        diagnostics: DenseDiagnostics,
+    ) -> Result<Self, GenoioError> {
+        validate_dense_values(n_samples, n_variants, values.len())?;
         if samples.len() != n_samples {
             return Err(GenoioError::invalid_source(
                 "<dense>",
@@ -88,7 +108,7 @@ impl DenseGenotypeMatrix {
             n_samples,
             n_variants,
             values,
-            missing_mask,
+            layout,
             samples,
             variants,
             diagnostics,
@@ -100,42 +120,56 @@ impl DenseGenotypeMatrix {
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
-        let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
-            GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
-        })?;
-        if values.len() != expected_len {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense values length {} does not match shape {n_samples} x {n_variants}",
-                    values.len()
-                ),
-            ));
-        }
-        if missing_mask.len() != values.len() {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "dense missing mask length {} does not match values length {}",
-                    missing_mask.len(),
-                    values.len()
-                ),
-            ));
-        }
+        Self::new_matrix_only_with_layout(
+            n_samples,
+            n_variants,
+            values,
+            DenseLayout::SampleMajor,
+            diagnostics,
+        )
+    }
+
+    /// Build a dense matrix with explicit layout when callers omitted metadata.
+    pub fn new_matrix_only_with_layout(
+        n_samples: usize,
+        n_variants: usize,
+        values: Vec<f32>,
+        layout: DenseLayout,
+        diagnostics: DenseDiagnostics,
+    ) -> Result<Self, GenoioError> {
+        validate_dense_values(n_samples, n_variants, values.len())?;
 
         Ok(Self {
             n_samples,
             n_variants,
             values,
-            missing_mask,
+            layout,
             samples: Vec::new(),
             variants: Vec::new(),
             diagnostics,
         })
     }
+}
+
+fn validate_dense_values(
+    n_samples: usize,
+    n_variants: usize,
+    values_len: usize,
+) -> Result<(), GenoioError> {
+    let expected_len = n_samples.checked_mul(n_variants).ok_or_else(|| {
+        GenoioError::invalid_source("<dense>", "dense matrix shape is out of range")
+    })?;
+    if values_len != expected_len {
+        return Err(GenoioError::invalid_source(
+            "<dense>",
+            format!(
+                "dense values length {values_len} does not match shape {n_samples} x {n_variants}",
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Result of applying an optional sample keep list to source sample metadata.
@@ -211,9 +245,9 @@ pub fn transpose_variant_major_to_sample_major<T: Copy>(
     n_samples: usize,
     n_variants: usize,
 ) -> Vec<T> {
-    // Readers append one variant at a time because source formats are
-    // variant-major. Python callers expect sample rows, so transpose once at
-    // the core boundary instead of reshaping incorrectly downstream.
+    // Keep this helper available for callers that truly need a physically
+    // sample-major buffer. The Python bridge usually keeps variant-major
+    // buffers and exposes the public shape with NumPy strides instead.
     let mut transposed = Vec::with_capacity(values.len());
     for sample_index in 0..n_samples {
         for variant_index in 0..n_variants {

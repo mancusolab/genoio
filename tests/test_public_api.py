@@ -361,10 +361,10 @@ def test_matrix_only_read_does_not_assemble_metadata_frames(monkeypatch, tmp_pat
     def fake_read_dense(format, members, options):
         assert options["return_samples"] is False
         assert options["return_variants"] is False
+        assert options["missing"] == "nan"
         return {
             "values": [0.0, 1.0],
             "shape": (1, 2),
-            "missing_mask": [False, False],
             "diagnostics": {},
         }
 
@@ -390,10 +390,10 @@ def test_dataset_read_validates_source_support_with_rust(monkeypatch, tmp_path):
         calls.append((format, kind, dosage, sparse))
 
     def fake_read_dense(format, members, options):
+        assert options["missing"] == "nan"
         return {
             "values": np.array([0.0], dtype=np.float32),
             "shape": (1, 1),
-            "missing_mask": np.array([False], dtype=bool),
         }
 
     monkeypatch.setattr(api._rust, "validate_read_support", fake_validate_read_support)
@@ -451,6 +451,7 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
             "variants": None,
             "variant_window": None,
             "dosage": "hardcall",
+            "missing": "raise",
             "return_samples": False,
             "return_variants": False,
             "matrix_only": True,
@@ -459,8 +460,8 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
 
     assert isinstance(result["values"], np.ndarray)
     assert result["values"].dtype == np.float32
-    assert isinstance(result["missing_mask"], np.ndarray)
-    assert result["missing_mask"].dtype == np.bool_
+    assert "missing_mask" not in result
+    assert "missing_indices" not in result
 
     metadata_result = api._rust.read_dense(
         dataset.source.format.value,
@@ -470,6 +471,7 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
             "variants": None,
             "variant_window": None,
             "dosage": "hardcall",
+            "missing": "raise",
             "return_samples": True,
             "return_variants": True,
             "matrix_only": True,

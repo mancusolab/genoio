@@ -15,12 +15,12 @@ use super::bitpack::{
     bit_is_set, ensure_record_bytes, read_base128_varint, read_fixed_width_sample_id,
     sample_id_width, validate_difflist_sample_id,
 };
-use super::SelectedSampleCursor;
+use super::{insert_sorted_unique_index, remove_sorted_index, SelectedSampleCursor};
 
 pub(super) struct DosageOverlayTarget<'a> {
     pub(super) source_indices: &'a [usize],
     pub(super) values: &'a mut [f32],
-    pub(super) missing: &'a mut [bool],
+    pub(super) missing_indices: &'a mut Vec<usize>,
 }
 
 pub(super) fn overlay_variable_width_dosages(
@@ -199,7 +199,8 @@ fn overlay_selected_pgen_dosage(
         apply_pgen_dosage(
             raw,
             &mut target.values[selected_index],
-            &mut target.missing[selected_index],
+            target.missing_indices,
+            selected_index,
         );
     }
 }
@@ -209,8 +210,9 @@ pub(super) fn overlay_fixed_width_dosages(
     dosage_bytes: &[u8],
     source_indices: &[usize],
     values: &mut [f32],
-    missing: &mut [bool],
+    missing_indices: &mut Vec<usize>,
 ) -> Result<()> {
+    missing_indices.clear();
     for (selected_index, source_index) in source_indices.iter().copied().enumerate() {
         let byte_index = source_index.checked_mul(2).ok_or_else(|| {
             GenoioError::invalid_source(path, "pgen dosage offset is out of range")
@@ -220,20 +222,26 @@ pub(super) fn overlay_fixed_width_dosages(
         apply_pgen_dosage(
             raw,
             &mut values[selected_index],
-            &mut missing[selected_index],
+            missing_indices,
+            selected_index,
         );
     }
     Ok(())
 }
 
-fn apply_pgen_dosage(raw: u16, value: &mut f32, is_missing: &mut bool) {
+fn apply_pgen_dosage(
+    raw: u16,
+    value: &mut f32,
+    missing_indices: &mut Vec<usize>,
+    selected_index: usize,
+) {
     if raw == u16::MAX {
         *value = 0.0;
-        *is_missing = true;
+        insert_sorted_unique_index(missing_indices, selected_index);
         return;
     }
     *value = f32::from(raw) * (2.0 / 32768.0);
-    *is_missing = false;
+    remove_sorted_index(missing_indices, selected_index);
 }
 
 #[cfg(test)]
@@ -249,7 +257,7 @@ mod tests {
         record.extend(100_u16.to_le_bytes());
         record.extend(200_u16.to_le_bytes());
         let mut values = vec![0.0, 2.0, 0.0];
-        let mut missing = vec![false, false, true];
+        let mut missing_indices = vec![2];
 
         overlay_variable_width_dosages(
             path,
@@ -260,13 +268,13 @@ mod tests {
             DosageOverlayTarget {
                 source_indices: &[0, 2, 3],
                 values: &mut values,
-                missing: &mut missing,
+                missing_indices: &mut missing_indices,
             },
         )
         .expect("dosage overlay should decode");
 
         assert_eq!(values, vec![0.0, f32::from(200_u16) * (2.0 / 32768.0), 0.0]);
-        assert_eq!(missing, vec![false, false, true]);
+        assert_eq!(missing_indices, vec![2]);
     }
 
     #[test]
@@ -277,7 +285,7 @@ mod tests {
         record.extend(200_u16.to_le_bytes());
         record.extend(300_u16.to_le_bytes());
         let mut values = vec![0.0, 1.0];
-        let mut missing = vec![false, false];
+        let mut missing_indices = Vec::new();
 
         overlay_variable_width_dosages(
             path,
@@ -288,7 +296,7 @@ mod tests {
             DosageOverlayTarget {
                 source_indices: &[4, 9],
                 values: &mut values,
-                missing: &mut missing,
+                missing_indices: &mut missing_indices,
             },
         )
         .expect("dosage-list overlay should decode");
@@ -300,6 +308,6 @@ mod tests {
                 f32::from(300_u16) * (2.0 / 32768.0),
             ]
         );
-        assert_eq!(missing, vec![false, false]);
+        assert!(missing_indices.is_empty());
     }
 }

@@ -643,6 +643,7 @@ class Dataset:
             "variants": validated_options.variant_filter_ir,
             "variant_window": variant_window,
             "dosage": read_options.dosage,
+            "missing": validated_options.missing,
             "return_samples": read_options.return_samples,
             "return_variants": read_options.return_variants,
             "matrix_only": not read_options.return_samples and not read_options.return_variants,
@@ -652,9 +653,8 @@ class Dataset:
             genotype_matrix = dense_array_from_rust(
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
-                missing_mask=rust_result["missing_mask"],
-                missing=validated_options.missing,
                 dtype=validated_options.dtype,
+                values_layout=str(rust_result.get("values_layout", "sample_major")),
             )
         else:
             rust_result = self._read_from_rust(read_options.kind, True, members, options)

@@ -2,11 +2,11 @@
 //! Matrix assembly helpers shared by format readers.
 //!
 //! Format modules decode variants in the order that is cheapest for their
-//! source files. These helpers validate shapes, transpose variant-major staging
-//! when needed, and construct the public dense or sparse core structs.
+//! source files. These helpers validate shapes, preserve explicit dense buffer
+//! layouts, and construct the public dense or sparse core structs.
 
 use genoio_core::{
-    transpose_variant_major_to_sample_major, DenseDiagnostics, DenseGenotypeMatrix, GenoioError,
+    DenseDiagnostics, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, GenoioError,
     SampleRecord, SparseGenotypeMatrix, VariantRecord,
 };
 
@@ -20,20 +20,20 @@ pub(crate) struct DenseMatrixParts {
     pub(crate) n_samples: usize,
     pub(crate) n_variants: usize,
     pub(crate) values: Vec<f32>,
-    pub(crate) missing_mask: Vec<bool>,
     pub(crate) samples: Vec<SampleRecord>,
     pub(crate) variants: Vec<VariantRecord>,
     pub(crate) diagnostics: DenseDiagnostics,
 }
 
-/// Variant-major dense matrix components that need one final transpose.
+/// Variant-major dense matrix components.
 ///
 /// Use this when a decoder naturally appends one complete variant at a time.
+/// The layout tag lets Python expose the public sample-by-variant shape without
+/// forcing Rust to materialize a second transposed buffer.
 pub(crate) struct VariantMajorDenseParts {
     pub(crate) n_samples: usize,
     pub(crate) n_variants: usize,
     pub(crate) variant_major_values: Vec<f32>,
-    pub(crate) variant_major_missing: Vec<bool>,
     pub(crate) samples: Vec<SampleRecord>,
     pub(crate) variants: Vec<VariantRecord>,
     pub(crate) diagnostics: DenseDiagnostics,
@@ -47,25 +47,17 @@ pub(crate) fn finish_dense_matrix(
         n_samples,
         n_variants,
         values,
-        missing_mask,
         samples,
         variants,
         diagnostics,
     } = parts;
     if matrix_only {
-        DenseGenotypeMatrix::new_matrix_only(
-            n_samples,
-            n_variants,
-            values,
-            missing_mask,
-            diagnostics,
-        )
+        DenseGenotypeMatrix::new_matrix_only(n_samples, n_variants, values, diagnostics)
     } else {
         DenseGenotypeMatrix::new(
             n_samples,
             n_variants,
             values,
-            missing_mask,
             samples,
             variants,
             diagnostics,
@@ -81,35 +73,33 @@ pub(crate) fn finish_variant_major_dense_matrix(
         n_samples,
         n_variants,
         variant_major_values,
-        variant_major_missing,
         samples,
         variants,
         diagnostics,
     } = parts;
     validate_variant_major_len("values", variant_major_values.len(), n_samples, n_variants)?;
-    validate_variant_major_len(
-        "missing mask",
-        variant_major_missing.len(),
-        n_samples,
-        n_variants,
-    )?;
-    let values =
-        transpose_variant_major_to_sample_major(&variant_major_values, n_samples, n_variants);
-    let missing_mask =
-        transpose_variant_major_to_sample_major(&variant_major_missing, n_samples, n_variants);
 
-    finish_dense_matrix(
-        DenseMatrixParts {
+    // Preserve the decoder's natural order. The Python bridge uses this tag to
+    // build a strided NumPy view in public sample-by-variant order.
+    if matrix_only {
+        DenseGenotypeMatrix::new_matrix_only_with_layout(
             n_samples,
             n_variants,
-            values,
-            missing_mask,
+            variant_major_values,
+            DenseLayout::VariantMajor,
+            diagnostics,
+        )
+    } else {
+        DenseGenotypeMatrix::new_with_layout(
+            n_samples,
+            n_variants,
+            variant_major_values,
+            DenseLayout::VariantMajor,
             samples,
             variants,
             diagnostics,
-        },
-        matrix_only,
-    )
+        )
+    }
 }
 
 pub(crate) fn shrink_sample_major_width<T: Copy>(
@@ -130,16 +120,84 @@ pub(crate) fn shrink_sample_major_width<T: Copy>(
     values.truncate(n_samples * new_width);
 }
 
+pub(crate) fn apply_dense_missing_policy_to_variant(
+    values: &mut [f32],
+    missing_indices: &[usize],
+    policy: DenseMissingPolicy,
+) -> Result<()> {
+    if missing_indices.is_empty() {
+        return Ok(());
+    }
+    validate_missing_indices(values.len(), missing_indices)?;
+    match policy {
+        DenseMissingPolicy::Raise => Err(GenoioError::missing_data(
+            "missing genotype calls are present in retained data",
+        )),
+        DenseMissingPolicy::Nan => {
+            for &index in missing_indices {
+                values[index] = f32::NAN;
+            }
+            Ok(())
+        }
+        DenseMissingPolicy::Impute => {
+            let called_count = values.len() - missing_indices.len();
+            if called_count == 0 {
+                return Err(GenoioError::missing_data(
+                    "cannot impute all-missing variant",
+                ));
+            }
+            let called_sum = sum_called_values(values, missing_indices);
+            let mean = called_sum / called_count as f32;
+            for &index in missing_indices {
+                values[index] = mean;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn sum_called_values(values: &[f32], missing_indices: &[usize]) -> f32 {
+    let mut called_sum = 0.0_f32;
+    let mut missing_cursor = 0_usize;
+    for (index, &value) in values.iter().enumerate() {
+        if missing_indices
+            .get(missing_cursor)
+            .is_some_and(|&missing_index| missing_index == index)
+        {
+            missing_cursor += 1;
+        } else {
+            called_sum += value;
+        }
+    }
+    called_sum
+}
+
+fn validate_missing_indices(values_len: usize, missing_indices: &[usize]) -> Result<()> {
+    let mut previous = None;
+    for &index in missing_indices {
+        if index >= values_len {
+            return Err(GenoioError::internal_contract(
+                "dense missing index is outside variant values",
+            ));
+        }
+        if previous.is_some_and(|previous| index <= previous) {
+            return Err(GenoioError::internal_contract(
+                "dense missing indices must be sorted and unique",
+            ));
+        }
+        previous = Some(index);
+    }
+    Ok(())
+}
+
 /// Write a variant-major vector into one column of preallocated sample-major
 /// dense buffers.
 pub(crate) fn write_sample_major_variant_slot(
     values: &mut [f32],
-    missing_mask: &mut [bool],
     n_samples: usize,
     row_width: usize,
     variant_index: usize,
     variant_values: &[f32],
-    variant_missing: &[bool],
 ) -> Result<()> {
     if variant_values.len() != n_samples {
         return Err(GenoioError::internal_contract(format!(
@@ -147,18 +205,12 @@ pub(crate) fn write_sample_major_variant_slot(
             variant_values.len(),
         )));
     }
-    if variant_missing.len() != n_samples {
-        return Err(GenoioError::internal_contract(format!(
-            "variant missing count {} does not match sample count {n_samples}",
-            variant_missing.len(),
-        )));
-    }
     let expected_len = n_samples.checked_mul(row_width).ok_or_else(|| {
         GenoioError::internal_contract("sample-major dense matrix shape is out of range")
     })?;
-    if values.len() != expected_len || missing_mask.len() != expected_len {
+    if values.len() != expected_len {
         return Err(GenoioError::internal_contract(
-            "sample-major dense buffers do not match declared shape",
+            "sample-major dense buffer does not match declared shape",
         ));
     }
     if variant_index >= row_width {
@@ -169,10 +221,9 @@ pub(crate) fn write_sample_major_variant_slot(
 
     // Readers accept variants one at a time; this fills the corresponding
     // column in each preallocated sample row without a later full transpose.
-    for sample_index in 0..n_samples {
+    for (sample_index, &value) in variant_values.iter().enumerate().take(n_samples) {
         let target_index = sample_index * row_width + variant_index;
-        values[target_index] = variant_values[sample_index];
-        missing_mask[target_index] = variant_missing[sample_index];
+        values[target_index] = value;
     }
     Ok(())
 }
@@ -249,15 +300,11 @@ mod tests {
         }
     }
 
-    fn variant_major_parts(
-        variant_major_values: Vec<f32>,
-        variant_major_missing: Vec<bool>,
-    ) -> VariantMajorDenseParts {
+    fn variant_major_parts(variant_major_values: Vec<f32>) -> VariantMajorDenseParts {
         VariantMajorDenseParts {
             n_samples: 2,
             n_variants: 2,
             variant_major_values,
-            variant_major_missing,
             samples: vec![sample_record(0), sample_record(1)],
             variants: vec![variant_record(0), variant_record(1)],
             diagnostics: DenseDiagnostics::default(),
@@ -265,24 +312,20 @@ mod tests {
     }
 
     #[test]
-    fn finish_variant_major_dense_matrix_transposes_valid_buffers() {
-        let matrix = finish_variant_major_dense_matrix(
-            variant_major_parts(vec![0.0, 1.0, 2.0, 3.0], vec![false, true, false, false]),
-            false,
-        )
-        .expect("valid variant-major buffers should build a dense matrix");
+    fn finish_variant_major_dense_matrix_preserves_variant_major_layout() {
+        let matrix =
+            finish_variant_major_dense_matrix(variant_major_parts(vec![0.0, 1.0, 2.0, 3.0]), false)
+                .expect("valid variant-major buffers should build a dense matrix");
 
-        assert_eq!(matrix.values, vec![0.0, 2.0, 1.0, 3.0]);
-        assert_eq!(matrix.missing_mask, vec![false, false, true, false]);
+        assert_eq!(matrix.values, vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(matrix.layout, DenseLayout::VariantMajor);
     }
 
     #[test]
-    fn finish_variant_major_dense_matrix_rejects_short_values_before_transpose() {
-        let error = finish_variant_major_dense_matrix(
-            variant_major_parts(vec![0.0, 1.0, 2.0], vec![false, true, false, false]),
-            false,
-        )
-        .expect_err("short values should fail validation");
+    fn finish_variant_major_dense_matrix_rejects_short_values_before_layout_tagging() {
+        let error =
+            finish_variant_major_dense_matrix(variant_major_parts(vec![0.0, 1.0, 2.0]), false)
+                .expect_err("short values should fail validation");
 
         assert!(error
             .to_string()
@@ -290,38 +333,34 @@ mod tests {
     }
 
     #[test]
-    fn finish_variant_major_dense_matrix_rejects_extra_missing_mask_values() {
-        let error = finish_variant_major_dense_matrix(
-            variant_major_parts(
-                vec![0.0, 1.0, 2.0, 3.0],
-                vec![false, true, false, false, true],
-            ),
-            false,
-        )
-        .expect_err("extra missing mask values should fail validation");
+    fn apply_dense_missing_policy_to_variant_imputes_missing_indices() {
+        let mut values = vec![2.0, f32::NAN, 6.0];
+
+        apply_dense_missing_policy_to_variant(&mut values, &[1], DenseMissingPolicy::Impute)
+            .expect("single missing value should be imputed");
+
+        assert_eq!(values, vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn apply_dense_missing_policy_to_variant_rejects_unsorted_indices() {
+        let mut values = vec![0.0, 1.0, 2.0];
+        let error =
+            apply_dense_missing_policy_to_variant(&mut values, &[2, 1], DenseMissingPolicy::Nan)
+                .expect_err("unsorted indices should fail");
 
         assert!(error
             .to_string()
-            .contains("variant-major dense missing mask length 5 does not match shape 2 x 2"));
+            .contains("dense missing indices must be sorted and unique"));
     }
 
     #[test]
     fn write_sample_major_variant_slot_writes_one_column_per_sample() {
         let mut values = vec![0.0; 6];
-        let mut missing = vec![false; 6];
 
-        write_sample_major_variant_slot(
-            &mut values,
-            &mut missing,
-            2,
-            3,
-            1,
-            &[4.0, 5.0],
-            &[false, true],
-        )
-        .expect("column write should succeed");
+        write_sample_major_variant_slot(&mut values, 2, 3, 1, &[4.0, 5.0])
+            .expect("column write should succeed");
 
         assert_eq!(values, vec![0.0, 4.0, 0.0, 0.0, 5.0, 0.0]);
-        assert_eq!(missing, vec![false, false, false, false, true, false]);
     }
 }

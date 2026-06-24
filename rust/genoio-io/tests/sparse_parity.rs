@@ -1,9 +1,12 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod common;
 
+use common::dense::dense_values_sample_major;
 use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {
@@ -83,7 +86,7 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
 
     assert_eq!(sparse.n_rows, dense.n_samples);
     assert_eq!(sparse.n_cols, dense.n_variants);
-    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(csc_to_dense(&sparse), dense_values_sample_major(&dense));
 }
 
 #[test]

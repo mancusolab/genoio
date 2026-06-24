@@ -9,6 +9,8 @@ use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::{header::Format, Header};
 use noodles_tabix as tabix;
 
+use genoio_core::DenseLayout;
+
 mod common;
 
 use common::unique_dir;
@@ -579,7 +581,8 @@ fn indexed_vcf_region_sample_filter_preserves_source_order() {
             .collect::<Vec<_>>(),
         vec!["rs10", "rs20"]
     );
-    assert_eq!(dense.values, vec![0.0, 1.0, 2.0, 2.0]);
+    assert_eq!(dense.values, vec![0.0, 2.0, 1.0, 2.0]);
+    assert_eq!(dense.layout, DenseLayout::VariantMajor);
 }
 
 #[test]

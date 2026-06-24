@@ -12,9 +12,13 @@ use crate::error::Result;
 
 use super::format::{format_key_index, FormatScanError};
 
+/// Reused DS decode scratch for one text VCF read loop.
+///
+/// Missing indices are positions in `values` for the selected samples emitted
+/// in source order. This preserves the dense output shape without a dense mask.
 pub(super) struct DsDecodeBuffers {
     values: Vec<f32>,
-    missing: Vec<bool>,
+    missing_indices: Vec<usize>,
 }
 
 impl DsDecodeBuffers {
@@ -22,21 +26,21 @@ impl DsDecodeBuffers {
     pub(super) fn with_capacity(n_samples: usize) -> Self {
         Self {
             values: Vec::with_capacity(n_samples),
-            missing: Vec::with_capacity(n_samples),
+            missing_indices: Vec::new(),
         }
     }
 
     fn clear(&mut self) {
         self.values.clear();
-        self.missing.clear();
+        self.missing_indices.clear();
     }
 
     pub(super) fn values(&self) -> &[f32] {
         &self.values
     }
 
-    pub(super) fn missing(&self) -> &[bool] {
-        &self.missing
+    pub(super) fn missing_indices(&self) -> &[usize] {
+        &self.missing_indices
     }
 }
 
@@ -61,8 +65,10 @@ pub(super) fn decode_ds_record(
         source_indices,
         &mut |token| {
             let call = parse_ds_token(path, &record_name, token)?;
+            if call.is_missing {
+                output.missing_indices.push(output.values.len());
+            }
             output.values.push(call.value);
-            output.missing.push(call.is_missing);
             Ok(())
         },
     )

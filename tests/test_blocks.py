@@ -64,7 +64,6 @@ def empty_dense_rust_result() -> dict:
     return {
         "values": [],
         "shape": (1, 0),
-        "missing_mask": [],
         "samples": {
             "fid": [],
             "iid": [],

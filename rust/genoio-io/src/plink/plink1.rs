@@ -9,11 +9,10 @@ use std::fs::{self, File};
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    reject_sparse_missing_values, select_samples_source_order, DenseDiagnostics,
-    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataOutput,
-    PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
-    VariantWindow,
+    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataOutput, PartialFilterDecision,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -83,13 +82,14 @@ pub fn read_plink1_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
 ) -> Result<DenseGenotypeMatrix> {
-    read_plink1_dense_windowed(
+    read_plink1_dense_windowed_with_missing_policy(
         bed,
         bim,
         fam,
         requested_samples,
         variant_filter,
         None,
+        DenseMissingPolicy::Nan,
         false,
     )
 }
@@ -104,6 +104,32 @@ pub fn read_plink1_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
+    read_plink1_dense_windowed_with_missing_policy(
+        bed,
+        bim,
+        fam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        DenseMissingPolicy::Nan,
+        matrix_only,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
+)]
+pub fn read_plink1_dense_windowed_with_missing_policy(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         return empty_plink1_dense(bed, bim, fam, requested_samples, matrix_only);
     }
@@ -115,6 +141,7 @@ pub fn read_plink1_dense_windowed(
             fam,
             requested_samples,
             window,
+            missing_policy,
             matrix_only,
         );
     }
@@ -146,7 +173,12 @@ pub fn read_plink1_dense_windowed(
             selection,
             all_samples_selected,
         };
-        return read_plink1_dense_matrix_only_genotype_filter(context, filter, window);
+        return read_plink1_dense_matrix_only_genotype_filter(
+            context,
+            filter,
+            window,
+            missing_policy,
+        );
     }
     let source_variants = parse_bim(bim)?;
     let n_source_variants = source_variants.len();
@@ -165,6 +197,7 @@ pub fn read_plink1_dense_windowed(
         source_variants,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
         diagnostics,
     )
@@ -175,6 +208,7 @@ fn read_plink1_dense_with_variants(
     source_variants: Vec<VariantRecord>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     mut diagnostics: DenseDiagnostics,
 ) -> Result<DenseGenotypeMatrix> {
@@ -192,9 +226,10 @@ fn read_plink1_dense_with_variants(
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let n_samples = context.selection.samples.len();
     let mut values = vec![0.0; n_samples * output_variant_capacity];
-    let mut missing_mask = vec![false; n_samples * output_variant_capacity];
     let mut batch = HardcallBatch::new(context.n_source_samples);
     let mut batch_start = 0_usize;
+    let mut variant_values = Vec::with_capacity(n_samples);
+    let mut missing_indices = Vec::new();
     let mut decoder_state = Plink1DecoderState::new(
         context.n_source_samples,
         context.bytes_per_variant,
@@ -264,8 +299,10 @@ fn read_plink1_dense_with_variants(
                 &mut batch_start,
                 output_variant_capacity,
                 &mut values,
-                &mut missing_mask,
-            );
+                missing_policy,
+                &mut variant_values,
+                &mut missing_indices,
+            )?;
         }
         if retention.window_is_satisfied() {
             break;
@@ -277,24 +314,19 @@ fn read_plink1_dense_with_variants(
         &mut batch_start,
         output_variant_capacity,
         &mut values,
-        &mut missing_mask,
-    );
+        missing_policy,
+        &mut variant_values,
+        &mut missing_indices,
+    )?;
 
     let n_variants = output_variant_count;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
-    shrink_sample_major_width(
-        &mut missing_mask,
-        n_samples,
-        output_variant_capacity,
-        n_variants,
-    );
     diagnostics.retained_variants = n_variants;
     finish_dense_matrix(
         DenseMatrixParts {
             n_samples,
             n_variants,
             values,
-            missing_mask,
             samples: context.selection.samples,
             variants,
             diagnostics,
@@ -309,6 +341,7 @@ fn read_plink1_dense_source_window(
     fam: &Path,
     requested_samples: Option<&[String]>,
     window: VariantWindow,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let mut bed_file = open_bed_file(bed)?;
@@ -336,11 +369,12 @@ fn read_plink1_dense_source_window(
 
     let n_samples = selection.samples.len();
     let mut values = vec![0.0; n_samples * n_variants];
-    let mut missing_mask = vec![false; n_samples * n_variants];
     let mut decoder_state =
         Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
     let mut batch = HardcallBatch::new(n_source_samples);
     let mut batch_start = 0_usize;
+    let mut variant_values = Vec::with_capacity(n_samples);
+    let mut missing_indices = Vec::new();
     seek_plink1_variant(bed, &mut bed_file, window.start, bytes_per_variant)?;
     for variant_offset in 0..n_variants {
         read_plink1_variant_packed_sequential(
@@ -358,8 +392,10 @@ fn read_plink1_dense_source_window(
                 &mut batch_start,
                 n_variants,
                 &mut values,
-                &mut missing_mask,
-            );
+                missing_policy,
+                &mut variant_values,
+                &mut missing_indices,
+            )?;
         }
         diagnostics.candidate_variants = variant_offset + 1;
     }
@@ -369,8 +405,10 @@ fn read_plink1_dense_source_window(
         &mut batch_start,
         n_variants,
         &mut values,
-        &mut missing_mask,
-    );
+        missing_policy,
+        &mut variant_values,
+        &mut missing_indices,
+    )?;
 
     diagnostics.retained_variants = n_variants;
     finish_dense_matrix(
@@ -378,7 +416,6 @@ fn read_plink1_dense_source_window(
             n_samples,
             n_variants,
             values,
-            missing_mask,
             samples: selection.samples,
             variants,
             diagnostics,
@@ -391,23 +428,17 @@ fn read_plink1_dense_matrix_only_genotype_filter(
     mut context: Plink1DenseContext<'_>,
     filter: &VariantFilter,
     window: VariantWindow,
+    missing_policy: DenseMissingPolicy,
 ) -> Result<DenseGenotypeMatrix> {
     let output_variant_capacity = window.len.min(context.n_source_variants);
     let n_samples = context.selection.samples.len();
     if output_variant_capacity == 0 {
         let mut diagnostics = context.selection.diagnostics;
         diagnostics.retained_variants = 0;
-        return DenseGenotypeMatrix::new_matrix_only(
-            n_samples,
-            0,
-            Vec::new(),
-            Vec::new(),
-            diagnostics,
-        );
+        return DenseGenotypeMatrix::new_matrix_only(n_samples, 0, Vec::new(), diagnostics);
     }
 
     let mut values = vec![0.0; n_samples * output_variant_capacity];
-    let mut missing_mask = vec![false; n_samples * output_variant_capacity];
     let mut decoder_state = Plink1DecoderState::new(
         context.n_source_samples,
         context.bytes_per_variant,
@@ -415,6 +446,8 @@ fn read_plink1_dense_matrix_only_genotype_filter(
     );
     let mut batch = HardcallBatch::new(context.n_source_samples);
     let mut batch_start = 0_usize;
+    let mut variant_values = Vec::with_capacity(n_samples);
+    let mut missing_indices = Vec::new();
     let mut retention = RetainedVariantState::new(Some(window));
     let mut diagnostics = context.selection.diagnostics;
     let mut output_variant_count = 0_usize;
@@ -450,8 +483,10 @@ fn read_plink1_dense_matrix_only_genotype_filter(
                         &mut batch_start,
                         output_variant_capacity,
                         &mut values,
-                        &mut missing_mask,
-                    );
+                        missing_policy,
+                        &mut variant_values,
+                        &mut missing_indices,
+                    )?;
                 }
             }
             RetentionAction::Skip => {}
@@ -468,29 +503,19 @@ fn read_plink1_dense_matrix_only_genotype_filter(
         &mut batch_start,
         output_variant_capacity,
         &mut values,
-        &mut missing_mask,
-    );
+        missing_policy,
+        &mut variant_values,
+        &mut missing_indices,
+    )?;
     shrink_sample_major_width(
         &mut values,
         n_samples,
         output_variant_capacity,
         output_variant_count,
     );
-    shrink_sample_major_width(
-        &mut missing_mask,
-        n_samples,
-        output_variant_capacity,
-        output_variant_count,
-    );
     diagnostics.retained_variants = output_variant_count;
 
-    DenseGenotypeMatrix::new_matrix_only(
-        n_samples,
-        output_variant_count,
-        values,
-        missing_mask,
-        diagnostics,
-    )
+    DenseGenotypeMatrix::new_matrix_only(n_samples, output_variant_count, values, diagnostics)
 }
 
 /// Read all retained PLINK1 genotypes as a sparse CSC matrix.
@@ -599,9 +624,9 @@ pub fn read_plink1_sparse_windowed(
         decoder_state.packed.expand_selected(
             &selection.source_indices,
             &mut decoder_state.values,
-            &mut decoder_state.missing,
+            &mut decoder_state.missing_indices,
         );
-        reject_sparse_missing_values(&decoder_state.missing)?;
+        reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
         variants.push(variant);
@@ -646,7 +671,6 @@ fn empty_plink1_dense(
             n_samples: selection.samples.len(),
             n_variants: 0,
             values: Vec::new(),
-            missing_mask: Vec::new(),
             samples: selection.samples,
             variants: Vec::new(),
             diagnostics: selection.diagnostics,

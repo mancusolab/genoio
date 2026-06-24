@@ -8,15 +8,15 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrix, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, SampleRecord, VariantFilter, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection,
+    GenoioError, PartialFilterDecision, SampleRecord, VariantFilter, VariantWindow,
 };
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::matrix::{
-    finish_dense_matrix, finish_variant_major_dense_matrix, DenseMatrixParts,
-    VariantMajorDenseParts,
+    apply_dense_missing_policy_to_variant, finish_dense_matrix, finish_variant_major_dense_matrix,
+    DenseMatrixParts, VariantMajorDenseParts,
 };
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
@@ -33,6 +33,26 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
 ) -> Result<DenseGenotypeMatrix> {
+    read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
+        bgen,
+        sample,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        DenseMissingPolicy::Nan,
+        matrix_only,
+    )
+}
+
+pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
+    bgen: &Path,
+    sample: Option<&Path>,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    matrix_only: bool,
+) -> Result<DenseGenotypeMatrix> {
     let mut session = BgenReadSession::open(bgen)?;
     let all_samples = session.read_samples(sample)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
@@ -45,7 +65,6 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
                 n_samples: haplotype_samples.len(),
                 n_variants: 0,
                 values: Vec::new(),
-                missing_mask: Vec::new(),
                 samples: haplotype_samples,
                 variants: Vec::new(),
                 diagnostics,
@@ -60,6 +79,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
             diagnostics,
             variant_filter,
             variant_window,
+            missing_policy,
             matrix_only,
         };
         return read_bgen_haplotypes_dosage_dense_indexed(context, &index_records);
@@ -75,7 +95,6 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
@@ -113,7 +132,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
                 )?;
                 let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_collapsed_values,
-                    &decode_buffers.selected_collapsed_missing,
+                    &decode_buffers.selected_collapsed_missing_indices,
                     variant_filter.ok_or_else(|| {
                         GenoioError::internal_contract(
                             "genotype decision requires a variant filter",
@@ -149,8 +168,12 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
         if !matrix_only {
             variants.push(variant);
         }
+        apply_dense_missing_policy_to_variant(
+            &mut decode_buffers.selected_haplotype_values,
+            &decode_buffers.selected_haplotype_missing_indices,
+            missing_policy,
+        )?;
         variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
-        variant_major_missing.extend_from_slice(&decode_buffers.selected_haplotype_missing);
         output_variant_count += 1;
     }
 
@@ -162,7 +185,6 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
             n_samples,
             n_variants,
             variant_major_values,
-            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,
@@ -196,6 +218,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         mut diagnostics,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
     } = context;
     let bgen = session.bgen;
@@ -207,7 +230,6 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
     let n_haplotypes = selection.samples.len() * 2;
     let mut variants = Vec::with_capacity(output_variant_capacity);
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut variant_major_missing = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
@@ -248,7 +270,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                 )?;
                 let (retain_variant, stats) = evaluate_dosage_filter(
                     &decode_buffers.selected_collapsed_values,
-                    &decode_buffers.selected_collapsed_missing,
+                    &decode_buffers.selected_collapsed_missing_indices,
                     variant_filter.ok_or_else(|| {
                         GenoioError::internal_contract(
                             "genotype decision requires a variant filter",
@@ -289,8 +311,12 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         if !matrix_only {
             variants.push(variant);
         }
+        apply_dense_missing_policy_to_variant(
+            &mut decode_buffers.selected_haplotype_values,
+            &decode_buffers.selected_haplotype_missing_indices,
+            missing_policy,
+        )?;
         variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
-        variant_major_missing.extend_from_slice(&decode_buffers.selected_haplotype_missing);
         output_variant_count += 1;
     }
 
@@ -302,7 +328,6 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
             n_samples,
             n_variants,
             variant_major_values,
-            variant_major_missing,
             samples: haplotype_samples,
             variants,
             diagnostics,

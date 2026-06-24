@@ -70,7 +70,8 @@ pub(super) struct PgenHeader {
 /// Reused PGEN decode scratch for one read loop.
 ///
 /// The state keeps variable-width record bytes, packed hard-call output, dense
-/// selected values, and LD-compressed main-track history.
+/// selected values, sparse missing positions, and LD-compressed main-track
+/// history. Missing indices are relative to the selected output vector.
 #[derive(Debug, Clone)]
 pub(super) struct PgenDecoderState {
     previous_non_ld_packed: PackedGenotypes,
@@ -78,19 +79,20 @@ pub(super) struct PgenDecoderState {
     record: Vec<u8>,
     pub(super) packed: PackedGenotypes,
     pub(super) values: Vec<f32>,
-    pub(super) missing: Vec<bool>,
+    pub(super) missing_indices: Vec<usize>,
 }
 
 /// Reused selected-output buffers for PLINK2 haplotype reads.
 ///
 /// Collapsed diploid buffers are populated alongside haplotype rows when
-/// genotype-stat filters need dosage semantics.
+/// genotype-stat filters need dosage semantics. Missing indices are sparse
+/// positions into their corresponding selected-value buffers.
 #[derive(Default)]
 pub(super) struct PgenHaplotypeDecodeState {
     pub(super) selected_haplotype_values: Vec<f32>,
-    pub(super) selected_haplotype_missing: Vec<bool>,
+    pub(super) selected_haplotype_missing_indices: Vec<usize>,
     pub(super) selected_collapsed_values: Vec<f32>,
-    pub(super) selected_collapsed_missing: Vec<bool>,
+    pub(super) selected_collapsed_missing_indices: Vec<usize>,
 }
 
 struct SelectedSampleCursor<'a> {
@@ -124,6 +126,21 @@ impl<'a> SelectedSampleCursor<'a> {
     }
 }
 
+fn insert_sorted_unique_index(indices: &mut Vec<usize>, index: usize) {
+    // PGEN dosage and phase tracks can override hard-call missingness after the
+    // base genotype expansion, so keep the sparse index list sorted in place.
+    match indices.binary_search(&index) {
+        Ok(_) => {}
+        Err(position) => indices.insert(position, index),
+    }
+}
+
+fn remove_sorted_index(indices: &mut Vec<usize>, index: usize) {
+    if let Ok(position) = indices.binary_search(&index) {
+        indices.remove(position);
+    }
+}
+
 impl PgenDecoderState {
     pub(super) fn new(sample_ct: usize, selected_sample_ct: usize) -> Self {
         Self {
@@ -132,7 +149,7 @@ impl PgenDecoderState {
             record: Vec::with_capacity(sample_ct.div_ceil(4)),
             packed: PackedGenotypes::default(),
             values: Vec::with_capacity(selected_sample_ct),
-            missing: Vec::with_capacity(selected_sample_ct),
+            missing_indices: Vec::new(),
         }
     }
 }
@@ -158,7 +175,7 @@ pub(super) fn read_plink2_variant_values(
     decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
-        &mut decoder_state.missing,
+        &mut decoder_state.missing_indices,
     );
     Ok(())
 }
@@ -238,14 +255,14 @@ fn read_fixed_width_dosage_variant_values(
     decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
-        &mut decoder_state.missing,
+        &mut decoder_state.missing_indices,
     );
     overlay_fixed_width_dosages(
         path,
         &decoder_state.record[header.bytes_per_variant..],
         source_indices,
         &mut decoder_state.values,
-        &mut decoder_state.missing,
+        &mut decoder_state.missing_indices,
     )
 }
 
@@ -267,7 +284,7 @@ fn read_fixed_width_phased_dosage_variant_values(
     decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
-        &mut decoder_state.missing,
+        &mut decoder_state.missing_indices,
     );
     let dosage_end = cursor
         .checked_add(header.sample_ct.checked_mul(2).ok_or_else(|| {
@@ -281,7 +298,7 @@ fn read_fixed_width_phased_dosage_variant_values(
         &decoder_state.record[cursor..dosage_end],
         source_indices,
         &mut decoder_state.values,
-        &mut decoder_state.missing,
+        &mut decoder_state.missing_indices,
     )
 }
 
@@ -339,7 +356,7 @@ fn read_variable_width_dosage_variant_values(
     decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
-        &mut decoder_state.missing,
+        &mut decoder_state.missing_indices,
     );
     overlay_variable_width_dosages(
         path,
@@ -350,7 +367,7 @@ fn read_variable_width_dosage_variant_values(
         DosageOverlayTarget {
             source_indices,
             values: &mut decoder_state.values,
-            missing: &mut decoder_state.missing,
+            missing_indices: &mut decoder_state.missing_indices,
         },
     )
 }

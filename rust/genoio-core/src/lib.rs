@@ -26,14 +26,13 @@ pub mod sparse;
 pub use capabilities::SourceCapabilities;
 pub use dense::{
     select_samples_source_order, transpose_variant_major_to_sample_major, DenseDiagnostics,
-    DenseGenotypeMatrix, DenseSampleSelection,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, DenseSampleSelection,
 };
 pub use error::GenoioError;
 pub use filter::{
-    attach_variant_stats, compute_dosage_variant_stats, compute_variant_stats,
-    is_dosage_polymorphic, variant_stats_from_counts, GenotypeFilterConjunction,
-    GenotypeFilterPlan, PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats,
-    VariantWindow,
+    attach_variant_stats, compute_dosage_variant_stats, is_dosage_polymorphic,
+    variant_stats_from_counts, GenotypeFilterConjunction, GenotypeFilterPlan,
+    PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats, VariantWindow,
 };
 pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
 pub use sparse::{

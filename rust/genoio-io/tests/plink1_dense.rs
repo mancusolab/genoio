@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
+use common::dense::{assert_values_with_nan, dense_missing_sample_major};
 use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {
@@ -62,12 +63,12 @@ fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 3);
-    assert_eq!(
-        dense.values,
-        vec![0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0]
+    assert_values_with_nan(
+        &dense.values,
+        &[0.0, f32::NAN, 2.0, f32::NAN, 0.0, 1.0, 2.0, 1.0, 0.0],
     );
     assert_eq!(
-        dense.missing_mask,
+        dense_missing_sample_major(&dense),
         vec![false, true, false, true, false, false, false, false, false]
     );
     assert_eq!(
@@ -92,9 +93,9 @@ fn plink1_dense_matrix_only_omits_metadata() {
     assert_eq!(dense.n_variants, 3);
     assert!(dense.samples.is_empty());
     assert!(dense.variants.is_empty());
-    assert_eq!(
-        dense.values,
-        vec![0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0]
+    assert_values_with_nan(
+        &dense.values,
+        &[0.0, f32::NAN, 2.0, f32::NAN, 0.0, 1.0, 2.0, 1.0, 0.0],
     );
 }
 
@@ -106,8 +107,11 @@ fn plink1_dense_decodes_official_two_bit_code_table() {
     let dense =
         genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None).expect("plink1 should decode");
 
-    assert_eq!(dense.values, vec![2.0, 0.0, 1.0, 0.0]);
-    assert_eq!(dense.missing_mask, vec![false, true, false, false]);
+    assert_values_with_nan(&dense.values, &[2.0, f32::NAN, 1.0, 0.0]);
+    assert_eq!(
+        dense_missing_sample_major(&dense),
+        vec![false, true, false, false]
+    );
 }
 
 #[test]
@@ -149,7 +153,7 @@ fn plink1_dense_filters_samples_in_source_order() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(dense.values, vec![0.0, 0.0, 2.0, 2.0, 1.0, 0.0]);
+    assert_values_with_nan(&dense.values, &[0.0, f32::NAN, 2.0, 2.0, 1.0, 0.0]);
     assert_eq!(dense.diagnostics.requested_samples, 2);
     assert_eq!(dense.diagnostics.retained_samples, 2);
     assert_eq!(dense.diagnostics.missing_samples, 0);

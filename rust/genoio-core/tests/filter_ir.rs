@@ -661,25 +661,17 @@ fn unsupported_boolean_filters_keep_generic_genotype_plan() {
 
 #[test]
 fn dosage_values_detect_polymorphic_without_full_variant_stats() {
-    assert!(
-        genoio_core::is_dosage_polymorphic(&[0.0, 1.0, 0.0], &[false, false, false])
-            .expect("valid dosages should evaluate")
-    );
-    assert!(
-        !genoio_core::is_dosage_polymorphic(&[0.0, 0.0, 0.0], &[false, false, true])
-            .expect("valid dosages should evaluate")
-    );
-    assert!(
-        !genoio_core::is_dosage_polymorphic(&[2.0, 2.0], &[false, false])
-            .expect("valid dosages should evaluate")
-    );
-    assert!(!genoio_core::is_dosage_polymorphic(&[1.0], &[true])
+    assert!(genoio_core::is_dosage_polymorphic(&[0.0, 1.0, 0.0], &[])
+        .expect("valid dosages should evaluate"));
+    assert!(!genoio_core::is_dosage_polymorphic(&[0.0, 0.0, 0.0], &[2])
+        .expect("valid dosages should evaluate"));
+    assert!(!genoio_core::is_dosage_polymorphic(&[2.0, 2.0], &[])
+        .expect("valid dosages should evaluate"));
+    assert!(!genoio_core::is_dosage_polymorphic(&[1.0], &[0])
         .expect("missing dosages should not count"));
-    assert!(
-        genoio_core::is_dosage_polymorphic(&[0.1, 1.9], &[false, false])
-            .expect("fractional dosages should evaluate")
-    );
-    assert!(genoio_core::is_dosage_polymorphic(&[3.0], &[false]).is_err());
+    assert!(genoio_core::is_dosage_polymorphic(&[0.1, 1.9], &[])
+        .expect("fractional dosages should evaluate"));
+    assert!(genoio_core::is_dosage_polymorphic(&[3.0], &[]).is_err());
 }
 
 #[test]
@@ -988,11 +980,14 @@ fn id_in_predicates_intersect_and_union() {
 #[test]
 fn genotype_stats_preserve_integer_mac_beyond_f32_exact_range() {
     let n_called = 16_777_217_usize;
-    let values = vec![1.0_f32; n_called];
-    let missing = vec![false; n_called];
 
-    let stats =
-        genoio_core::compute_variant_stats(&values, &missing).expect("stats should compute");
+    let stats = genoio_core::variant_stats_from_counts(
+        0,
+        u64::try_from(n_called).expect("test count fits in u64"),
+        0,
+        0,
+    )
+    .expect("stats should compute");
 
     assert_eq!(stats.n_called, u32::try_from(n_called).unwrap());
     assert_eq!(stats.mac, Some(f64::from(u32::try_from(n_called).unwrap())));

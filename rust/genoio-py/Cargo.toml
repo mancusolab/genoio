@@ -12,5 +12,6 @@ crate-type = ["cdylib"]
 [dependencies]
 genoio-core = { path = "../genoio-core" }
 genoio-io = { path = "../genoio-io" }
+numpy = "0.29"
 pyo3 = { version = "0.29", features = ["extension-module"] }
 serde_json = "1"

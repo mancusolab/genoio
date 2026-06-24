@@ -10,8 +10,8 @@ use std::io::{BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use genoio_core::{
-    DenseDiagnostics, DenseSampleSelection, GenoioError, SampleRecord, VariantFilter,
-    VariantRecord, VariantWindow,
+    DenseDiagnostics, DenseMissingPolicy, DenseSampleSelection, GenoioError, SampleRecord,
+    VariantFilter, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -202,5 +202,6 @@ pub(super) struct BgenIndexedReadContext<'a> {
     pub(super) diagnostics: DenseDiagnostics,
     pub(super) variant_filter: Option<&'a VariantFilter>,
     pub(super) variant_window: Option<VariantWindow>,
+    pub(super) missing_policy: DenseMissingPolicy,
     pub(super) matrix_only: bool,
 }

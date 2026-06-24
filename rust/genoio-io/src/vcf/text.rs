@@ -13,9 +13,9 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
-    RegionPredicate, SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantRecord,
-    VariantStats, VariantWindow,
+    DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
+    PartialFilterDecision, RegionPredicate, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -64,18 +64,34 @@ impl TextVcfSource {
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
         matrix_only: bool,
     ) -> Result<DenseGenotypeMatrix> {
         match self {
-            Self::Compressed(input) => {
-                read_dense_from_input(path, variant_filter, variant_window, matrix_only, input)
-            }
-            Self::ThreadedCompressed(input) => {
-                read_dense_from_input(path, variant_filter, variant_window, matrix_only, input)
-            }
-            Self::Plain(input) => {
-                read_dense_from_input(path, variant_filter, variant_window, matrix_only, input)
-            }
+            Self::Compressed(input) => read_dense_from_input(
+                path,
+                variant_filter,
+                variant_window,
+                missing_policy,
+                matrix_only,
+                input,
+            ),
+            Self::ThreadedCompressed(input) => read_dense_from_input(
+                path,
+                variant_filter,
+                variant_window,
+                missing_policy,
+                matrix_only,
+                input,
+            ),
+            Self::Plain(input) => read_dense_from_input(
+                path,
+                variant_filter,
+                variant_window,
+                missing_policy,
+                matrix_only,
+                input,
+            ),
         }
     }
 
@@ -84,6 +100,7 @@ impl TextVcfSource {
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
         matrix_only: bool,
     ) -> Result<DenseGenotypeMatrix> {
         match self {
@@ -91,6 +108,7 @@ impl TextVcfSource {
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input,
             ),
@@ -98,6 +116,7 @@ impl TextVcfSource {
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input,
             ),
@@ -105,6 +124,7 @@ impl TextVcfSource {
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input,
             ),
@@ -116,6 +136,7 @@ impl TextVcfSource {
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
         matrix_only: bool,
     ) -> Result<DenseGenotypeMatrix> {
         match self {
@@ -123,6 +144,7 @@ impl TextVcfSource {
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input,
             ),
@@ -130,6 +152,7 @@ impl TextVcfSource {
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input,
             ),
@@ -137,6 +160,7 @@ impl TextVcfSource {
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input,
             ),
@@ -240,6 +264,7 @@ pub(super) fn read_vcf_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -248,6 +273,7 @@ pub(super) fn read_vcf_dense(
         path,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
     )
 }
@@ -298,6 +324,7 @@ fn read_dense_from_input<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     input: TextVcfInput<R>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -310,6 +337,7 @@ fn read_dense_from_input<R: BufRead>(
         path,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
         DenseReadSource::full_scan(source_sample_count),
         &selection,
@@ -317,12 +345,17 @@ fn read_dense_from_input<R: BufRead>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "indexed VCF boundary carries region, threading, and dense missing policy explicitly"
+)]
 pub(super) fn read_vcf_dense_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -337,6 +370,7 @@ pub(super) fn read_vcf_dense_indexed(
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input.dense_source(),
                 &input.selection,
@@ -352,6 +386,7 @@ pub(super) fn read_vcf_dosage_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -360,16 +395,22 @@ pub(super) fn read_vcf_dosage_dense(
         path,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "indexed VCF boundary carries region, threading, and dense missing policy explicitly"
+)]
 pub(super) fn read_vcf_dosage_dense_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -384,6 +425,7 @@ pub(super) fn read_vcf_dosage_dense_indexed(
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 input.dense_source(),
                 &input.selection,
@@ -398,6 +440,7 @@ fn read_dosage_dense_from_input<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     input: TextVcfInput<R>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -410,6 +453,7 @@ fn read_dosage_dense_from_input<R: BufRead>(
         path,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
         DenseReadSource::full_scan(source_sample_count),
         &selection,
@@ -417,12 +461,17 @@ fn read_dosage_dense_from_input<R: BufRead>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "indexed VCF boundary carries region, threading, and dense missing policy explicitly"
+)]
 pub(super) fn read_vcf_haplotypes_dense_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     region: &RegionPredicate,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -437,6 +486,7 @@ pub(super) fn read_vcf_haplotypes_dense_indexed(
                 path,
                 variant_filter,
                 variant_window,
+                missing_policy,
                 matrix_only,
                 Some(input.region),
                 input.selection,
@@ -452,6 +502,7 @@ pub(super) fn read_vcf_haplotypes_dense(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -460,6 +511,7 @@ pub(super) fn read_vcf_haplotypes_dense(
         path,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
     )
 }
@@ -468,6 +520,7 @@ fn read_haplotype_dense_from_input<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     input: TextVcfInput<R>,
 ) -> Result<DenseGenotypeMatrix> {
@@ -480,6 +533,7 @@ fn read_haplotype_dense_from_input<R: BufRead>(
         path,
         variant_filter,
         variant_window,
+        missing_policy,
         matrix_only,
         None,
         selection,
@@ -702,10 +756,15 @@ fn read_metadata_records<R: BufRead>(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "record loop receives prevalidated output mode, sample selection, and reader state"
+)]
 fn read_dense_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     source: DenseReadSource<'_>,
     selection: &genoio_core::DenseSampleSelection,
@@ -792,7 +851,12 @@ fn read_dense_records<R: BufRead>(
             variants.push(variant);
         }
 
-        output.write_variant(output_variant_count, decoded.values(), decoded.missing())?;
+        output.write_variant(
+            output_variant_count,
+            decoded.values(),
+            decoded.missing_indices(),
+            missing_policy,
+        )?;
         output_variant_count += 1;
     }
 
@@ -806,10 +870,15 @@ fn read_dense_records<R: BufRead>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "record loop receives prevalidated output mode, sample selection, and reader state"
+)]
 fn read_dosage_dense_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     source: DenseReadSource<'_>,
     selection: &genoio_core::DenseSampleSelection,
@@ -866,7 +935,7 @@ fn read_dosage_dense_records<R: BufRead>(
             })?;
             let (retain_variant, stats) = evaluate_dosage_filter(
                 decoded.values(),
-                decoded.missing(),
+                decoded.missing_indices(),
                 filter,
                 &variant,
                 !matrix_only,
@@ -886,7 +955,12 @@ fn read_dosage_dense_records<R: BufRead>(
             variants.push(variant);
         }
 
-        output.write_variant(output_variant_count, decoded.values(), decoded.missing())?;
+        output.write_variant(
+            output_variant_count,
+            decoded.values(),
+            decoded.missing_indices(),
+            missing_policy,
+        )?;
         output_variant_count += 1;
     }
 
@@ -900,10 +974,15 @@ fn read_dosage_dense_records<R: BufRead>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "record loop receives prevalidated output mode, sample selection, and reader state"
+)]
 fn read_haplotype_dense_records<R: std::io::BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
     matrix_only: bool,
     source_region: Option<&RegionPredicate>,
     selection: DenseSampleSelection,
@@ -1005,7 +1084,12 @@ fn read_haplotype_dense_records<R: std::io::BufRead>(
 
         // Dense haplotype reads expose source allele-1 indicators. Sparse
         // haplotype output flips columns to minor allele later to reduce nnz.
-        output.write_variant(output_variant_count, decoded.values(), decoded.missing())?;
+        output.write_variant(
+            output_variant_count,
+            decoded.values(),
+            decoded.missing_indices(),
+            missing_policy,
+        )?;
         output_variant_count += 1;
     }
 

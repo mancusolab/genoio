@@ -5,12 +5,15 @@
 //! keep variant-major staging for contiguous appends and a single final
 //! transpose.
 
-use genoio_core::{DenseGenotypeMatrix, SampleRecord, VariantFilter, VariantRecord};
+use genoio_core::{
+    DenseGenotypeMatrix, DenseMissingPolicy, SampleRecord, VariantFilter, VariantRecord,
+};
 
 use crate::error::Result;
 use crate::matrix::{
-    finish_dense_matrix, finish_variant_major_dense_matrix, shrink_sample_major_width,
-    write_sample_major_variant_slot, DenseMatrixParts, VariantMajorDenseParts,
+    apply_dense_missing_policy_to_variant, finish_dense_matrix, finish_variant_major_dense_matrix,
+    shrink_sample_major_width, write_sample_major_variant_slot, DenseMatrixParts,
+    VariantMajorDenseParts,
 };
 
 pub(super) fn can_write_sample_major_directly(
@@ -35,12 +38,14 @@ pub(super) enum TextDenseOutput {
         n_samples: usize,
         row_width: usize,
         values: Vec<f32>,
-        missing_mask: Vec<bool>,
+        variant_values: Vec<f32>,
+        missing_indices: Vec<usize>,
     },
     VariantMajor {
         n_samples: usize,
         values: Vec<f32>,
-        missing: Vec<bool>,
+        variant_values: Vec<f32>,
+        missing_indices: Vec<usize>,
     },
 }
 
@@ -52,13 +57,15 @@ impl TextDenseOutput {
                 n_samples,
                 row_width: variant_capacity,
                 values: vec![0.0; len],
-                missing_mask: vec![false; len],
+                variant_values: Vec::with_capacity(n_samples),
+                missing_indices: Vec::new(),
             }
         } else {
             Self::VariantMajor {
                 n_samples,
                 values: Vec::with_capacity(len),
-                missing: Vec::with_capacity(len),
+                variant_values: Vec::with_capacity(n_samples),
+                missing_indices: Vec::new(),
             }
         }
     }
@@ -67,30 +74,42 @@ impl TextDenseOutput {
         &mut self,
         variant_index: usize,
         decoded_values: &[f32],
-        decoded_missing: &[bool],
+        decoded_missing_indices: &[usize],
+        missing_policy: DenseMissingPolicy,
     ) -> Result<()> {
         match self {
             Self::SampleMajor {
                 n_samples,
                 row_width,
                 values,
-                missing_mask,
+                variant_values,
+                missing_indices,
             } => write_sample_major_variant_slot(
                 values,
-                missing_mask,
                 *n_samples,
                 *row_width,
                 variant_index,
-                decoded_values,
-                decoded_missing,
+                finalize_variant_values(
+                    variant_values,
+                    missing_indices,
+                    decoded_values,
+                    decoded_missing_indices,
+                    missing_policy,
+                )?,
             ),
             Self::VariantMajor {
                 values: output_values,
-                missing: output_missing,
+                variant_values,
+                missing_indices,
                 ..
             } => {
-                output_values.extend_from_slice(decoded_values);
-                output_missing.extend_from_slice(decoded_missing);
+                output_values.extend_from_slice(finalize_variant_values(
+                    variant_values,
+                    missing_indices,
+                    decoded_values,
+                    decoded_missing_indices,
+                    missing_policy,
+                )?);
                 Ok(())
             }
         }
@@ -109,16 +128,14 @@ impl TextDenseOutput {
                 n_samples,
                 row_width,
                 mut values,
-                mut missing_mask,
+                ..
             } => {
                 shrink_sample_major_width(&mut values, n_samples, row_width, n_variants);
-                shrink_sample_major_width(&mut missing_mask, n_samples, row_width, n_variants);
                 finish_dense_matrix(
                     DenseMatrixParts {
                         n_samples,
                         n_variants,
                         values,
-                        missing_mask,
                         samples,
                         variants,
                         diagnostics,
@@ -127,15 +144,12 @@ impl TextDenseOutput {
                 )
             }
             Self::VariantMajor {
-                n_samples,
-                values,
-                missing,
+                n_samples, values, ..
             } => finish_variant_major_dense_matrix(
                 VariantMajorDenseParts {
                     n_samples,
                     n_variants,
                     variant_major_values: values,
-                    variant_major_missing: missing,
                     samples,
                     variants,
                     diagnostics,
@@ -144,4 +158,19 @@ impl TextDenseOutput {
             ),
         }
     }
+}
+
+fn finalize_variant_values<'a>(
+    scratch_values: &'a mut Vec<f32>,
+    missing_indices: &mut Vec<usize>,
+    decoded_values: &[f32],
+    decoded_missing_indices: &[usize],
+    missing_policy: DenseMissingPolicy,
+) -> Result<&'a [f32]> {
+    scratch_values.clear();
+    scratch_values.extend_from_slice(decoded_values);
+    missing_indices.clear();
+    missing_indices.extend_from_slice(decoded_missing_indices);
+    apply_dense_missing_policy_to_variant(scratch_values, missing_indices, missing_policy)?;
+    Ok(scratch_values)
 }

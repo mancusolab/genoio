@@ -22,21 +22,21 @@
 //! those private classes to public `genoio` exceptions. Rust panics are treated
 //! as internal bugs and are contained at each `#[pyfunction]` entry point.
 //!
-//! NumPy arrays returned from this crate are backed by Python-owned byte
-//! buffers. Rust vectors are copied into `PyByteArray` before their memory is
-//! dropped, so Python arrays do not borrow Rust-owned memory.
+//! Numeric arrays returned from this crate transfer Rust vector ownership to
+//! NumPy. Dense missing policies are resolved while the IO layer builds matrix
+//! values, so dense reads do not materialize Python missing masks. `usize`
+//! indices are checked and converted to NumPy-compatible `int64` values before
+//! ownership transfer.
 
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::slice;
 
-use genoio_core::GenoioError;
+use genoio_core::{DenseLayout, DenseMissingPolicy, GenoioError};
+use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{
-    PyBool, PyByteArray, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
-};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
 
 pyo3::create_exception!(genoio_py, RustInvalidSourceError, PyException);
 pyo3::create_exception!(genoio_py, RustUnsupportedRepresentationError, PyException);
@@ -498,40 +498,44 @@ fn read_dense_matrix(
     validate_read_support_impl(source.format(), kind, options.dosage, false)?;
     match (source, kind, options.dosage) {
         (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_dense_windowed(
+            genoio_io::read_vcf_dense_windowed_with_missing_policy(
                 path,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_vcf_dosage_dense_windowed(
+            genoio_io::read_vcf_dosage_dense_windowed_with_missing_policy(
                 path,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Vcf { path, .. }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_haplotypes_dense_windowed(
+            genoio_io::read_vcf_haplotypes_dense_windowed_with_missing_policy(
                 path,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_plink1_dense_windowed(
+            genoio_io::read_plink1_dense_windowed_with_missing_policy(
                 bed,
                 bim,
                 fam,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
@@ -539,71 +543,77 @@ fn read_dense_matrix(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_dense_windowed(
+        ) => genoio_io::read_plink2_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_dosage_dense_windowed(
+        ) => genoio_io::read_plink2_dosage_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_haplotypes_dense_windowed(
+        ) => genoio_io::read_plink2_haplotypes_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.missing,
             options.matrix_only,
         ),
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_dosage_dense_windowed(
+            genoio_io::read_bgen_dosage_dense_windowed_with_missing_policy(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Haplotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+            genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.missing,
                 options.matrix_only,
             )
         }
@@ -732,6 +742,7 @@ struct ReadOptions {
     variant_filter: Option<genoio_core::VariantFilter>,
     variant_window: Option<genoio_core::VariantWindow>,
     dosage: DosageSource,
+    missing: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
     matrix_only: bool,
@@ -761,6 +772,7 @@ fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
         variant_filter: variants_option(options)?,
         variant_window: variant_window_option(options)?,
         dosage: dosage_option(options)?,
+        missing: missing_policy_option(options)?,
         return_samples: bool_option(options, "return_samples")?,
         return_variants: bool_option(options, "return_variants")?,
         matrix_only: required_bool_option(options, "matrix_only")?,
@@ -821,6 +833,27 @@ fn dosage_option(options: &Bound<'_, PyDict>) -> PyResult<DosageSource> {
     DosageSource::from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
 }
 
+fn missing_policy_option(options: &Bound<'_, PyDict>) -> PyResult<DenseMissingPolicy> {
+    let Some(value) = options.get_item("missing")? else {
+        return Ok(DenseMissingPolicy::Raise);
+    };
+    if value.is_none() {
+        return Ok(DenseMissingPolicy::Raise);
+    }
+    dense_missing_policy_from_str(value.extract::<String>()?.as_str()).map_err(genoio_error_to_py)
+}
+
+fn dense_missing_policy_from_str(value: &str) -> Result<DenseMissingPolicy, GenoioError> {
+    match value {
+        "raise" => Ok(DenseMissingPolicy::Raise),
+        "nan" => Ok(DenseMissingPolicy::Nan),
+        "impute" => Ok(DenseMissingPolicy::Impute),
+        other => Err(GenoioError::invalid_filter(format!(
+            "unsupported missing-data policy: {other}"
+        ))),
+    }
+}
+
 fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
     let Some(value) = options.get_item(key)? else {
         return Ok(false);
@@ -869,37 +902,56 @@ fn dense_to_py(
     return_variants: bool,
     include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
+    let genoio_core::DenseGenotypeMatrix {
+        n_samples,
+        n_variants,
+        values,
+        layout,
+        samples,
+        variants,
+        diagnostics: dense_diagnostics,
+    } = output;
+
     let dict = PyDict::new(py);
-    dict.set_item("values", f32_vec_to_numpy(py, output.values)?)?;
-    dict.set_item("shape", (output.n_samples, output.n_variants))?;
-    dict.set_item("missing_mask", bool_vec_to_numpy(py, output.missing_mask)?)?;
+    dict.set_item("values", f32_vec_to_numpy(py, values)?)?;
+    dict.set_item("shape", (n_samples, n_variants))?;
+    // Python assembly uses this tag to reshape variant-major buffers as views
+    // instead of requiring Rust to allocate a physically transposed matrix.
+    dict.set_item("values_layout", dense_layout_to_py(layout))?;
     if return_samples {
         dict.set_item(
             "samples",
-            sample_records_to_py(py, output.samples, include_haplotype_sample_columns)?,
+            sample_records_to_py(py, samples, include_haplotype_sample_columns)?,
         )?;
     }
     if return_variants {
-        dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
+        dict.set_item("variants", variant_records_to_py(py, variants)?)?;
     }
 
     let diagnostics = PyDict::new(py);
-    diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
-    diagnostics.set_item("retained_samples", output.diagnostics.retained_samples)?;
-    diagnostics.set_item("missing_samples", output.diagnostics.missing_samples)?;
-    diagnostics.set_item("candidate_variants", output.diagnostics.candidate_variants)?;
-    diagnostics.set_item("retained_variants", output.diagnostics.retained_variants)?;
+    diagnostics.set_item("requested_samples", dense_diagnostics.requested_samples)?;
+    diagnostics.set_item("retained_samples", dense_diagnostics.retained_samples)?;
+    diagnostics.set_item("missing_samples", dense_diagnostics.missing_samples)?;
+    diagnostics.set_item("candidate_variants", dense_diagnostics.candidate_variants)?;
+    diagnostics.set_item("retained_variants", dense_diagnostics.retained_variants)?;
     diagnostics.set_item(
         "dropped_metadata_variants",
-        output.diagnostics.dropped_metadata_variants,
+        dense_diagnostics.dropped_metadata_variants,
     )?;
     diagnostics.set_item(
         "dropped_genotype_variants",
-        output.diagnostics.dropped_genotype_variants,
+        dense_diagnostics.dropped_genotype_variants,
     )?;
     dict.set_item("diagnostics", diagnostics)?;
 
     Ok(dict.unbind())
+}
+
+fn dense_layout_to_py(layout: DenseLayout) -> &'static str {
+    match layout {
+        DenseLayout::SampleMajor => "sample_major",
+        DenseLayout::VariantMajor => "variant_major",
+    }
 }
 
 fn sparse_to_py(
@@ -944,23 +996,7 @@ fn sparse_to_py(
 }
 
 fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
-    // SAFETY: f32 has a stable byte representation for NumPy's float32 view.
-    // PyByteArray owns a copy of the bytes before `values` is dropped, so the
-    // returned array does not borrow Rust memory.
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            values.as_ptr().cast::<u8>(),
-            values.len() * std::mem::size_of::<f32>(),
-        )
-    };
-    let buffer = PyByteArray::new(py, bytes);
-    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "float32"))
-}
-
-fn bool_vec_to_numpy(py: Python<'_>, values: Vec<bool>) -> PyResult<Bound<'_, PyAny>> {
-    let bytes = values.into_iter().map(u8::from).collect::<Vec<u8>>();
-    let buffer = PyByteArray::new(py, &bytes);
-    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "bool"))
+    Ok(vec_to_numpy(py, values))
 }
 
 fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<'_, PyAny>> {
@@ -974,16 +1010,14 @@ fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<
             })
         })
         .collect::<PyResult<Vec<i64>>>()?;
-    // SAFETY: values has been converted to i64 and PyByteArray owns a copy of
-    // the contiguous bytes before the local Vec is dropped.
-    let bytes = unsafe {
-        slice::from_raw_parts(
-            values.as_ptr().cast::<u8>(),
-            values.len() * std::mem::size_of::<i64>(),
-        )
-    };
-    let buffer = PyByteArray::new(py, bytes);
-    PyModule::import(py, "numpy")?.call_method1("frombuffer", (buffer, "int64"))
+    Ok(vec_to_numpy(py, values))
+}
+
+fn vec_to_numpy<'py, T>(py: Python<'py>, values: Vec<T>) -> Bound<'py, PyAny>
+where
+    T: Element,
+{
+    PyArray1::from_vec(py, values).into_any()
 }
 
 fn sample_records_to_py(
