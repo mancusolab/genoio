@@ -6,15 +6,14 @@
 //! transpose.
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    SampleRecord, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
+    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, SampleRecord, VariantFilter,
+    VariantMetadataArrowBuffers,
 };
 
 use crate::error::Result;
 use crate::matrix::{
-    apply_dense_missing_policy_to_variant, finish_dense_matrix, finish_variant_major_dense_matrix,
-    shrink_sample_major_width, write_sample_major_variant_slot, DenseMatrixParts,
-    VariantMajorDenseParts,
+    apply_dense_missing_policy_to_variant, shrink_sample_major_width,
+    write_sample_major_variant_slot,
 };
 
 pub(super) fn can_write_sample_major_directly(
@@ -113,50 +112,6 @@ impl TextDenseOutput {
                 )?);
                 Ok(())
             }
-        }
-    }
-
-    pub(super) fn finish(
-        self,
-        n_variants: usize,
-        samples: Vec<SampleRecord>,
-        variants: Vec<VariantRecord>,
-        diagnostics: genoio_core::DenseDiagnostics,
-        matrix_only: bool,
-    ) -> Result<DenseGenotypeMatrix> {
-        match self {
-            Self::SampleMajor {
-                n_samples,
-                row_width,
-                mut values,
-                ..
-            } => {
-                shrink_sample_major_width(&mut values, n_samples, row_width, n_variants);
-                finish_dense_matrix(
-                    DenseMatrixParts {
-                        n_samples,
-                        n_variants,
-                        values,
-                        samples,
-                        variants,
-                        diagnostics,
-                    },
-                    matrix_only,
-                )
-            }
-            Self::VariantMajor {
-                n_samples, values, ..
-            } => finish_variant_major_dense_matrix(
-                VariantMajorDenseParts {
-                    n_samples,
-                    n_variants,
-                    variant_major_values: values,
-                    samples,
-                    variants,
-                    diagnostics,
-                },
-                matrix_only,
-            ),
         }
     }
 

@@ -187,6 +187,40 @@ impl DenseGenotypeMatrixArrowVariants {
         )
     }
 
+    /// Convert Arrow-buffered variant metadata back to the legacy row matrix shape.
+    pub fn into_matrix(self) -> Result<DenseGenotypeMatrix, GenoioError> {
+        let Self {
+            n_samples,
+            n_variants,
+            values,
+            layout,
+            samples,
+            variants,
+            diagnostics,
+        } = self;
+        match variants {
+            Some(variants) => DenseGenotypeMatrix::new_with_layout(
+                n_samples,
+                n_variants,
+                values,
+                layout,
+                samples,
+                variants.into_records()?,
+                diagnostics,
+            ),
+            None if samples.is_empty() => DenseGenotypeMatrix::new_matrix_only_with_layout(
+                n_samples,
+                n_variants,
+                values,
+                layout,
+                diagnostics,
+            ),
+            None => Err(GenoioError::internal_contract(
+                "dense Arrow matrix cannot convert to row metadata without variant buffers",
+            )),
+        }
+    }
+
     /// Build a dense matrix with optional sample metadata and optional Arrow variant metadata.
     pub fn new_with_layout(
         n_samples: usize,

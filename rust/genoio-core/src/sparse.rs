@@ -105,6 +105,35 @@ impl SparseGenotypeMatrixArrowVariants {
         )
     }
 
+    /// Convert Arrow-buffered variant metadata back to the legacy row matrix shape.
+    pub fn into_matrix(self) -> Result<SparseGenotypeMatrix, GenoioError> {
+        let Self {
+            n_rows,
+            n_cols,
+            indptr,
+            indices,
+            data,
+            samples,
+            variants,
+            diagnostics,
+        } = self;
+        match variants {
+            Some(variants) => SparseGenotypeMatrix::new(
+                n_rows,
+                n_cols,
+                indptr,
+                indices,
+                data,
+                samples,
+                variants.into_records()?,
+                diagnostics,
+            ),
+            None => Err(GenoioError::internal_contract(
+                "sparse Arrow matrix cannot convert to row metadata without variant buffers",
+            )),
+        }
+    }
+
     /// Build a sparse matrix with optional sample metadata and optional Arrow variant metadata.
     #[expect(
         clippy::too_many_arguments,

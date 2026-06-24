@@ -34,29 +34,23 @@ use super::record::{
 use super::{VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn};
 
 pub(super) enum TextSparseReadOutput {
-    Records(SparseGenotypeMatrix),
     Arrow(SparseGenotypeMatrixArrowVariants),
 }
 
 impl TextSparseReadOutput {
-    pub(super) fn into_records(self, context: &'static str) -> Result<SparseGenotypeMatrix> {
+    pub(super) fn into_legacy_matrix(self, context: &'static str) -> Result<SparseGenotypeMatrix> {
         match self {
-            Self::Records(output) => Ok(output),
-            Self::Arrow(_) => Err(GenoioError::internal_contract(format!(
-                "text VCF {context} row read returned Arrow metadata"
-            ))),
+            Self::Arrow(output) => output.into_matrix().map_err(|error| {
+                GenoioError::internal_contract(format!(
+                    "text VCF {context} Arrow-to-row compatibility conversion failed: {error}"
+                ))
+            }),
         }
     }
 
-    pub(super) fn into_arrow(
-        self,
-        context: &'static str,
-    ) -> Result<SparseGenotypeMatrixArrowVariants> {
+    pub(super) fn into_arrow(self) -> SparseGenotypeMatrixArrowVariants {
         match self {
-            Self::Arrow(output) => Ok(output),
-            Self::Records(_) => Err(GenoioError::internal_contract(format!(
-                "text VCF {context} Arrow read returned row metadata"
-            ))),
+            Self::Arrow(output) => output,
         }
     }
 }
@@ -78,11 +72,11 @@ pub(super) fn read_sparse_records<R: BufRead>(
             samples: true,
             variants: true,
         },
-        VariantMetadataSinkKind::Records,
+        VariantMetadataSinkKind::Arrow,
         selection,
         reader,
     )?
-    .into_records("sparse")
+    .into_legacy_matrix("sparse")
 }
 
 #[expect(
@@ -182,32 +176,17 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
     } else {
         Vec::new()
     };
-    match variant_sink_kind {
-        VariantMetadataSinkKind::Records => SparseGenotypeMatrix::new(
-            n_samples,
-            n_variants,
-            indptr,
-            indices,
-            data,
-            samples,
-            variants.into_records()?,
-            diagnostics,
-        )
-        .map(TextSparseReadOutput::Records),
-        VariantMetadataSinkKind::Arrow | VariantMetadataSinkKind::None => {
-            SparseGenotypeMatrixArrowVariants::new(
-                n_samples,
-                n_variants,
-                indptr,
-                indices,
-                data,
-                samples,
-                variants.into_arrow()?,
-                diagnostics,
-            )
-            .map(TextSparseReadOutput::Arrow)
-        }
-    }
+    SparseGenotypeMatrixArrowVariants::new(
+        n_samples,
+        n_variants,
+        indptr,
+        indices,
+        data,
+        samples,
+        variants.into_arrow()?,
+        diagnostics,
+    )
+    .map(TextSparseReadOutput::Arrow)
 }
 
 pub(super) fn read_haplotype_sparse_records<R: BufRead>(
@@ -227,11 +206,11 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             samples: true,
             variants: true,
         },
-        VariantMetadataSinkKind::Records,
+        VariantMetadataSinkKind::Arrow,
         selection,
         reader,
     )?
-    .into_records("haplotype sparse")
+    .into_legacy_matrix("haplotype sparse")
 }
 
 #[expect(
@@ -341,32 +320,17 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
 
     let n_variants = indptr.len().saturating_sub(1);
     diagnostics.retained_variants = n_variants;
-    match variant_sink_kind {
-        VariantMetadataSinkKind::Records => SparseGenotypeMatrix::new(
-            n_samples,
-            n_variants,
-            indptr,
-            indices,
-            data,
-            output_samples,
-            variants.into_records()?,
-            diagnostics,
-        )
-        .map(TextSparseReadOutput::Records),
-        VariantMetadataSinkKind::Arrow | VariantMetadataSinkKind::None => {
-            SparseGenotypeMatrixArrowVariants::new(
-                n_samples,
-                n_variants,
-                indptr,
-                indices,
-                data,
-                output_samples,
-                variants.into_arrow()?,
-                diagnostics,
-            )
-            .map(TextSparseReadOutput::Arrow)
-        }
-    }
+    SparseGenotypeMatrixArrowVariants::new(
+        n_samples,
+        n_variants,
+        indptr,
+        indices,
+        data,
+        output_samples,
+        variants.into_arrow()?,
+        diagnostics,
+    )
+    .map(TextSparseReadOutput::Arrow)
 }
 
 fn append_haplotype_minor_sparse_column(

@@ -160,16 +160,55 @@ impl StringColumnBuffers {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    fn value_at(&self, index: usize) -> Result<String, GenoioError> {
+        let start = *self.offsets.get(index).ok_or_else(|| {
+            GenoioError::internal_contract("variant metadata string offset is missing")
+        })?;
+        let end = *self.offsets.get(index + 1).ok_or_else(|| {
+            GenoioError::internal_contract("variant metadata string end offset is missing")
+        })?;
+        let start = usize::try_from(start).map_err(|_| {
+            GenoioError::internal_contract("variant metadata string offset is negative")
+        })?;
+        let end = usize::try_from(end).map_err(|_| {
+            GenoioError::internal_contract("variant metadata string offset is negative")
+        })?;
+        if start > end || end > self.values.len() {
+            return Err(GenoioError::internal_contract(
+                "variant metadata string offsets are out of bounds",
+            ));
+        }
+        String::from_utf8(self.values[start..end].to_vec()).map_err(|error| {
+            GenoioError::internal_contract(format!(
+                "variant metadata string buffer contains invalid UTF-8: {error}"
+            ))
+        })
+    }
 }
 
-/// Public variant metadata in Arrow-compatible column buffers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Variant metadata with public fields staged in Arrow-compatible column buffers.
+///
+/// Non-public fields are retained as columns so Rust APIs that still return
+/// row records can adapt from the columnar backend without reparsing variants.
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariantMetadataArrowBuffers {
     pub chroms: StringColumnBuffers,
     pub positions: Vec<i64>,
     pub ids: StringColumnBuffers,
     pub a0s: StringColumnBuffers,
     pub a1s: StringColumnBuffers,
+    pub ref_alleles: Vec<Option<String>>,
+    pub alt_alleles: Vec<Option<String>>,
+    pub source_a0s: StringColumnBuffers,
+    pub source_a1s: StringColumnBuffers,
+    pub flipped: Vec<bool>,
+    pub quals: Vec<Option<f32>>,
+    pub afs: Vec<Option<f32>>,
+    pub mafs: Vec<Option<f32>>,
+    pub macs: Vec<Option<u32>>,
+    pub missing_rates: Vec<Option<f32>>,
+    pub n_called: Vec<Option<u32>>,
 }
 
 impl VariantMetadataArrowBuffers {
@@ -183,6 +222,23 @@ impl VariantMetadataArrowBuffers {
             ids: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(12)),
             a0s: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(2)),
             a1s: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(2)),
+            ref_alleles: Vec::with_capacity(row_capacity),
+            alt_alleles: Vec::with_capacity(row_capacity),
+            source_a0s: StringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(2),
+            ),
+            source_a1s: StringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(2),
+            ),
+            flipped: Vec::with_capacity(row_capacity),
+            quals: Vec::with_capacity(row_capacity),
+            afs: Vec::with_capacity(row_capacity),
+            mafs: Vec::with_capacity(row_capacity),
+            macs: Vec::with_capacity(row_capacity),
+            missing_rates: Vec::with_capacity(row_capacity),
+            n_called: Vec::with_capacity(row_capacity),
         }
     }
 
@@ -199,17 +255,38 @@ impl VariantMetadataArrowBuffers {
         self.ids.append_value(id)?;
         self.a0s.append_value(a0)?;
         self.a1s.append_value(a1)?;
+        self.ref_alleles.push(None);
+        self.alt_alleles.push(None);
+        self.source_a0s.append_value(a0)?;
+        self.source_a1s.append_value(a1)?;
+        self.flipped.push(false);
+        self.quals.push(None);
+        self.afs.push(None);
+        self.mafs.push(None);
+        self.macs.push(None);
+        self.missing_rates.push(None);
+        self.n_called.push(None);
         Ok(())
     }
 
     pub fn push_record(&mut self, variant: &VariantRecord) -> Result<(), GenoioError> {
-        self.push(
-            &variant.chrom,
-            i64::from(variant.pos),
-            &variant.id,
-            &variant.a0,
-            &variant.a1,
-        )
+        self.chroms.append_value(&variant.chrom)?;
+        self.positions.push(i64::from(variant.pos));
+        self.ids.append_value(&variant.id)?;
+        self.a0s.append_value(&variant.a0)?;
+        self.a1s.append_value(&variant.a1)?;
+        self.ref_alleles.push(variant.ref_allele.clone());
+        self.alt_alleles.push(variant.alt_allele.clone());
+        self.source_a0s.append_value(&variant.source_a0)?;
+        self.source_a1s.append_value(&variant.source_a1)?;
+        self.flipped.push(variant.flipped);
+        self.quals.push(variant.qual);
+        self.afs.push(variant.af);
+        self.mafs.push(variant.maf);
+        self.macs.push(variant.mac);
+        self.missing_rates.push(variant.missing_rate);
+        self.n_called.push(variant.n_called);
+        Ok(())
     }
 
     /// Build Arrow-compatible public variant buffers from normalized records.
@@ -227,6 +304,65 @@ impl VariantMetadataArrowBuffers {
 
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
+    }
+
+    /// Convert columnar variant metadata back to records for legacy Rust APIs.
+    pub fn into_records(self) -> Result<Vec<VariantRecord>, GenoioError> {
+        self.validate_column_lengths()?;
+        let mut records = Vec::with_capacity(self.len());
+        for index in 0..self.len() {
+            let pos = u32::try_from(self.positions[index]).map_err(|_| {
+                GenoioError::internal_contract("variant metadata position is outside the u32 range")
+            })?;
+            records.push(VariantRecord {
+                chrom: self.chroms.value_at(index)?,
+                pos,
+                id: self.ids.value_at(index)?,
+                a0: self.a0s.value_at(index)?,
+                a1: self.a1s.value_at(index)?,
+                ref_allele: self.ref_alleles[index].clone(),
+                alt_allele: self.alt_alleles[index].clone(),
+                source_a0: self.source_a0s.value_at(index)?,
+                source_a1: self.source_a1s.value_at(index)?,
+                flipped: self.flipped[index],
+                qual: self.quals[index],
+                af: self.afs[index],
+                maf: self.mafs[index],
+                mac: self.macs[index],
+                missing_rate: self.missing_rates[index],
+                n_called: self.n_called[index],
+            });
+        }
+        Ok(records)
+    }
+
+    fn validate_column_lengths(&self) -> Result<(), GenoioError> {
+        let len = self.len();
+        let named_lengths = [
+            ("chrom", self.chroms.len()),
+            ("id", self.ids.len()),
+            ("a0", self.a0s.len()),
+            ("a1", self.a1s.len()),
+            ("ref_allele", self.ref_alleles.len()),
+            ("alt_allele", self.alt_alleles.len()),
+            ("source_a0", self.source_a0s.len()),
+            ("source_a1", self.source_a1s.len()),
+            ("flipped", self.flipped.len()),
+            ("qual", self.quals.len()),
+            ("af", self.afs.len()),
+            ("maf", self.mafs.len()),
+            ("mac", self.macs.len()),
+            ("missing_rate", self.missing_rates.len()),
+            ("n_called", self.n_called.len()),
+        ];
+        for (name, column_len) in named_lengths {
+            if column_len != len {
+                return Err(GenoioError::internal_contract(format!(
+                    "variant metadata column {name} length {column_len} does not match positions length {len}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -359,5 +495,17 @@ mod tests {
         assert_eq!(buffers.ids.values, b"rs1.");
         assert_eq!(buffers.a0s.values, b"AC");
         assert_eq!(buffers.a1s.values, b"GT");
+    }
+
+    #[test]
+    fn variant_metadata_arrow_buffers_round_trip_full_records() {
+        let variants = vec![variant("rs1", 10), variant("rs2", 20)];
+
+        let records = VariantMetadataArrowBuffers::from_records(&variants)
+            .unwrap()
+            .into_records()
+            .unwrap();
+
+        assert_eq!(records, variants);
     }
 }
