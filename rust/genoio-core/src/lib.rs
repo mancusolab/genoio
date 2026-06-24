@@ -34,7 +34,9 @@ pub use filter::{
     variant_stats_from_counts, GenotypeFilterConjunction, GenotypeFilterPlan,
     PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats, VariantWindow,
 };
-pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
+pub use metadata::{
+    MetadataOutput, SampleMetadataColumns, SampleRecord, VariantMetadataColumns, VariantRecord,
+};
 pub use sparse::{
     append_sparse_column, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,

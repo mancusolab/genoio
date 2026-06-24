@@ -32,7 +32,9 @@ use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use genoio_core::{DenseLayout, DenseMissingPolicy, GenoioError};
+use genoio_core::{
+    DenseLayout, DenseMissingPolicy, GenoioError, SampleMetadataColumns, VariantMetadataColumns,
+};
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -1025,67 +1027,37 @@ fn sample_records_to_py(
     samples: Vec<genoio_core::SampleRecord>,
     include_haplotype_columns: bool,
 ) -> PyResult<Bound<'_, PyDict>> {
-    let mut fids = Vec::with_capacity(samples.len());
-    let mut iids = Vec::with_capacity(samples.len());
-    let mut fathers = Vec::with_capacity(samples.len());
-    let mut mothers = Vec::with_capacity(samples.len());
-    let mut sexes = Vec::with_capacity(samples.len());
-    let mut phenotypes = Vec::with_capacity(samples.len());
-    let mut source_sample_indices = Vec::with_capacity(samples.len());
-    let mut haplotype_indices = Vec::with_capacity(samples.len());
+    let columns = SampleMetadataColumns::from_records(samples, include_haplotype_columns);
 
-    for sample in samples {
-        fids.push(sample.fid);
-        iids.push(sample.iid);
-        fathers.push(sample.father);
-        mothers.push(sample.mother);
-        sexes.push(sample.sex);
-        phenotypes.push(sample.phenotype);
-        if include_haplotype_columns {
-            source_sample_indices.push(sample.source_sample_index);
-            haplotype_indices.push(sample.haplotype_index);
-        }
+    let dict = PyDict::new(py);
+    dict.set_item("fid", columns.fids)?;
+    dict.set_item("iid", columns.iids)?;
+    dict.set_item("father", columns.fathers)?;
+    dict.set_item("mother", columns.mothers)?;
+    dict.set_item("sex", columns.sexes)?;
+    dict.set_item("phenotype", columns.phenotypes)?;
+    if let Some(source_sample_indices) = columns.source_sample_indices {
+        dict.set_item("source_sample_index", source_sample_indices)?;
     }
-
-    let columns = PyDict::new(py);
-    columns.set_item("fid", fids)?;
-    columns.set_item("iid", iids)?;
-    columns.set_item("father", fathers)?;
-    columns.set_item("mother", mothers)?;
-    columns.set_item("sex", sexes)?;
-    columns.set_item("phenotype", phenotypes)?;
-    if include_haplotype_columns {
-        columns.set_item("source_sample_index", source_sample_indices)?;
-        columns.set_item("haplotype_index", haplotype_indices)?;
+    if let Some(haplotype_indices) = columns.haplotype_indices {
+        dict.set_item("haplotype_index", haplotype_indices)?;
     }
-    Ok(columns)
+    Ok(dict)
 }
 
 fn variant_records_to_py(
     py: Python<'_>,
     variants: Vec<genoio_core::VariantRecord>,
 ) -> PyResult<Bound<'_, PyDict>> {
-    let mut chroms = Vec::with_capacity(variants.len());
-    let mut positions = Vec::with_capacity(variants.len());
-    let mut ids = Vec::with_capacity(variants.len());
-    let mut a0s = Vec::with_capacity(variants.len());
-    let mut a1s = Vec::with_capacity(variants.len());
+    let columns = VariantMetadataColumns::from_records(variants);
 
-    for variant in variants {
-        chroms.push(variant.chrom);
-        positions.push(variant.pos);
-        ids.push(variant.id);
-        a0s.push(variant.a0);
-        a1s.push(variant.a1);
-    }
-
-    let columns = PyDict::new(py);
-    columns.set_item("chrom", chroms)?;
-    columns.set_item("pos", positions)?;
-    columns.set_item("id", ids)?;
-    columns.set_item("a0", a0s)?;
-    columns.set_item("a1", a1s)?;
-    Ok(columns)
+    let dict = PyDict::new(py);
+    dict.set_item("chrom", columns.chroms)?;
+    dict.set_item("pos", columns.positions)?;
+    dict.set_item("id", columns.ids)?;
+    dict.set_item("a0", columns.a0s)?;
+    dict.set_item("a1", columns.a1s)?;
+    Ok(dict)
 }
 
 fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
