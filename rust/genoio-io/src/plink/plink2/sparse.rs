@@ -156,7 +156,7 @@ pub fn read_plink2_sparse_windowed(
         if let Some(stats) = stats {
             attach_variant_stats(&mut variant, stats);
         }
-        decoder_state.packed.expand_selected_with_missing_indices(
+        decoder_state.packed.expand_selected(
             &selection.source_indices,
             &mut decoder_state.values,
             &mut decoder_state.missing_indices,

@@ -6,9 +6,8 @@
 //! complete stats to retained variants.
 
 use genoio_core::{
-    compute_dosage_variant_stats_with_missing_indices, is_dosage_polymorphic_with_missing_indices,
-    GenoioError, GenotypeFilterConjunction, GenotypeFilterPlan, VariantFilter, VariantRecord,
-    VariantStats,
+    compute_dosage_variant_stats, is_dosage_polymorphic, GenoioError, GenotypeFilterConjunction,
+    GenotypeFilterPlan, VariantFilter, VariantRecord, VariantStats,
 };
 
 use crate::error::Result;
@@ -193,10 +192,7 @@ pub(crate) fn evaluate_dosage_filter(
         // already run metadata partial evaluation, so compiled genotype plans
         // can bypass `VariantStats` construction for common dosage predicates.
         if matches!(plan, GenotypeFilterPlan::Polymorphic) {
-            return Ok((
-                is_dosage_polymorphic_with_missing_indices(values, missing_indices)?,
-                None,
-            ));
+            return Ok((is_dosage_polymorphic(values, missing_indices)?, None));
         }
         if let Some(retain) =
             dosage_counts_for_filter(values, missing_indices)?.evaluate_plan(plan)?
@@ -205,7 +201,7 @@ pub(crate) fn evaluate_dosage_filter(
         }
     }
 
-    let stats = compute_dosage_variant_stats_with_missing_indices(values, missing_indices)?;
+    let stats = compute_dosage_variant_stats(values, missing_indices)?;
     Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
 }
 
@@ -339,7 +335,7 @@ mod tests {
     fn dosage_filter_counts_match_variant_stats_thresholds() {
         let (values, missing) = dosage_fixture();
         let counts = dosage_counts_for_filter(&values, &missing).unwrap();
-        let stats = compute_dosage_variant_stats_with_missing_indices(&values, &missing).unwrap();
+        let stats = compute_dosage_variant_stats(&values, &missing).unwrap();
 
         assert_eq!(counts.is_polymorphic().unwrap(), stats.polymorphic);
         assert_eq!(counts.missing_rate().unwrap(), stats.missing_rate);

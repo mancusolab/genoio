@@ -12,7 +12,7 @@ use std::fs::File;
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, compute_dosage_variant_stats_with_missing_indices,
+    append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele, reject_sparse_missing,
     select_samples_source_order, DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection,
     GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix,
@@ -850,10 +850,7 @@ fn decode_ds_record(
     }
 
     let stats = if collect_stats {
-        Some(compute_dosage_variant_stats_with_missing_indices(
-            &values,
-            &missing_indices,
-        )?)
+        Some(compute_dosage_variant_stats(&values, &missing_indices)?)
     } else {
         None
     };

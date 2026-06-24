@@ -172,7 +172,7 @@ pub(super) fn read_plink2_variant_values(
     decoder_state: &mut PgenDecoderState,
 ) -> Result<()> {
     read_plink2_variant_packed(path, file, header, variant_index, decoder_state)?;
-    decoder_state.packed.expand_selected_with_missing_indices(
+    decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,
@@ -252,7 +252,7 @@ fn read_fixed_width_dosage_variant_values(
         &decoder_state.record[..header.bytes_per_variant],
         header.sample_ct,
     );
-    decoder_state.packed.expand_selected_with_missing_indices(
+    decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,
@@ -281,7 +281,7 @@ fn read_fixed_width_phased_dosage_variant_values(
         variant_index,
         decoder_state,
     )?;
-    decoder_state.packed.expand_selected_with_missing_indices(
+    decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,
@@ -353,7 +353,7 @@ fn read_variable_width_dosage_variant_values(
         decoder_state.has_previous_non_ld = true;
     }
 
-    decoder_state.packed.expand_selected_with_missing_indices(
+    decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,

@@ -998,83 +998,12 @@ fn min_option<T: Ord + Copy>(left: Option<T>, right: Option<T>) -> Option<T> {
     }
 }
 
-/// Compute frequency and missingness statistics for one diploid hard-call variant.
-///
-/// `values` must contain discrete diploid allele counts in `{0, 1, 2}`. Missing
-/// calls are excluded from AF/MAF/MAC and included only in `missing_rate`.
-pub fn compute_variant_stats(
-    values: &[f32],
-    missing_mask: &[bool],
-) -> Result<VariantStats, GenoioError> {
-    if values.len() != missing_mask.len() {
-        return Err(GenoioError::invalid_source(
-            "<filter>",
-            "variant values and missing mask lengths differ",
-        ));
-    }
-
-    let mut hom_ref_count = 0_u64;
-    let mut het_count = 0_u64;
-    let mut hom_alt_count = 0_u64;
-    let mut missing_count = 0_u64;
-    for (value, missing) in values.iter().zip(missing_mask) {
-        if *missing {
-            missing_count += 1;
-            continue;
-        }
-        match discrete_allele_count(*value)? {
-            0 => hom_ref_count += 1,
-            1 => het_count += 1,
-            2 => hom_alt_count += 1,
-            _ => unreachable!("discrete allele count is bounded by validation"),
-        }
-    }
-
-    variant_stats_from_counts(hom_ref_count, het_count, hom_alt_count, missing_count)
-}
-
-/// Compute frequency and missingness statistics for one diploid dosage variant.
-///
-/// `values` must contain expected `a1` allele dosages in `[0, 2]`. Missing
-/// calls are excluded from AF/MAF/MAC and included only in `missing_rate`.
-pub fn compute_dosage_variant_stats(
-    values: &[f32],
-    missing_mask: &[bool],
-) -> Result<VariantStats, GenoioError> {
-    if values.len() != missing_mask.len() {
-        return Err(GenoioError::invalid_source(
-            "<filter>",
-            "variant values and missing mask lengths differ",
-        ));
-    }
-
-    let mut allele_count = 0.0_f64;
-    let mut called_count = 0_u64;
-    let mut missing_count = 0_u64;
-    for (value, missing) in values.iter().zip(missing_mask) {
-        if *missing {
-            missing_count += 1;
-            continue;
-        }
-        if !(0.0..=2.0).contains(value) {
-            return Err(GenoioError::invalid_source(
-                "<filter>",
-                format!("dosage statistics require values in [0, 2]; observed {value}"),
-            ));
-        }
-        allele_count += f64::from(*value);
-        called_count += 1;
-    }
-
-    variant_stats_from_dosage_count(allele_count, called_count, missing_count)
-}
-
 /// Compute frequency and missingness statistics from sparse missing indices.
 ///
 /// `missing_indices` must be sorted and unique. The corresponding `values`
 /// entries are ignored, allowing decoders to use any placeholder for missing
 /// calls without materializing a full boolean mask.
-pub fn compute_dosage_variant_stats_with_missing_indices(
+pub fn compute_dosage_variant_stats(
     values: &[f32],
     missing_indices: &[usize],
 ) -> Result<VariantStats, GenoioError> {
@@ -1108,39 +1037,7 @@ pub fn compute_dosage_variant_stats_with_missing_indices(
 }
 
 /// Return true when called dosage values contain both alleles.
-pub fn is_dosage_polymorphic(values: &[f32], missing_mask: &[bool]) -> Result<bool, GenoioError> {
-    if values.len() != missing_mask.len() {
-        return Err(GenoioError::invalid_source(
-            "<filter>",
-            "variant values and missing mask lengths differ",
-        ));
-    }
-
-    let mut allele_count = 0.0_f64;
-    let mut called_count = 0_u64;
-    for (value, missing) in values.iter().zip(missing_mask) {
-        if *missing {
-            continue;
-        }
-        if !(0.0..=2.0).contains(value) {
-            return Err(GenoioError::invalid_source(
-                "<filter>",
-                format!("dosage statistics require values in [0, 2]; observed {value}"),
-            ));
-        }
-        allele_count += f64::from(*value);
-        called_count += 1;
-        if allele_count > 0.0 && allele_count < 2.0 * called_count as f64 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Return true when called dosage values contain both alleles.
-///
-/// This is the sparse-missing counterpart to [`is_dosage_polymorphic`].
-pub fn is_dosage_polymorphic_with_missing_indices(
+pub fn is_dosage_polymorphic(
     values: &[f32],
     missing_indices: &[usize],
 ) -> Result<bool, GenoioError> {
@@ -1346,18 +1243,6 @@ fn exact_u32_from_f64(value: f64) -> Option<u32> {
         Some(value as u32)
     } else {
         None
-    }
-}
-
-fn discrete_allele_count(value: f32) -> Result<u64, GenoioError> {
-    match value {
-        0.0 => Ok(0),
-        1.0 => Ok(1),
-        2.0 => Ok(2),
-        other => Err(GenoioError::invalid_source(
-            "<filter>",
-            format!("genotype statistics require discrete 0/1/2 values; observed {other}"),
-        )),
     }
 }
 
