@@ -32,3 +32,10 @@ def test_pyo3_adapter_does_not_normalize_row_matrices():
     assert "SparseGenotypeMatrixArrowVariants::from_matrix" not in source
     assert "fn read_dense_matrix(" not in source
     assert "fn read_sparse_matrix(" not in source
+
+
+def test_plink1_arrow_backend_does_not_wrap_row_matrices():
+    source = Path("rust/genoio-io/src/plink/plink1.rs").read_text()
+
+    assert "dense_matrix_to_arrow_variants" not in source
+    assert "sparse_matrix_to_arrow_variants" not in source

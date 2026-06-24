@@ -268,23 +268,6 @@ fn validate_variant_major_len(
     Ok(())
 }
 
-pub(crate) fn empty_sparse_matrix(
-    samples: Vec<SampleRecord>,
-    mut diagnostics: DenseDiagnostics,
-) -> Result<SparseGenotypeMatrix> {
-    diagnostics.retained_variants = 0;
-    SparseGenotypeMatrix::new(
-        samples.len(),
-        0,
-        vec![0],
-        Vec::new(),
-        Vec::new(),
-        samples,
-        Vec::new(),
-        diagnostics,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
