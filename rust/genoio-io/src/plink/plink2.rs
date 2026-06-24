@@ -51,22 +51,6 @@ use pgen::{read_supported_pgen_header, validate_plink2_dimensions};
 #[cfg(test)]
 const PGEN_PACKED_TRANSPOSE_BATCH: usize = HARDCALL_BATCH_SIZE;
 
-#[cfg(test)]
-fn append_variant_to_sample_major(
-    values: &[f32],
-    variant_index: usize,
-    n_variants: usize,
-    out_values: &mut [f32],
-) {
-    debug_assert!(variant_index < n_variants);
-    debug_assert_eq!(out_values.len(), values.len() * n_variants);
-
-    for (sample_index, &value) in values.iter().enumerate() {
-        let offset = sample_index * n_variants + variant_index;
-        out_values[offset] = value;
-    }
-}
-
 pub(super) fn require_genotype_decision_filter(
     variant_filter: Option<&VariantFilter>,
 ) -> Result<&VariantFilter> {
@@ -92,7 +76,7 @@ pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<Met
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::apply_dense_missing_policy_to_variant;
+    use crate::matrix::{apply_dense_missing_policy_to_variant, write_sample_major_variant_slot};
 
     fn stats_from_expanded_hardcalls(
         values: &[f32],
@@ -189,12 +173,14 @@ mod tests {
                 genoio_core::DenseMissingPolicy::Nan,
             )
             .expect("test missing policy should apply");
-            append_variant_to_sample_major(
-                &scratch_values,
-                variant_index,
-                n_variants,
+            write_sample_major_variant_slot(
                 &mut expected_values,
-            );
+                sample_ct,
+                n_variants,
+                variant_index,
+                &scratch_values,
+            )
+            .expect("expected dense slot should write");
             packed_variants.push(packed);
         }
 

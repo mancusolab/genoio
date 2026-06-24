@@ -146,11 +146,7 @@ pub(crate) fn apply_dense_missing_policy_to_variant(
                     "cannot impute all-missing variant",
                 ));
             }
-            let missing_sum = missing_indices
-                .iter()
-                .map(|&index| values[index])
-                .sum::<f32>();
-            let called_sum = values.iter().sum::<f32>() - missing_sum;
+            let called_sum = sum_called_values(values, missing_indices);
             let mean = called_sum / called_count as f32;
             for &index in missing_indices {
                 values[index] = mean;
@@ -158,6 +154,22 @@ pub(crate) fn apply_dense_missing_policy_to_variant(
             Ok(())
         }
     }
+}
+
+fn sum_called_values(values: &[f32], missing_indices: &[usize]) -> f32 {
+    let mut called_sum = 0.0_f32;
+    let mut missing_cursor = 0_usize;
+    for (index, &value) in values.iter().enumerate() {
+        if missing_indices
+            .get(missing_cursor)
+            .is_some_and(|&missing_index| missing_index == index)
+        {
+            missing_cursor += 1;
+        } else {
+            called_sum += value;
+        }
+    }
+    called_sum
 }
 
 fn validate_missing_indices(values_len: usize, missing_indices: &[usize]) -> Result<()> {
@@ -322,7 +334,7 @@ mod tests {
 
     #[test]
     fn apply_dense_missing_policy_to_variant_imputes_missing_indices() {
-        let mut values = vec![2.0, 100.0, 6.0];
+        let mut values = vec![2.0, f32::NAN, 6.0];
 
         apply_dense_missing_policy_to_variant(&mut values, &[1], DenseMissingPolicy::Impute)
             .expect("single missing value should be imputed");

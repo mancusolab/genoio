@@ -604,21 +604,6 @@ pub(crate) fn decode_hardcall_code(code: u8) -> (f32, bool) {
 mod tests {
     use super::*;
 
-    fn append_variant_to_sample_major(
-        values: &[f32],
-        variant_index: usize,
-        n_variants: usize,
-        out_values: &mut [f32],
-    ) {
-        debug_assert!(variant_index < n_variants);
-        debug_assert_eq!(out_values.len(), values.len() * n_variants);
-
-        for (sample_index, &value) in values.iter().enumerate() {
-            let offset = sample_index * n_variants + variant_index;
-            out_values[offset] = value;
-        }
-    }
-
     fn stats_from_expanded_hardcalls(
         values: &[f32],
         missing_indices: &[usize],
@@ -726,12 +711,14 @@ mod tests {
                 DenseMissingPolicy::Nan,
             )
             .expect("test missing policy should apply");
-            append_variant_to_sample_major(
-                &scratch_values,
-                variant_index,
-                n_variants,
+            write_sample_major_variant_slot(
                 &mut expected_values,
-            );
+                sample_ct,
+                n_variants,
+                variant_index,
+                &scratch_values,
+            )
+            .expect("expected dense slot should write");
             packed_variants.push(packed);
         }
 
