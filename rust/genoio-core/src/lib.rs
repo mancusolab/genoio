@@ -35,7 +35,8 @@ pub use filter::{
     PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats, VariantWindow,
 };
 pub use metadata::{
-    MetadataOutput, SampleMetadataColumns, SampleRecord, VariantMetadataColumns, VariantRecord,
+    MetadataArrowOutput, MetadataOutput, SampleMetadataColumns, SampleRecord, StringColumnBuffers,
+    VariantMetadataArrowBuffers, VariantMetadataColumns, VariantRecord,
 };
 pub use sparse::{
     append_sparse_column, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, RegionPredicate, VariantRecord};
+use genoio_core::{GenoioError, RegionPredicate, VariantMetadataArrowBuffers, VariantRecord};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
@@ -91,32 +91,22 @@ pub(super) fn variant_record_from_text_record(
     path: &Path,
     record: &noodles::Record,
 ) -> Result<VariantRecord> {
-    let chrom = record.reference_sequence_name().to_string();
-    if chrom.is_empty() {
-        return Err(GenoioError::invalid_source(
-            path,
-            "vcf record is missing a chromosome id",
-        ));
-    }
-    let pos = record
-        .variant_start()
-        .transpose()
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf position error: {error}")))?
-        .ok_or_else(|| GenoioError::invalid_source(path, "vcf record position is missing"))?;
-    let pos = u32::try_from(pos.get())
-        .map_err(|_| GenoioError::invalid_source(path, "vcf record position is out of range"))?;
+    let chrom = text_record_chrom(path, record)?.to_string();
+    let pos = text_record_pos(path, record)?;
 
     let ref_allele = record.reference_bases();
     let alternate_bases = record.alternate_bases();
     let alt_allele = alternate_bases.as_ref();
     let ref_allele = ref_allele.to_string();
     let alt_allele = alt_allele.to_string();
-    let first_alt = first_alt_allele(&alt_allele).ok_or_else(|| {
-        GenoioError::invalid_source(
-            path,
-            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
-        )
-    })?;
+    let first_alt = first_alt_allele_str(&alt_allele)
+        .ok_or_else(|| {
+            GenoioError::invalid_source(
+                path,
+                format!("vcf record {chrom}:{pos} has fewer than two alleles"),
+            )
+        })?
+        .to_string();
 
     Ok(VariantRecord {
         chrom,
@@ -140,6 +130,55 @@ pub(super) fn variant_record_from_text_record(
         missing_rate: None,
         n_called: None,
     })
+}
+
+pub(super) fn append_public_variant_metadata_from_text_record(
+    path: &Path,
+    record: &noodles::Record,
+    variants: &mut VariantMetadataArrowBuffers,
+) -> Result<()> {
+    let chrom = text_record_chrom(path, record)?;
+    let pos = text_record_pos(path, record)?;
+
+    let ref_allele = record.reference_bases();
+    let alternate_bases = record.alternate_bases();
+    let alt_allele = alternate_bases.as_ref();
+    let first_alt = first_alt_allele_str(alt_allele).ok_or_else(|| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
+        )
+    })?;
+
+    let ids = record.ids();
+    variants.push(
+        chrom,
+        i64::from(pos),
+        first_id_str(ids.as_ref()),
+        ref_allele,
+        first_alt,
+    )
+}
+
+fn text_record_chrom<'a>(path: &Path, record: &'a noodles::Record) -> Result<&'a str> {
+    let chrom = record.reference_sequence_name();
+    if chrom.is_empty() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "vcf record is missing a chromosome id",
+        ));
+    }
+    Ok(chrom)
+}
+
+fn text_record_pos(path: &Path, record: &noodles::Record) -> Result<u32> {
+    let pos = record
+        .variant_start()
+        .transpose()
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf position error: {error}")))?
+        .ok_or_else(|| GenoioError::invalid_source(path, "vcf record position is missing"))?;
+    u32::try_from(pos.get())
+        .map_err(|_| GenoioError::invalid_source(path, "vcf record position is out of range"))
 }
 
 fn first_trait_record_id<R>(record: &R) -> String
@@ -181,19 +220,26 @@ where
 
 fn first_id(record: &noodles::Record) -> String {
     let ids = record.ids();
-    let id = ids.as_ref();
+    first_id_str(ids.as_ref()).to_string()
+}
+
+fn first_id_str(id: &str) -> &str {
     if id.is_empty() {
-        ".".to_string()
-    } else {
-        id.split(';').next().unwrap_or(".").to_string()
+        return ".";
+    }
+    match id.split(';').next() {
+        Some(first) if !first.is_empty() => first,
+        _ => ".",
     }
 }
 
-fn first_alt_allele(alt: &str) -> Option<String> {
+fn first_alt_allele_str(alt: &str) -> Option<&str> {
     if alt.is_empty() {
-        None
-    } else {
-        Some(alt.split(',').next().unwrap_or(alt).to_string())
+        return None;
+    }
+    match alt.split(',').next() {
+        Some(first) if !first.is_empty() => Some(first),
+        _ => None,
     }
 }
 

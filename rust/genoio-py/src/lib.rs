@@ -34,9 +34,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, StructArray};
+use arrow_buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use genoio_core::{
-    DenseLayout, DenseMissingPolicy, GenoioError, SampleMetadataColumns, VariantMetadataColumns,
+    DenseLayout, DenseMissingPolicy, GenoioError, MetadataArrowOutput, SampleMetadataColumns,
+    StringColumnBuffers, VariantMetadataArrowBuffers, VariantMetadataColumns,
 };
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
@@ -331,7 +333,9 @@ impl SourceFormat {
 
 enum SourceMembers {
     Vcf {
-        format: SourceFormat,
+        path: PathBuf,
+    },
+    Bcf {
         path: PathBuf,
     },
     Plink1 {
@@ -353,7 +357,8 @@ enum SourceMembers {
 impl SourceMembers {
     fn format(&self) -> SourceFormat {
         match self {
-            Self::Vcf { format, .. } => *format,
+            Self::Vcf { .. } => SourceFormat::Vcf,
+            Self::Bcf { .. } => SourceFormat::Bcf,
             Self::Plink1 { .. } => SourceFormat::Plink1,
             Self::Plink2 { .. } => SourceFormat::Plink2,
             Self::Bgen { .. } => SourceFormat::Bgen,
@@ -364,13 +369,12 @@ impl SourceMembers {
 fn source_members(format: &str, members: &Bound<'_, PyDict>) -> PyResult<SourceMembers> {
     let source_format = SourceFormat::from_str(format)?;
     match source_format {
-        SourceFormat::Vcf | SourceFormat::Bcf => {
-            let key = if format == "vcf" { "vcf" } else { "bcf" };
-            Ok(SourceMembers::Vcf {
-                format: source_format,
-                path: member_path(members, key)?,
-            })
-        }
+        SourceFormat::Vcf => Ok(SourceMembers::Vcf {
+            path: member_path(members, "vcf")?,
+        }),
+        SourceFormat::Bcf => Ok(SourceMembers::Bcf {
+            path: member_path(members, "bcf")?,
+        }),
         SourceFormat::Plink1 => Ok(SourceMembers::Plink1 {
             bed: member_path(members, "bed")?,
             bim: member_path(members, "bim")?,
@@ -514,17 +518,28 @@ fn validate_read_support_impl(
     }
 }
 
-fn read_source_metadata(
-    source: &SourceMembers,
-) -> Result<genoio_core::MetadataOutput, GenoioError> {
+enum SourceMetadataOutput {
+    Records(genoio_core::MetadataOutput),
+    Arrow(MetadataArrowOutput),
+}
+
+fn read_source_metadata(source: &SourceMembers) -> Result<SourceMetadataOutput, GenoioError> {
     match source {
-        SourceMembers::Vcf { path, .. } => genoio_io::read_vcf_metadata(path),
-        SourceMembers::Plink1 { bed, bim, fam } => genoio_io::read_plink1_metadata(bed, bim, fam),
+        SourceMembers::Vcf { path } => {
+            genoio_io::read_vcf_public_metadata_arrow(path).map(SourceMetadataOutput::Arrow)
+        }
+        SourceMembers::Bcf { path } => {
+            genoio_io::read_vcf_metadata(path).map(SourceMetadataOutput::Records)
+        }
+        SourceMembers::Plink1 { bed, bim, fam } => {
+            genoio_io::read_plink1_metadata(bed, bim, fam).map(SourceMetadataOutput::Records)
+        }
         SourceMembers::Plink2 { pgen, pvar, psam } => {
-            genoio_io::read_plink2_metadata(pgen, pvar, psam)
+            genoio_io::read_plink2_metadata(pgen, pvar, psam).map(SourceMetadataOutput::Records)
         }
         SourceMembers::Bgen { bgen, sample } => {
             genoio_io::read_bgen_metadata(bgen, sample.as_deref())
+                .map(SourceMetadataOutput::Records)
         }
     }
 }
@@ -536,36 +551,42 @@ fn read_dense_matrix(
 ) -> Result<genoio_core::DenseGenotypeMatrix, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, false)?;
     match (source, kind, options.dosage) {
-        (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_dense_windowed_with_missing_policy(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.missing,
-                options.matrix_only,
-            )
-        }
-        (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_vcf_dosage_dense_windowed_with_missing_policy(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.missing,
-                options.matrix_only,
-            )
-        }
-        (SourceMembers::Vcf { path, .. }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_haplotypes_dense_windowed_with_missing_policy(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.missing,
-                options.matrix_only,
-            )
-        }
+        (
+            SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
+            MatrixKind::Genotype,
+            DosageSource::Hardcall,
+        ) => genoio_io::read_vcf_dense_windowed_with_missing_policy(
+            path,
+            options.requested_samples.as_deref(),
+            options.variant_filter.as_ref(),
+            options.variant_window,
+            options.missing,
+            options.matrix_only,
+        ),
+        (
+            SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
+            MatrixKind::Genotype,
+            DosageSource::Dosage,
+        ) => genoio_io::read_vcf_dosage_dense_windowed_with_missing_policy(
+            path,
+            options.requested_samples.as_deref(),
+            options.variant_filter.as_ref(),
+            options.variant_window,
+            options.missing,
+            options.matrix_only,
+        ),
+        (
+            SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
+            MatrixKind::Haplotype,
+            DosageSource::Hardcall,
+        ) => genoio_io::read_vcf_haplotypes_dense_windowed_with_missing_policy(
+            path,
+            options.requested_samples.as_deref(),
+            options.variant_filter.as_ref(),
+            options.variant_window,
+            options.missing,
+            options.matrix_only,
+        ),
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
             genoio_io::read_plink1_dense_windowed_with_missing_policy(
                 bed,
@@ -669,22 +690,26 @@ fn read_sparse_matrix(
 ) -> Result<genoio_core::SparseGenotypeMatrix, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, true)?;
     match (source, kind, options.dosage) {
-        (SourceMembers::Vcf { path, .. }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_sparse_windowed(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-            )
-        }
-        (SourceMembers::Vcf { path, .. }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_haplotypes_sparse_windowed(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-            )
-        }
+        (
+            SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
+            MatrixKind::Genotype,
+            DosageSource::Hardcall,
+        ) => genoio_io::read_vcf_sparse_windowed(
+            path,
+            options.requested_samples.as_deref(),
+            options.variant_filter.as_ref(),
+            options.variant_window,
+        ),
+        (
+            SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
+            MatrixKind::Haplotype,
+            DosageSource::Hardcall,
+        ) => genoio_io::read_vcf_haplotypes_sparse_windowed(
+            path,
+            options.requested_samples.as_deref(),
+            options.variant_filter.as_ref(),
+            options.variant_window,
+        ),
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
             genoio_io::read_plink1_sparse_windowed(
                 bed,
@@ -916,23 +941,51 @@ fn required_bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool
     value.extract::<bool>()
 }
 
-fn metadata_to_py(py: Python<'_>, output: genoio_core::MetadataOutput) -> PyResult<Py<PyDict>> {
+fn metadata_to_py(py: Python<'_>, output: SourceMetadataOutput) -> PyResult<Py<PyDict>> {
+    match output {
+        SourceMetadataOutput::Records(output) => metadata_records_to_py(py, output),
+        SourceMetadataOutput::Arrow(output) => metadata_arrow_to_py(py, output),
+    }
+}
+
+fn metadata_records_to_py(
+    py: Python<'_>,
+    output: genoio_core::MetadataOutput,
+) -> PyResult<Py<PyDict>> {
     let genoio_core::MetadataOutput {
         samples,
         variants,
-        capabilities: source_capabilities,
+        capabilities,
     } = output;
     let dict = PyDict::new(py);
+    dict.set_item("samples", sample_records_to_py(py, samples, false)?)?;
+    dict.set_item("variants", variant_records_to_py(py, variants)?)?;
+    dict.set_item("capabilities", source_capabilities_to_py(py, capabilities)?)?;
+    Ok(dict.unbind())
+}
 
+fn metadata_arrow_to_py(py: Python<'_>, output: MetadataArrowOutput) -> PyResult<Py<PyDict>> {
+    let MetadataArrowOutput {
+        samples,
+        variants,
+        capabilities,
+    } = output;
+    let dict = PyDict::new(py);
+    dict.set_item("samples", sample_records_to_py(py, samples, false)?)?;
+    dict.set_item("variants", variant_arrow_buffers_to_py(py, variants)?)?;
+    dict.set_item("capabilities", source_capabilities_to_py(py, capabilities)?)?;
+    Ok(dict.unbind())
+}
+
+fn source_capabilities_to_py(
+    py: Python<'_>,
+    source_capabilities: genoio_core::SourceCapabilities,
+) -> PyResult<Bound<'_, PyDict>> {
     let capabilities = PyDict::new(py);
     capabilities.set_item("supports_geno", source_capabilities.supports_geno)?;
     capabilities.set_item("supports_haplo", source_capabilities.supports_haplo)?;
     capabilities.set_item("phased", source_capabilities.phased)?;
-
-    dict.set_item("samples", sample_records_to_py(py, samples, false)?)?;
-    dict.set_item("variants", variant_records_to_py(py, variants)?)?;
-    dict.set_item("capabilities", capabilities)?;
-    Ok(dict.unbind())
+    Ok(capabilities)
 }
 
 fn dense_to_py(
@@ -1087,6 +1140,18 @@ fn variant_records_to_py(
     )
 }
 
+fn variant_arrow_buffers_to_py(
+    py: Python<'_>,
+    variants: VariantMetadataArrowBuffers,
+) -> PyResult<Py<ArrowMetadataFrame>> {
+    Py::new(
+        py,
+        ArrowMetadataFrame {
+            batch: variant_arrow_buffers_to_batch(variants)?,
+        },
+    )
+}
+
 fn sample_columns_to_arrow_batch(columns: SampleMetadataColumns) -> PyResult<RecordBatch> {
     let mut fields = vec![
         Field::new("fid", DataType::Utf8, true),
@@ -1115,6 +1180,35 @@ fn sample_columns_to_arrow_batch(columns: SampleMetadataColumns) -> PyResult<Rec
     }
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(arrow_error_to_py)
+}
+
+fn variant_arrow_buffers_to_batch(variants: VariantMetadataArrowBuffers) -> PyResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("pos", DataType::Int64, false),
+        Field::new("id", DataType::Utf8, false),
+        Field::new("a0", DataType::Utf8, false),
+        Field::new("a1", DataType::Utf8, false),
+    ]));
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(string_array_from_buffers(variants.chroms)) as ArrayRef,
+        Arc::new(Int64Array::from(variants.positions)) as ArrayRef,
+        Arc::new(string_array_from_buffers(variants.ids)) as ArrayRef,
+        Arc::new(string_array_from_buffers(variants.a0s)) as ArrayRef,
+        Arc::new(string_array_from_buffers(variants.a1s)) as ArrayRef,
+    ];
+
+    RecordBatch::try_new(schema, arrays).map_err(arrow_error_to_py)
+}
+
+fn string_array_from_buffers(column: StringColumnBuffers) -> StringArray {
+    let offsets = ScalarBuffer::from(column.offsets);
+    let values = Buffer::from_vec(column.values);
+    // SAFETY: StringColumnBuffers is only populated via append_value(&str),
+    // which appends valid UTF-8 bytes and cumulative non-negative i32 byte
+    // offsets beginning at 0. There are no nulls in the public VCF variant
+    // metadata columns.
+    unsafe { StringArray::new_unchecked(OffsetBuffer::new_unchecked(offsets), values, None) }
 }
 
 fn variant_columns_to_arrow_batch(columns: VariantMetadataColumns) -> PyResult<RecordBatch> {

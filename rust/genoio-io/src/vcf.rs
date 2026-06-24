@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, GenoioError, MetadataOutput, SampleRecord,
-    SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    DenseGenotypeMatrix, DenseMissingPolicy, GenoioError, MetadataArrowOutput, MetadataOutput,
+    SampleRecord, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 use noodles_vcf::variant::record::samples::{
@@ -30,6 +30,16 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
         return bcf::read_metadata(path);
     }
     text::read_vcf_metadata(path)
+}
+
+/// Read text VCF sample metadata and public variant metadata as Arrow-compatible buffers.
+pub fn read_vcf_public_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
+    if is_bcf_path(path) {
+        return Err(GenoioError::unsupported(
+            "Arrow-buffered public metadata reads are only implemented for text VCF",
+        ));
+    }
+    text::read_vcf_public_metadata_arrow(path)
 }
 
 /// Read retained VCF/BCF diploid genotypes as a dense sample-by-variant matrix.

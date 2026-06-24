@@ -61,7 +61,7 @@ pub use vcf::{
     read_vcf_haplotypes_dense_windowed_with_threads,
     read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy, read_vcf_haplotypes_sparse,
     read_vcf_haplotypes_sparse_windowed, read_vcf_haplotypes_sparse_windowed_with_threads,
-    read_vcf_metadata, read_vcf_sparse, read_vcf_sparse_windowed,
+    read_vcf_metadata, read_vcf_public_metadata_arrow, read_vcf_sparse, read_vcf_sparse_windowed,
     read_vcf_sparse_windowed_with_threads,
 };
 

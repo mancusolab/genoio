@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 arrow-array = "59"
+arrow-buffer = "59"
 arrow-schema = "59"
 genoio-core = { path = "../genoio-core" }
 genoio-io = { path = "../genoio-io" }

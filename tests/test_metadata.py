@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+DATA_ROOT = Path(__file__).parents[1] / "data"
 
 _BGEN_FLAG_LAYOUT2 = 2 << 2
 _BGEN_FLAG_SAMPLE_IDENTIFIERS = 1 << 31
@@ -135,6 +136,67 @@ def test_rust_metadata_payload_is_column_oriented():
     assert hasattr(metadata["variants"], "__arrow_c_stream__")
     assert api.samples_frame(metadata["samples"])["iid"].to_list() == ["S1", "S2", "S3"]
     assert api.variants_frame(metadata["variants"])["id"].to_list() == ["rs1", "rs2", "indel1"]
+
+
+def test_vcf_read_metadata_frames_match_metadata_only_frames_exactly():
+    import genoio
+
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "phased.vcf")
+
+    metadata_samples = dataset.samples()
+    metadata_variants = dataset.variants()
+    matrix, read_samples, read_variants = dataset.read(return_samples=True, return_variants=True)
+
+    np.testing.assert_array_equal(matrix, np.array([[1.0, 2.0], [1.0, 0.0]], dtype=np.float32))
+    assert read_samples.equals(metadata_samples)
+    assert read_variants.equals(metadata_variants)
+
+
+def test_vcf_haplotype_read_preserves_sample_mapping_columns_and_variant_order():
+    import genoio
+
+    dataset = genoio.vcf(FIXTURE_ROOT / "vcf" / "phased.vcf")
+
+    matrix, samples, variants = dataset.read(kind="haplo", return_samples=True, return_variants=True)
+
+    np.testing.assert_array_equal(
+        matrix,
+        np.array([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+    )
+    assert samples.columns == [
+        "fid",
+        "iid",
+        "father",
+        "mother",
+        "sex",
+        "phenotype",
+        "source_sample_index",
+        "haplotype_index",
+    ]
+    assert samples["iid"].to_list() == ["S1", "S1", "S2", "S2"]
+    assert samples["source_sample_index"].to_list() == [0, 0, 1, 1]
+    assert samples["haplotype_index"].to_list() == [0, 1, 0, 1]
+    assert variants.rows() == dataset.variants().rows()
+
+
+@pytest.mark.parametrize("path", [DATA_ROOT / "chr22_hg38.vcf.gz", DATA_ROOT / "dummy.vcf.gz"])
+def test_local_vcf_data_fixtures_support_metadata_only_reads(path: Path):
+    if not path.exists():
+        pytest.skip(f"{path} is not available in this checkout")
+
+    import genoio
+
+    dataset = genoio.vcf(path)
+
+    samples = dataset.samples()
+    variants = dataset.variants()
+
+    assert samples.columns == ["fid", "iid", "father", "mother", "sex", "phenotype"]
+    assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
+    assert samples.height > 0
+    assert variants.height > 0
+    assert samples["iid"].head(3).to_list()
+    assert variants["id"].head(3).to_list()
 
 
 def test_plink1_samples_and_variants_normalize_metadata_without_decoding_bed():

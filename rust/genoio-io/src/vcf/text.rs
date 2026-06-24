@@ -13,9 +13,10 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
-    PartialFilterDecision, RegionPredicate, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantStats, VariantWindow,
+    DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError,
+    MetadataArrowOutput, MetadataOutput, PartialFilterDecision, RegionPredicate,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantMetadataArrowBuffers,
+    VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -33,7 +34,8 @@ use self::gt::{
 use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, TextDenseOutput};
 use self::record::{
-    skip_variant_for_region, validate_biallelic_variant, variant_record_from_text_record,
+    append_public_variant_metadata_from_text_record, skip_variant_for_region,
+    validate_biallelic_variant, variant_record_from_text_record,
 };
 use self::source::{
     ensure_text_indexed_vcf_supported, ensure_text_vcf_supported, open_compressed_reader,
@@ -57,6 +59,7 @@ mod sparse;
 pub(in crate::vcf) use self::record::variant_record_from_noodles_variant_record;
 
 pub(super) const VCF_TEXT_BUFFER_SIZE: usize = 1 << 20;
+const VCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
 
 impl TextVcfSource {
     fn read_dense(
@@ -256,6 +259,19 @@ pub(super) fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     } else {
         let mut reader = open_plain_reader(path)?;
         read_metadata_records(path, &mut reader)
+    }
+}
+
+pub(super) fn read_vcf_public_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
+    // Metadata reads can avoid strict full-header parsing. They only need the
+    // #CHROM line plus record fields, which keeps real-world VCF headers from
+    // forcing a strict parser onto the hot path.
+    if is_compressed_vcf(path) {
+        let mut reader = open_compressed_reader(path)?;
+        read_metadata_arrow_records(path, &mut reader)
+    } else {
+        let mut reader = open_plain_reader(path)?;
+        read_metadata_arrow_records(path, &mut reader)
     }
 }
 
@@ -750,6 +766,43 @@ fn read_metadata_records<R: BufRead>(
     };
 
     Ok(MetadataOutput {
+        samples,
+        variants,
+        capabilities,
+    })
+}
+
+fn read_metadata_arrow_records<R: BufRead>(
+    path: &Path,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<MetadataArrowOutput> {
+    let samples = read_sample_records_from_header(path, reader.get_mut())?;
+    let mut variants =
+        VariantMetadataArrowBuffers::with_capacity(VCF_METADATA_INITIAL_VARIANT_CAPACITY);
+    let mut has_phased_genotype_evidence = false;
+    let mut record = noodles::Record::default();
+
+    loop {
+        if reader.read_record(&mut record).map_err(|error| {
+            GenoioError::invalid_source(path, format!("text VCF record error: {error}"))
+        })? == 0
+        {
+            break;
+        }
+
+        if !has_phased_genotype_evidence && text_record_has_phased_genotype(&record) {
+            has_phased_genotype_evidence = true;
+        }
+        append_public_variant_metadata_from_text_record(path, &record, &mut variants)?;
+    }
+
+    let capabilities = if has_phased_genotype_evidence {
+        SourceCapabilities::phased_genotypes()
+    } else {
+        SourceCapabilities::genotype_only()
+    };
+
+    Ok(MetadataArrowOutput {
         samples,
         variants,
         capabilities,
