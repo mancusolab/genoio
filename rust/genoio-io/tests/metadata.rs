@@ -167,6 +167,30 @@ fn bcf_metadata_preserves_samples_variants_and_capabilities() {
 }
 
 #[test]
+fn bcf_public_metadata_arrow_preserves_samples_variants_and_capabilities() {
+    let dir = unique_dir("bcf-metadata-arrow");
+    let path = dir.join("tiny.bcf");
+    write_bcf_file(&path);
+
+    let metadata =
+        genoio_io::read_vcf_public_metadata_arrow(&path).expect("bcf Arrow metadata should parse");
+
+    assert_eq!(
+        metadata
+            .samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s1", "s2"]
+    );
+    assert_eq!(metadata.variants.len(), 2);
+    assert_eq!(metadata.variants.positions, vec![10, 20]);
+    assert!(metadata.capabilities.supports_geno);
+    assert!(metadata.capabilities.supports_haplo);
+    assert!(metadata.capabilities.phased);
+}
+
+#[test]
 fn vcf_haplotype_capability_requires_phased_genotype_evidence() {
     let dir = unique_dir("vcf-phased");
     let path = dir.join("phased.vcf");

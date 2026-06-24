@@ -7,6 +7,7 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 import pytest
+from fixture_writers import write_fixed_width_plink2
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 DATA_ROOT = Path(__file__).parents[1] / "data"
@@ -136,6 +137,46 @@ def test_rust_metadata_payload_is_column_oriented():
     assert hasattr(metadata["variants"], "__arrow_c_stream__")
     assert api.samples_frame(metadata["samples"])["iid"].to_list() == ["S1", "S2", "S3"]
     assert api.variants_frame(metadata["variants"])["id"].to_list() == ["rs1", "rs2", "indel1"]
+
+
+def test_rust_record_backed_metadata_payloads_are_arrow_streams(tmp_path):
+    import genoio._api as api
+
+    bgen_path = tmp_path / "tiny.bgen"
+    _write_tiny_bgen(bgen_path, sample_ids=["bgen_1", "bgen_2"])
+    plink2_prefix = write_fixed_width_plink2(tmp_path)
+
+    sources = [
+        (
+            "plink1",
+            {
+                "bed": str(FIXTURE_ROOT / "plink1" / "tiny.bed"),
+                "bim": str(FIXTURE_ROOT / "plink1" / "tiny.bim"),
+                "fam": str(FIXTURE_ROOT / "plink1" / "tiny.fam"),
+            },
+            ["S1", "S2", "S3"],
+            ["rs1", "rs2", "indel1"],
+        ),
+        (
+            "plink2",
+            {
+                "pgen": str(plink2_prefix.with_suffix(".pgen")),
+                "pvar": str(plink2_prefix.with_suffix(".pvar")),
+                "psam": str(plink2_prefix.with_suffix(".psam")),
+            },
+            ["S1", "S2", "S3"],
+            ["rs1", "rs2", "rs3"],
+        ),
+        ("bgen", {"bgen": str(bgen_path)}, ["bgen_1", "bgen_2"], ["rs1", "rs2"]),
+    ]
+
+    for source_format, members, expected_samples, expected_variants in sources:
+        metadata = api._rust.read_metadata(source_format, members)
+
+        assert hasattr(metadata["samples"], "__arrow_c_stream__")
+        assert hasattr(metadata["variants"], "__arrow_c_stream__")
+        assert api.samples_frame(metadata["samples"])["iid"].to_list() == expected_samples
+        assert api.variants_frame(metadata["variants"])["id"].to_list() == expected_variants
 
 
 def test_vcf_read_metadata_frames_match_metadata_only_frames_exactly():

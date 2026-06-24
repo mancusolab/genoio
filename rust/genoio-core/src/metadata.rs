@@ -212,6 +212,15 @@ impl VariantMetadataArrowBuffers {
         )
     }
 
+    /// Build Arrow-compatible public variant buffers from normalized records.
+    pub fn from_records(variants: &[VariantRecord]) -> Result<Self, GenoioError> {
+        let mut output = Self::with_capacity(variants.len());
+        for variant in variants {
+            output.push_record(variant)?;
+        }
+        Ok(output)
+    }
+
     pub fn len(&self) -> usize {
         self.positions.len()
     }
@@ -227,6 +236,18 @@ pub struct MetadataArrowOutput {
     pub samples: Vec<SampleRecord>,
     pub variants: VariantMetadataArrowBuffers,
     pub capabilities: SourceCapabilities,
+}
+
+impl MetadataArrowOutput {
+    /// Convert row-record metadata into the columnar payload used at the Python boundary.
+    pub fn from_metadata(metadata: MetadataOutput) -> Result<Self, GenoioError> {
+        let variants = VariantMetadataArrowBuffers::from_records(&metadata.variants)?;
+        Ok(Self {
+            samples: metadata.samples,
+            variants,
+            capabilities: metadata.capabilities,
+        })
+    }
 }
 
 /// Complete source metadata returned before or alongside matrix reads.

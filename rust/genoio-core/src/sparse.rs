@@ -83,6 +83,28 @@ pub struct SparseGenotypeMatrixArrowVariants {
 }
 
 impl SparseGenotypeMatrixArrowVariants {
+    /// Convert a legacy sparse matrix result into the columnar variant payload used by PyO3.
+    pub fn from_matrix(
+        matrix: SparseGenotypeMatrix,
+        return_variants: bool,
+    ) -> Result<Self, GenoioError> {
+        let variants = if return_variants {
+            Some(VariantMetadataArrowBuffers::from_records(&matrix.variants)?)
+        } else {
+            None
+        };
+        Self::new(
+            matrix.n_rows,
+            matrix.n_cols,
+            matrix.indptr,
+            matrix.indices,
+            matrix.data,
+            matrix.samples,
+            variants,
+            matrix.diagnostics,
+        )
+    }
+
     /// Build a sparse matrix with optional sample metadata and optional Arrow variant metadata.
     #[expect(
         clippy::too_many_arguments,

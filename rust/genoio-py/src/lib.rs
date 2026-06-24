@@ -11,7 +11,8 @@
 //! backend crates. Python owns user-facing ergonomics, overloads, docstrings,
 //! and public exceptions. This adapter validates Python-owned dictionaries,
 //! translates them into Rust-owned paths/options/filters, calls `genoio-io`,
-//! and converts validated core structs back into Python dictionaries.
+//! and converts validated core structs back into Python dictionaries containing
+//! NumPy arrays and Arrow stream wrappers.
 //!
 //! Long-running reader calls release the GIL only after argument extraction has
 //! produced Rust-owned values. No borrowed Python object crosses
@@ -38,7 +39,7 @@ use arrow_buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use genoio_core::{
     DenseLayout, DenseMissingPolicy, GenoioError, MetadataArrowOutput, SampleMetadataColumns,
-    StringColumnBuffers, VariantMetadataArrowBuffers, VariantMetadataColumns,
+    StringColumnBuffers, VariantMetadataArrowBuffers,
 };
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
@@ -109,7 +110,7 @@ fn validate_read_support(format: &str, kind: &str, dosage: &str, sparse: bool) -
 }
 
 #[pyfunction]
-/// Read source metadata and convert it into Python dictionaries.
+/// Read source metadata and convert it into Python-owned Arrow stream wrappers.
 fn read_metadata(
     py: Python<'_>,
     format: &str,
@@ -152,7 +153,7 @@ fn read_dense_impl(
         read_dense_matrix_for_py(&source, MatrixKind::Genotype, &read_options)
     })?;
 
-    dense_output_to_py(
+    dense_matrix_to_py(
         py,
         output,
         read_options.return_samples,
@@ -184,7 +185,7 @@ fn read_sparse_impl(
         read_sparse_matrix_for_py(&source, MatrixKind::Genotype, &read_options)
     })?;
 
-    sparse_output_to_py(
+    sparse_matrix_to_py(
         py,
         output,
         read_options.return_samples,
@@ -216,7 +217,7 @@ fn read_haplotypes_dense_impl(
         read_dense_matrix_for_py(&source, MatrixKind::Haplotype, &read_options)
     })?;
 
-    dense_output_to_py(
+    dense_matrix_to_py(
         py,
         output,
         read_options.return_samples,
@@ -248,7 +249,7 @@ fn read_haplotypes_sparse_impl(
         read_sparse_matrix_for_py(&source, MatrixKind::Haplotype, &read_options)
     })?;
 
-    sparse_output_to_py(
+    sparse_matrix_to_py(
         py,
         output,
         read_options.return_samples,
@@ -518,38 +519,20 @@ fn validate_read_support_impl(
     }
 }
 
-enum SourceMetadataOutput {
-    Records(genoio_core::MetadataOutput),
-    Arrow(MetadataArrowOutput),
-}
-
-enum DenseMatrixOutput {
-    Records(genoio_core::DenseGenotypeMatrix),
-    ArrowVariants(genoio_core::DenseGenotypeMatrixArrowVariants),
-}
-
-enum SparseMatrixOutput {
-    Records(genoio_core::SparseGenotypeMatrix),
-    ArrowVariants(genoio_core::SparseGenotypeMatrixArrowVariants),
-}
-
-fn read_source_metadata(source: &SourceMembers) -> Result<SourceMetadataOutput, GenoioError> {
+fn read_source_metadata(source: &SourceMembers) -> Result<MetadataArrowOutput, GenoioError> {
     match source {
-        SourceMembers::Vcf { path } => {
-            genoio_io::read_vcf_public_metadata_arrow(path).map(SourceMetadataOutput::Arrow)
+        SourceMembers::Vcf { path } | SourceMembers::Bcf { path } => {
+            genoio_io::read_vcf_public_metadata_arrow(path)
         }
-        SourceMembers::Bcf { path } => {
-            genoio_io::read_vcf_metadata(path).map(SourceMetadataOutput::Records)
-        }
-        SourceMembers::Plink1 { bed, bim, fam } => {
-            genoio_io::read_plink1_metadata(bed, bim, fam).map(SourceMetadataOutput::Records)
-        }
+        SourceMembers::Plink1 { bed, bim, fam } => genoio_io::read_plink1_metadata(bed, bim, fam)
+            .and_then(MetadataArrowOutput::from_metadata),
         SourceMembers::Plink2 { pgen, pvar, psam } => {
-            genoio_io::read_plink2_metadata(pgen, pvar, psam).map(SourceMetadataOutput::Records)
+            genoio_io::read_plink2_metadata(pgen, pvar, psam)
+                .and_then(MetadataArrowOutput::from_metadata)
         }
         SourceMembers::Bgen { bgen, sample } => {
             genoio_io::read_bgen_metadata(bgen, sample.as_deref())
-                .map(SourceMetadataOutput::Records)
+                .and_then(MetadataArrowOutput::from_metadata)
         }
     }
 }
@@ -558,7 +541,7 @@ fn read_dense_matrix_for_py(
     source: &SourceMembers,
     kind: MatrixKind,
     options: &ReadOptions,
-) -> Result<DenseMatrixOutput, GenoioError> {
+) -> Result<genoio_core::DenseGenotypeMatrixArrowVariants, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, false)?;
     match (source, kind, options.dosage) {
         (SourceMembers::Vcf { path }, MatrixKind::Genotype, DosageSource::Hardcall) => {
@@ -571,7 +554,6 @@ fn read_dense_matrix_for_py(
                 options.return_samples,
                 options.return_variants,
             )
-            .map(DenseMatrixOutput::ArrowVariants)
         }
         (SourceMembers::Vcf { path }, MatrixKind::Genotype, DosageSource::Dosage) => {
             genoio_io::read_vcf_dosage_dense_windowed_with_arrow_variants(
@@ -583,7 +565,6 @@ fn read_dense_matrix_for_py(
                 options.return_samples,
                 options.return_variants,
             )
-            .map(DenseMatrixOutput::ArrowVariants)
         }
         (SourceMembers::Vcf { path }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
             genoio_io::read_vcf_haplotypes_dense_windowed_with_arrow_variants(
@@ -595,9 +576,15 @@ fn read_dense_matrix_for_py(
                 options.return_samples,
                 options.return_variants,
             )
-            .map(DenseMatrixOutput::ArrowVariants)
         }
-        _ => read_dense_matrix(source, kind, options).map(DenseMatrixOutput::Records),
+        // Non-VCF backends still produce legacy matrix structs internally.
+        // Normalize them here so the Python boundary has one columnar shape.
+        _ => read_dense_matrix(source, kind, options).and_then(|matrix| {
+            genoio_core::DenseGenotypeMatrixArrowVariants::from_matrix(
+                matrix,
+                options.return_variants,
+            )
+        }),
     }
 }
 
@@ -744,7 +731,7 @@ fn read_sparse_matrix_for_py(
     source: &SourceMembers,
     kind: MatrixKind,
     options: &ReadOptions,
-) -> Result<SparseMatrixOutput, GenoioError> {
+) -> Result<genoio_core::SparseGenotypeMatrixArrowVariants, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, true)?;
     match (source, kind, options.dosage) {
         (SourceMembers::Vcf { path }, MatrixKind::Genotype, DosageSource::Hardcall) => {
@@ -756,7 +743,6 @@ fn read_sparse_matrix_for_py(
                 options.return_samples,
                 options.return_variants,
             )
-            .map(SparseMatrixOutput::ArrowVariants)
         }
         (SourceMembers::Vcf { path }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
             genoio_io::read_vcf_haplotypes_sparse_windowed_with_arrow_variants(
@@ -767,9 +753,15 @@ fn read_sparse_matrix_for_py(
                 options.return_samples,
                 options.return_variants,
             )
-            .map(SparseMatrixOutput::ArrowVariants)
         }
-        _ => read_sparse_matrix(source, kind, options).map(SparseMatrixOutput::Records),
+        // Non-VCF backends still produce legacy matrix structs internally.
+        // Normalize them here so the Python boundary has one columnar shape.
+        _ => read_sparse_matrix(source, kind, options).and_then(|matrix| {
+            genoio_core::SparseGenotypeMatrixArrowVariants::from_matrix(
+                matrix,
+                options.return_variants,
+            )
+        }),
     }
 }
 
@@ -1031,37 +1023,17 @@ fn required_bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool
     value.extract::<bool>()
 }
 
-fn metadata_to_py(py: Python<'_>, output: SourceMetadataOutput) -> PyResult<Py<PyDict>> {
-    match output {
-        SourceMetadataOutput::Records(output) => metadata_records_to_py(py, output),
-        SourceMetadataOutput::Arrow(output) => metadata_arrow_to_py(py, output),
-    }
-}
-
-fn metadata_records_to_py(
-    py: Python<'_>,
-    output: genoio_core::MetadataOutput,
-) -> PyResult<Py<PyDict>> {
-    let genoio_core::MetadataOutput {
-        samples,
-        variants,
-        capabilities,
-    } = output;
-    let dict = PyDict::new(py);
-    dict.set_item("samples", sample_records_to_py(py, samples, false)?)?;
-    dict.set_item("variants", variant_records_to_py(py, variants)?)?;
-    dict.set_item("capabilities", source_capabilities_to_py(py, capabilities)?)?;
-    Ok(dict.unbind())
-}
-
-fn metadata_arrow_to_py(py: Python<'_>, output: MetadataArrowOutput) -> PyResult<Py<PyDict>> {
+fn metadata_to_py(py: Python<'_>, output: MetadataArrowOutput) -> PyResult<Py<PyDict>> {
     let MetadataArrowOutput {
         samples,
         variants,
         capabilities,
     } = output;
     let dict = PyDict::new(py);
-    dict.set_item("samples", sample_records_to_py(py, samples, false)?)?;
+    dict.set_item(
+        "samples",
+        sample_records_to_arrow_frame(py, samples, false)?,
+    )?;
     dict.set_item("variants", variant_arrow_buffers_to_py(py, variants)?)?;
     dict.set_item("capabilities", source_capabilities_to_py(py, capabilities)?)?;
     Ok(dict.unbind())
@@ -1078,84 +1050,7 @@ fn source_capabilities_to_py(
     Ok(capabilities)
 }
 
-fn dense_output_to_py(
-    py: Python<'_>,
-    output: DenseMatrixOutput,
-    return_samples: bool,
-    return_variants: bool,
-    include_haplotype_sample_columns: bool,
-) -> PyResult<Py<PyDict>> {
-    match output {
-        DenseMatrixOutput::Records(output) => dense_to_py(
-            py,
-            output,
-            return_samples,
-            return_variants,
-            include_haplotype_sample_columns,
-        ),
-        DenseMatrixOutput::ArrowVariants(output) => dense_arrow_variants_to_py(
-            py,
-            output,
-            return_samples,
-            return_variants,
-            include_haplotype_sample_columns,
-        ),
-    }
-}
-
-fn dense_to_py(
-    py: Python<'_>,
-    output: genoio_core::DenseGenotypeMatrix,
-    return_samples: bool,
-    return_variants: bool,
-    include_haplotype_sample_columns: bool,
-) -> PyResult<Py<PyDict>> {
-    let genoio_core::DenseGenotypeMatrix {
-        n_samples,
-        n_variants,
-        values,
-        layout,
-        samples,
-        variants,
-        diagnostics: dense_diagnostics,
-    } = output;
-
-    let dict = PyDict::new(py);
-    dict.set_item("values", f32_vec_to_numpy(py, values)?)?;
-    dict.set_item("shape", (n_samples, n_variants))?;
-    // Python assembly uses this tag to reshape variant-major buffers as views
-    // instead of requiring Rust to allocate a physically transposed matrix.
-    dict.set_item("values_layout", dense_layout_to_py(layout))?;
-    if return_samples {
-        dict.set_item(
-            "samples",
-            sample_records_to_py(py, samples, include_haplotype_sample_columns)?,
-        )?;
-    }
-    if return_variants {
-        dict.set_item("variants", variant_records_to_py(py, variants)?)?;
-    }
-
-    let diagnostics = PyDict::new(py);
-    diagnostics.set_item("requested_samples", dense_diagnostics.requested_samples)?;
-    diagnostics.set_item("retained_samples", dense_diagnostics.retained_samples)?;
-    diagnostics.set_item("missing_samples", dense_diagnostics.missing_samples)?;
-    diagnostics.set_item("candidate_variants", dense_diagnostics.candidate_variants)?;
-    diagnostics.set_item("retained_variants", dense_diagnostics.retained_variants)?;
-    diagnostics.set_item(
-        "dropped_metadata_variants",
-        dense_diagnostics.dropped_metadata_variants,
-    )?;
-    diagnostics.set_item(
-        "dropped_genotype_variants",
-        dense_diagnostics.dropped_genotype_variants,
-    )?;
-    dict.set_item("diagnostics", diagnostics)?;
-
-    Ok(dict.unbind())
-}
-
-fn dense_arrow_variants_to_py(
+fn dense_matrix_to_py(
     py: Python<'_>,
     output: genoio_core::DenseGenotypeMatrixArrowVariants,
     return_samples: bool,
@@ -1179,12 +1074,12 @@ fn dense_arrow_variants_to_py(
     if return_samples {
         dict.set_item(
             "samples",
-            sample_records_to_py(py, samples, include_haplotype_sample_columns)?,
+            sample_records_to_arrow_frame(py, samples, include_haplotype_sample_columns)?,
         )?;
     }
     if return_variants {
         let variants = variants.ok_or_else(|| {
-            RustInternalError::new_err("VCF dense read omitted requested variant metadata")
+            RustInternalError::new_err("dense read omitted requested variant metadata")
         })?;
         dict.set_item("variants", variant_arrow_buffers_to_py(py, variants)?)?;
     }
@@ -1215,73 +1110,7 @@ fn dense_layout_to_py(layout: DenseLayout) -> &'static str {
     }
 }
 
-fn sparse_output_to_py(
-    py: Python<'_>,
-    output: SparseMatrixOutput,
-    return_samples: bool,
-    return_variants: bool,
-    include_haplotype_sample_columns: bool,
-) -> PyResult<Py<PyDict>> {
-    match output {
-        SparseMatrixOutput::Records(output) => sparse_to_py(
-            py,
-            output,
-            return_samples,
-            return_variants,
-            include_haplotype_sample_columns,
-        ),
-        SparseMatrixOutput::ArrowVariants(output) => sparse_arrow_variants_to_py(
-            py,
-            output,
-            return_samples,
-            return_variants,
-            include_haplotype_sample_columns,
-        ),
-    }
-}
-
-fn sparse_to_py(
-    py: Python<'_>,
-    output: genoio_core::SparseGenotypeMatrix,
-    return_samples: bool,
-    return_variants: bool,
-    include_haplotype_sample_columns: bool,
-) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new(py);
-    dict.set_item("indptr", usize_vec_to_numpy_i64(py, output.indptr)?)?;
-    dict.set_item("indices", usize_vec_to_numpy_i64(py, output.indices)?)?;
-    dict.set_item("data", f32_vec_to_numpy(py, output.data)?)?;
-    dict.set_item("shape", (output.n_rows, output.n_cols))?;
-    if return_samples {
-        dict.set_item(
-            "samples",
-            sample_records_to_py(py, output.samples, include_haplotype_sample_columns)?,
-        )?;
-    }
-    if return_variants {
-        dict.set_item("variants", variant_records_to_py(py, output.variants)?)?;
-    }
-
-    let diagnostics = PyDict::new(py);
-    diagnostics.set_item("requested_samples", output.diagnostics.requested_samples)?;
-    diagnostics.set_item("retained_samples", output.diagnostics.retained_samples)?;
-    diagnostics.set_item("missing_samples", output.diagnostics.missing_samples)?;
-    diagnostics.set_item("candidate_variants", output.diagnostics.candidate_variants)?;
-    diagnostics.set_item("retained_variants", output.diagnostics.retained_variants)?;
-    diagnostics.set_item(
-        "dropped_metadata_variants",
-        output.diagnostics.dropped_metadata_variants,
-    )?;
-    diagnostics.set_item(
-        "dropped_genotype_variants",
-        output.diagnostics.dropped_genotype_variants,
-    )?;
-    dict.set_item("diagnostics", diagnostics)?;
-
-    Ok(dict.unbind())
-}
-
-fn sparse_arrow_variants_to_py(
+fn sparse_matrix_to_py(
     py: Python<'_>,
     output: genoio_core::SparseGenotypeMatrixArrowVariants,
     return_samples: bool,
@@ -1296,12 +1125,12 @@ fn sparse_arrow_variants_to_py(
     if return_samples {
         dict.set_item(
             "samples",
-            sample_records_to_py(py, output.samples, include_haplotype_sample_columns)?,
+            sample_records_to_arrow_frame(py, output.samples, include_haplotype_sample_columns)?,
         )?;
     }
     if return_variants {
         let variants = output.variants.ok_or_else(|| {
-            RustInternalError::new_err("VCF sparse read omitted requested variant metadata")
+            RustInternalError::new_err("sparse read omitted requested variant metadata")
         })?;
         dict.set_item("variants", variant_arrow_buffers_to_py(py, variants)?)?;
     }
@@ -1350,7 +1179,7 @@ where
     PyArray1::from_vec(py, values).into_any()
 }
 
-fn sample_records_to_py(
+fn sample_records_to_arrow_frame(
     py: Python<'_>,
     samples: Vec<genoio_core::SampleRecord>,
     include_haplotype_columns: bool,
@@ -1360,19 +1189,6 @@ fn sample_records_to_py(
         py,
         ArrowMetadataFrame {
             batch: sample_columns_to_arrow_batch(columns)?,
-        },
-    )
-}
-
-fn variant_records_to_py(
-    py: Python<'_>,
-    variants: Vec<genoio_core::VariantRecord>,
-) -> PyResult<Py<ArrowMetadataFrame>> {
-    let columns = VariantMetadataColumns::from_records(variants);
-    Py::new(
-        py,
-        ArrowMetadataFrame {
-            batch: variant_columns_to_arrow_batch(columns)?,
         },
     )
 }
@@ -1446,30 +1262,6 @@ fn string_array_from_buffers(column: StringColumnBuffers) -> StringArray {
     // offsets beginning at 0. There are no nulls in the public VCF variant
     // metadata columns.
     unsafe { StringArray::new_unchecked(OffsetBuffer::new_unchecked(offsets), values, None) }
-}
-
-fn variant_columns_to_arrow_batch(columns: VariantMetadataColumns) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("chrom", DataType::Utf8, false),
-        Field::new("pos", DataType::Int64, false),
-        Field::new("id", DataType::Utf8, false),
-        Field::new("a0", DataType::Utf8, false),
-        Field::new("a1", DataType::Utf8, false),
-    ]));
-    let positions = columns
-        .positions
-        .into_iter()
-        .map(i64::from)
-        .collect::<Vec<_>>();
-    let arrays: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(columns.chroms)) as ArrayRef,
-        Arc::new(Int64Array::from(positions)) as ArrayRef,
-        Arc::new(StringArray::from_iter_values(columns.ids)) as ArrayRef,
-        Arc::new(StringArray::from_iter_values(columns.a0s)) as ArrayRef,
-        Arc::new(StringArray::from_iter_values(columns.a1s)) as ArrayRef,
-    ];
-
-    RecordBatch::try_new(schema, arrays).map_err(arrow_error_to_py)
 }
 
 fn optional_usize_to_i64_array(values: Vec<Option<usize>>) -> PyResult<Int64Array> {

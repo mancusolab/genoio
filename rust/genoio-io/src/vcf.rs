@@ -33,12 +33,10 @@ pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
     text::read_vcf_metadata(path)
 }
 
-/// Read text VCF sample metadata and public variant metadata as Arrow-compatible buffers.
+/// Read VCF/BCF sample metadata and public variant metadata as Arrow-compatible buffers.
 pub fn read_vcf_public_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
     if is_bcf_path(path) {
-        return Err(GenoioError::unsupported(
-            "Arrow-buffered public metadata reads are only implemented for text VCF",
-        ));
+        return bcf::read_metadata(path).and_then(MetadataArrowOutput::from_metadata);
     }
     text::read_vcf_public_metadata_arrow(path)
 }
