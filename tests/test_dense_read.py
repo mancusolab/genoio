@@ -325,6 +325,56 @@ def test_dense_bgen_dosage_default_missing_policy_returns_nan(tmp_path):
     assert np.isclose(G[1, 1], 0.8, atol=2.0 / 255.0)
 
 
+def test_dense_bgen_dosage_accepts_missing_samples_with_packed_zero_probabilities(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_bgen_dosage(tmp_path, missing=True, pack_missing_probabilities=True))
+
+    G = dataset.read(dosage="dosage")
+
+    assert G.shape == (2, 2)
+    np.testing.assert_allclose(
+        G[0],
+        np.array([0.29803923, 1.0], dtype=np.float32),
+        rtol=0,
+        atol=2.0 / 255.0,
+    )
+    assert np.isnan(G[1, 0])
+    assert np.isclose(G[1, 1], 0.8, atol=2.0 / 255.0)
+
+
+def test_dense_bgen_phased_dosage_accepts_missing_samples_with_packed_zero_probabilities(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(
+        write_bgen_dosage(
+            tmp_path,
+            phased=True,
+            pack_missing_probabilities=True,
+            variant_calls=[
+                [(255, 0), None],
+                [(0, 255), (128, 64)],
+            ],
+        )
+    )
+
+    G = dataset.read(dosage="dosage")
+
+    assert G.shape == (2, 2)
+    np.testing.assert_allclose(
+        G,
+        np.array(
+            [
+                [1.0, 1.0],
+                [np.nan, 1.2470589],
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=2.0 / 255.0,
+    )
+
+
 def test_dense_bgen_dosage_missing_raise_rejects_missing_calls(tmp_path):
     import genoio
 

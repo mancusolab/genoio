@@ -22,6 +22,7 @@ const DOSAGE_TOLERANCE: f32 = 1.0e-6;
 const UNPHASED_8_BIT_DEPTH: u8 = 8;
 const PHASED_16_BIT_DEPTH: u8 = 16;
 const PHASED_16_BYTES_PER_SAMPLE: usize = 4;
+const BIALLELIC_DIPLOID_STORED_PROBABILITY_COUNT: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BgenPhase {
@@ -39,6 +40,14 @@ impl BgenPhase {
             )),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackedProbabilityLayout {
+    /// Packed probabilities are present only for samples not marked missing.
+    CalledSamplesOnly,
+    /// Packed probabilities are present for every sample; missing entries are ignored.
+    AllSamples,
 }
 
 /// Reused scratch space for BGEN probability payload I/O.
@@ -428,17 +437,13 @@ impl<'a> Layout2ProbabilityHeader<'a> {
         })
     }
 
-    fn required_packed_probability_bytes(&self, path: &Path) -> Result<usize> {
-        let stored_probability_count = match self.phase {
-            // For the supported biallelic diploid subset, unphased records
-            // store P(A0/A0) and P(A0/A1); P(A1/A1) is inferred.
-            BgenPhase::Unphased => 2,
-            // Phased records store one non-last allele probability per
-            // haplotype, so diploid biallelic records also store two values.
-            BgenPhase::Phased => 2,
-        };
-        let bits = u64::from(self.non_missing_sample_count)
-            .checked_mul(stored_probability_count)
+    fn required_packed_probability_bytes_for_sample_count(
+        &self,
+        path: &Path,
+        sample_count: u32,
+    ) -> Result<usize> {
+        let bits = u64::from(sample_count)
+            .checked_mul(BIALLELIC_DIPLOID_STORED_PROBABILITY_COUNT as u64)
             .and_then(|value| value.checked_mul(u64::from(self.bit_depth)))
             .ok_or_else(|| {
                 GenoioError::invalid_source(
@@ -457,6 +462,7 @@ impl<'a> Layout2ProbabilityHeader<'a> {
 struct DecodedDosageVariant<'a> {
     header: Layout2ProbabilityHeader<'a>,
     packed_probabilities: &'a [u8],
+    packed_probability_layout: PackedProbabilityLayout,
 }
 
 impl<'a> DecodedDosageVariant<'a> {
@@ -473,23 +479,35 @@ impl<'a> DecodedDosageVariant<'a> {
             variant_allele_count,
         )?;
         let packed_probabilities = &payload[header.byte_len..];
-        let required_packed_len = header.required_packed_probability_bytes(path)?;
-        if packed_probabilities.len() < required_packed_len {
+        let called_packed_len = header.required_packed_probability_bytes_for_sample_count(
+            path,
+            header.non_missing_sample_count,
+        )?;
+        let all_sample_packed_len =
+            header.required_packed_probability_bytes_for_sample_count(path, header.sample_count)?;
+        if packed_probabilities.len() < called_packed_len {
             return Err(GenoioError::invalid_source(
                 path,
                 "bgen probability block is truncated; packed probabilities are shorter than declared non-missing samples",
             ));
         }
-        if packed_probabilities.len() > required_packed_len {
-            return Err(GenoioError::invalid_source(
-                path,
-                "bgen probability block has trailing packed probability bytes",
-            ));
-        }
+        let packed_probability_layout = match packed_probabilities.len() {
+            len if len == called_packed_len => PackedProbabilityLayout::CalledSamplesOnly,
+            len if header.has_missing && len == all_sample_packed_len => {
+                PackedProbabilityLayout::AllSamples
+            }
+            _ => {
+                return Err(GenoioError::invalid_source(
+                    path,
+                    "bgen probability block has trailing packed probability bytes",
+                ));
+            }
+        };
 
         Ok(Self {
             header,
             packed_probabilities,
+            packed_probability_layout,
         })
     }
 
@@ -523,6 +541,7 @@ impl<'a> DecodedDosageVariant<'a> {
         for &ploidy_byte in self.header.sample_ploidies {
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
+                self.skip_missing_sample_probabilities(path, &mut bit_reader)?;
                 missing_indices.push(values.len());
                 values.push(0.0);
                 continue;
@@ -588,6 +607,7 @@ impl<'a> DecodedDosageVariant<'a> {
                 path,
                 self.header.sample_ploidies,
                 self.packed_probabilities,
+                self.packed_probability_layout,
                 source_indices,
                 values,
                 missing_indices,
@@ -606,6 +626,7 @@ impl<'a> DecodedDosageVariant<'a> {
                 .is_some_and(|&source_index| source_index == sample_index);
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
+                self.skip_missing_sample_probabilities(path, &mut bit_reader)?;
                 if is_selected {
                     missing_indices.push(values.len());
                     values.push(0.0);
@@ -666,6 +687,7 @@ impl<'a> DecodedDosageVariant<'a> {
                 .is_some_and(|&source_index| source_index == sample_index);
             let is_missing = ploidy_byte & 0b1000_0000 != 0;
             if is_missing {
+                self.skip_missing_sample_probabilities(path, &mut bit_reader)?;
                 if is_selected {
                     let haplotype_row = haplotype_values.len();
                     haplotype_missing_indices
@@ -692,12 +714,29 @@ impl<'a> DecodedDosageVariant<'a> {
 
         Ok(())
     }
+
+    fn skip_missing_sample_probabilities(
+        &self,
+        path: &Path,
+        bit_reader: &mut LittleEndianBitReader<'_>,
+    ) -> Result<()> {
+        if self.packed_probability_layout == PackedProbabilityLayout::AllSamples {
+            // Some writers emit placeholder probabilities for samples already
+            // marked missing in the ploidy bytes. Consume and ignore them so
+            // subsequent called samples remain aligned.
+            for _ in 0..BIALLELIC_DIPLOID_STORED_PROBABILITY_COUNT {
+                bit_reader.read_u32(path, self.header.bit_depth)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn decode_selected_unphased_8bit_a1_dosages(
     path: &Path,
     ploidies: &[u8],
     packed_probabilities: &[u8],
+    packed_probability_layout: PackedProbabilityLayout,
     source_indices: &[usize],
     values: &mut Vec<f32>,
     missing_indices: &mut Vec<usize>,
@@ -718,6 +757,13 @@ fn decode_selected_unphased_8bit_a1_dosages(
         let is_selected = source_indices[selected_cursor] == sample_index;
         let is_missing = ploidy_byte & 0b1000_0000 != 0;
         if is_missing {
+            if packed_probability_layout == PackedProbabilityLayout::AllSamples {
+                probability_cursor = skip_missing_unphased_8bit_sample_probabilities(
+                    path,
+                    packed_probabilities,
+                    probability_cursor,
+                )?;
+            }
             if is_selected {
                 missing_indices.push(values.len());
                 values.push(0.0);
@@ -744,6 +790,25 @@ fn decode_selected_unphased_8bit_a1_dosages(
     }
     debug_assert_eq!(selected_cursor, source_indices.len());
     Ok(())
+}
+
+fn skip_missing_unphased_8bit_sample_probabilities(
+    path: &Path,
+    packed_probabilities: &[u8],
+    probability_cursor: usize,
+) -> Result<usize> {
+    let probability_cursor = probability_cursor
+        .checked_add(BIALLELIC_DIPLOID_STORED_PROBABILITY_COUNT)
+        .ok_or_else(|| {
+            GenoioError::invalid_source(path, "bgen sample probability offset is out of range")
+        })?;
+    if probability_cursor > packed_probabilities.len() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "bgen packed probability bytes are truncated",
+        ));
+    }
+    Ok(probability_cursor)
 }
 
 fn decode_selected_called_unphased_8bit_a1_dosages(
@@ -1203,6 +1268,58 @@ mod tests {
         }
     }
 
+    fn layout2_payload_with_missing_zero_probabilities(
+        bit_depth: u8,
+        ploidies: &[u8],
+        calls: &[Option<(u32, u32)>],
+        phased: u8,
+    ) -> Vec<u8> {
+        assert_eq!(ploidies.len(), calls.len());
+        let mut payload = Vec::new();
+        payload.extend_from_slice(
+            &u32::try_from(calls.len())
+                .expect("sample count should fit u32")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(&2_u16.to_le_bytes());
+        payload.push(2);
+        payload.push(2);
+        payload.extend_from_slice(ploidies);
+        payload.push(phased);
+        payload.push(bit_depth);
+        append_packed_probabilities_for_all_samples(&mut payload, bit_depth, calls);
+        payload
+    }
+
+    fn append_packed_probabilities_for_all_samples(
+        output: &mut Vec<u8>,
+        bit_depth: u8,
+        calls: &[Option<(u32, u32)>],
+    ) {
+        let mut current_byte = 0_u8;
+        let mut bits_in_current_byte = 0_u8;
+        for call in calls {
+            let (first, second) = call.unwrap_or((0, 0));
+            append_packed_probability_value(
+                output,
+                &mut current_byte,
+                &mut bits_in_current_byte,
+                bit_depth,
+                first,
+            );
+            append_packed_probability_value(
+                output,
+                &mut current_byte,
+                &mut bits_in_current_byte,
+                bit_depth,
+                second,
+            );
+        }
+        if bits_in_current_byte > 0 {
+            output.push(current_byte);
+        }
+    }
+
     fn append_packed_probability_value(
         output: &mut Vec<u8>,
         current_byte: &mut u8,
@@ -1279,6 +1396,58 @@ mod tests {
     }
 
     #[test]
+    fn decoded_dosage_variant_accepts_missing_samples_with_packed_zero_probabilities() {
+        let payload = layout2_payload_with_missing_zero_probabilities(
+            3,
+            &[2, 0b1000_0010, 2],
+            &[Some((7, 0)), None, Some((4, 2))],
+            1,
+        );
+        let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 3, 2)
+            .expect("payload with missing zero probabilities should decode");
+
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        decoded
+            .decode_source_order(Path::new("test.bgen"), &mut values, &mut missing)
+            .expect("phased dosages should stay aligned after missing sample");
+
+        let denominator = 7.0_f32;
+        let expected = [1.0, 0.0, 2.0 - 4.0 / denominator - 2.0 / denominator];
+        assert_eq!(missing, vec![1]);
+        for (observed, expected) in values.iter().zip(expected) {
+            assert!((observed - expected).abs() <= f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn decoded_dosage_variant_accepts_selected_8bit_packed_missing_probabilities() {
+        let payload = layout2_payload_with_missing_zero_probabilities(
+            8,
+            &[2, 0b1000_0010, 2],
+            &[Some((255, 0)), None, Some((64, 64))],
+            0,
+        );
+        let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 3, 2)
+            .expect("payload with missing zero probabilities should decode");
+
+        let mut values = Vec::new();
+        let mut missing = Vec::new();
+        decoded
+            .decode_selected_source_order(
+                Path::new("test.bgen"),
+                &[1, 2],
+                &mut values,
+                &mut missing,
+            )
+            .expect("selected dosages should stay aligned after missing sample");
+
+        assert_eq!(missing, vec![0]);
+        assert_eq!(values[0], 0.0);
+        assert!((values[1] - expected_dosage(8, 64, 64)).abs() <= f32::EPSILON);
+    }
+
+    #[test]
     fn decoded_dosage_variant_rejects_impossible_probability_sum() {
         let payload = layout2_payload(1, &[2], &[Some((1, 1))], 0);
         let decoded = DecodedDosageVariant::decode(Path::new("test.bgen"), &payload, 1, 2)
@@ -1304,6 +1473,7 @@ mod tests {
             Path::new("test.bgen"),
             &ploidies,
             &packed,
+            PackedProbabilityLayout::CalledSamplesOnly,
             &[1, 3],
             &mut values,
             &mut missing,
@@ -1323,6 +1493,7 @@ mod tests {
             Path::new("test.bgen"),
             &[2],
             &[200, 100],
+            PackedProbabilityLayout::CalledSamplesOnly,
             &[0],
             &mut values,
             &mut missing,

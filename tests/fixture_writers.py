@@ -28,10 +28,16 @@ def write_bgen_dosage(
     *,
     missing: bool = False,
     phased: bool = False,
+    pack_missing_probabilities: bool = False,
     sample_ids: list[str] | None = None,
     variant_calls: list[list[tuple[int, int] | None]] | None = None,
     variants: list[tuple[str, str, str, int, list[str]]] | None = None,
 ) -> Path:
+    """Write a tiny Layout 2 BGEN dosage fixture.
+
+    `pack_missing_probabilities` mirrors writers that emit zero-valued packed
+    probabilities for samples already marked missing in the ploidy bytes.
+    """
     path = tmp_path / "dosage.bgen"
     contents = bytearray()
     flags = (2 << 2) | (1 << 31)
@@ -64,7 +70,14 @@ def write_bgen_dosage(
 
     for variant, calls in zip(variants, variant_calls, strict=True):
         contents.extend(_bgen_variant_identifying_data(*variant))
-        contents.extend(_bgen_dosage_probability_block(8, calls, phased=phased))
+        contents.extend(
+            _bgen_dosage_probability_block(
+                8,
+                calls,
+                phased=phased,
+                pack_missing_probabilities=pack_missing_probabilities,
+            )
+        )
 
     path.write_bytes(contents)
     return path
@@ -108,6 +121,7 @@ def _bgen_dosage_probability_block(
     calls: list[tuple[int, int] | None],
     *,
     phased: bool = False,
+    pack_missing_probabilities: bool = False,
 ) -> bytes:
     payload = bytearray()
     payload.extend(len(calls).to_bytes(4, "little"))
@@ -117,7 +131,8 @@ def _bgen_dosage_probability_block(
     payload.extend((2 if call is not None else 0b1000_0010) for call in calls)
     payload.extend((1 if phased else 0).to_bytes(1, "little"))
     payload.extend(bit_depth.to_bytes(1, "little"))
-    _append_bgen_packed_probabilities(payload, bit_depth, calls)
+    packed_calls = _packed_bgen_calls(calls, pack_missing_probabilities=pack_missing_probabilities)
+    _append_bgen_packed_probabilities(payload, bit_depth, packed_calls)
 
     contents = bytearray()
     contents.extend(len(payload).to_bytes(4, "little"))
@@ -125,16 +140,24 @@ def _bgen_dosage_probability_block(
     return bytes(contents)
 
 
+def _packed_bgen_calls(
+    calls: list[tuple[int, int] | None],
+    *,
+    pack_missing_probabilities: bool,
+) -> list[tuple[int, int]]:
+    if pack_missing_probabilities:
+        return [(0, 0) if call is None else call for call in calls]
+    return [call for call in calls if call is not None]
+
+
 def _append_bgen_packed_probabilities(
     output: bytearray,
     bit_depth: int,
-    calls: list[tuple[int, int] | None],
+    calls: list[tuple[int, int]],
 ) -> None:
     current_byte = 0
     bits_in_current_byte = 0
     for call in calls:
-        if call is None:
-            continue
         for value in call:
             for bit_index in range(bit_depth):
                 current_byte |= ((value >> bit_index) & 1) << bits_in_current_byte
