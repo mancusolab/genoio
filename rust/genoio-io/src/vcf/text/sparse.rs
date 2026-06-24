@@ -33,9 +33,32 @@ use super::record::{
 };
 use super::{VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn};
 
-enum TextSparseReadOutput {
+pub(super) enum TextSparseReadOutput {
     Records(SparseGenotypeMatrix),
     Arrow(SparseGenotypeMatrixArrowVariants),
+}
+
+impl TextSparseReadOutput {
+    pub(super) fn into_records(self, context: &'static str) -> Result<SparseGenotypeMatrix> {
+        match self {
+            Self::Records(output) => Ok(output),
+            Self::Arrow(_) => Err(GenoioError::internal_contract(format!(
+                "text VCF {context} row read returned Arrow metadata"
+            ))),
+        }
+    }
+
+    pub(super) fn into_arrow(
+        self,
+        context: &'static str,
+    ) -> Result<SparseGenotypeMatrixArrowVariants> {
+        match self {
+            Self::Arrow(output) => Ok(output),
+            Self::Records(_) => Err(GenoioError::internal_contract(format!(
+                "text VCF {context} Arrow read returned row metadata"
+            ))),
+        }
+    }
 }
 
 pub(super) fn read_sparse_records<R: BufRead>(
@@ -46,7 +69,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<SparseGenotypeMatrix> {
-    match read_sparse_records_with_metadata(
+    read_sparse_records_with_metadata(
         path,
         variant_filter,
         variant_window,
@@ -58,50 +81,15 @@ pub(super) fn read_sparse_records<R: BufRead>(
         VariantMetadataSinkKind::Records,
         selection,
         reader,
-    )? {
-        TextSparseReadOutput::Records(output) => Ok(output),
-        TextSparseReadOutput::Arrow(_) => Err(GenoioError::internal_contract(
-            "text VCF sparse row read returned Arrow metadata",
-        )),
-    }
-}
-
-pub(super) fn read_sparse_records_arrow_variants<R: BufRead>(
-    path: &Path,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    source_region: Option<&RegionPredicate>,
-    metadata_return: VcfMetadataReturn,
-    selection: DenseSampleSelection,
-    reader: &mut noodles::io::Reader<R>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
-    let sink_kind = if metadata_return.variants {
-        VariantMetadataSinkKind::Arrow
-    } else {
-        VariantMetadataSinkKind::None
-    };
-    match read_sparse_records_with_metadata(
-        path,
-        variant_filter,
-        variant_window,
-        source_region,
-        metadata_return,
-        sink_kind,
-        selection,
-        reader,
-    )? {
-        TextSparseReadOutput::Arrow(output) => Ok(output),
-        TextSparseReadOutput::Records(_) => Err(GenoioError::internal_contract(
-            "text VCF sparse Arrow read returned row metadata",
-        )),
-    }
+    )?
+    .into_records("sparse")
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "sparse VCF loop receives prevalidated output mode, selection, and reader state"
 )]
-fn read_sparse_records_with_metadata<R: BufRead>(
+pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
@@ -230,7 +218,7 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<SparseGenotypeMatrix> {
-    match read_haplotype_sparse_records_with_metadata(
+    read_haplotype_sparse_records_with_metadata(
         path,
         variant_filter,
         variant_window,
@@ -242,50 +230,15 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
         VariantMetadataSinkKind::Records,
         selection,
         reader,
-    )? {
-        TextSparseReadOutput::Records(output) => Ok(output),
-        TextSparseReadOutput::Arrow(_) => Err(GenoioError::internal_contract(
-            "text VCF haplotype sparse row read returned Arrow metadata",
-        )),
-    }
-}
-
-pub(super) fn read_haplotype_sparse_records_arrow_variants<R: BufRead>(
-    path: &Path,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    source_region: Option<&RegionPredicate>,
-    metadata_return: VcfMetadataReturn,
-    selection: DenseSampleSelection,
-    reader: &mut noodles::io::Reader<R>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
-    let sink_kind = if metadata_return.variants {
-        VariantMetadataSinkKind::Arrow
-    } else {
-        VariantMetadataSinkKind::None
-    };
-    match read_haplotype_sparse_records_with_metadata(
-        path,
-        variant_filter,
-        variant_window,
-        source_region,
-        metadata_return,
-        sink_kind,
-        selection,
-        reader,
-    )? {
-        TextSparseReadOutput::Arrow(output) => Ok(output),
-        TextSparseReadOutput::Records(_) => Err(GenoioError::internal_contract(
-            "text VCF haplotype sparse Arrow read returned row metadata",
-        )),
-    }
+    )?
+    .into_records("haplotype sparse")
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "sparse VCF loop receives prevalidated output mode, selection, and reader state"
 )]
-fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
+pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
