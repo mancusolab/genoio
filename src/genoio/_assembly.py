@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import polars as pl
@@ -26,10 +26,16 @@ _DENSE_LAYOUT_SAMPLE_MAJOR = "sample_major"
 _DENSE_LAYOUT_VARIANT_MAJOR = "variant_major"
 
 
+@runtime_checkable
+class ArrowStreamExportable(Protocol):
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object: ...
+
+
 MetadataColumns = dict[str, Sequence[Any]]
+MetadataPayload = MetadataColumns | ArrowStreamExportable
 
 
-def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool = False) -> pl.DataFrame:
+def samples_frame(columns: MetadataPayload, *, include_haplotype_columns: bool = False) -> pl.DataFrame:
     r"""Build the public sample metadata frame from Rust sample columns.
 
     **Arguments:**
@@ -42,10 +48,13 @@ def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool =
 
     Polars DataFrame in source sample order.
     """
-    frame = pl.DataFrame(
-        {column: columns[column] for column in _SAMPLE_COLUMNS},
-        schema=_SAMPLE_COLUMNS,
-    )
+    if isinstance(columns, ArrowStreamExportable):
+        frame = _frame_from_arrow_stream(columns, _SAMPLE_COLUMNS)
+        if not include_haplotype_columns:
+            return frame.select(_SAMPLE_COLUMNS)
+        return frame
+
+    frame = pl.DataFrame({column: columns[column] for column in _SAMPLE_COLUMNS}, schema=_SAMPLE_COLUMNS)
     haplotype_indices = columns.get("haplotype_index")
     if include_haplotype_columns or (haplotype_indices and all(index is not None for index in haplotype_indices)):
         source_sample_indices = columns.get("source_sample_index", [None] * frame.height)
@@ -57,7 +66,7 @@ def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool =
     return frame
 
 
-def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
+def variants_frame(columns: MetadataPayload) -> pl.DataFrame:
     r"""Build the public variant metadata frame from Rust variant columns.
 
     **Arguments:**
@@ -70,14 +79,23 @@ def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
     limited to the columns needed to interpret matrix columns and counted
     allele orientation.
     """
-    # Rust returns in-memory columns across the PyO3 boundary. Eager DataFrame
-    # assembly is the adapter boundary here because there is no file scan or
-    # deferred query plan for Polars to optimize, and source order is already
-    # the downstream contract.
+    if isinstance(columns, ArrowStreamExportable):
+        return _frame_from_arrow_stream(columns, _VARIANT_COLUMNS).select(_VARIANT_COLUMNS)
+
     return pl.DataFrame(
         {column: columns[column] for column in _VARIANT_COLUMNS},
         schema=_VARIANT_COLUMNS,
     )
+
+
+def _frame_from_arrow_stream(payload: ArrowStreamExportable, columns: list[str]) -> pl.DataFrame:
+    frame = pl.from_arrow(payload)
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError(f"Arrow metadata payload produced {type(frame).__name__}, expected Polars DataFrame")
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise KeyError(f"Arrow metadata payload missing columns: {missing}")
+    return frame
 
 
 def dense_array_from_rust(

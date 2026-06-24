@@ -131,10 +131,10 @@ def test_rust_metadata_payload_is_column_oriented():
 
     metadata = api._rust.read_metadata("vcf", {"vcf": str(FIXTURE_ROOT / "vcf" / "tiny.vcf")})
 
-    assert isinstance(metadata["samples"], dict)
-    assert isinstance(metadata["variants"], dict)
-    assert metadata["samples"]["iid"] == ["S1", "S2", "S3"]
-    assert metadata["variants"]["id"] == ["rs1", "rs2", "indel1"]
+    assert hasattr(metadata["samples"], "__arrow_c_stream__")
+    assert hasattr(metadata["variants"], "__arrow_c_stream__")
+    assert api.samples_frame(metadata["samples"])["iid"].to_list() == ["S1", "S2", "S3"]
+    assert api.variants_frame(metadata["variants"])["id"].to_list() == ["rs1", "rs2", "indel1"]
 
 
 def test_plink1_samples_and_variants_normalize_metadata_without_decoding_bed():

@@ -31,14 +31,20 @@
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, StructArray};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use genoio_core::{
     DenseLayout, DenseMissingPolicy, GenoioError, SampleMetadataColumns, VariantMetadataColumns,
 };
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
+use pyo3::types::{
+    PyAny, PyBool, PyCapsule, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple,
+};
+use pyo3_arrow::ffi::{to_stream_pycapsule, ArrayIterator};
 
 pyo3::create_exception!(genoio_py, RustInvalidSourceError, PyException);
 pyo3::create_exception!(genoio_py, RustUnsupportedRepresentationError, PyException);
@@ -51,6 +57,37 @@ const SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED: &str =
     "sparse dosage-backed genotype reads are intentionally unsupported";
 const PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED: &str =
     "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; use dense haplotype reads with sparse=False";
+
+#[pyclass(module = "genoio._rust", skip_from_py_object)]
+#[derive(Clone)]
+struct ArrowMetadataFrame {
+    batch: RecordBatch,
+}
+
+#[pymethods]
+impl ArrowMetadataFrame {
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<Bound<'py, PyCapsule>>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let schema = self.batch.schema();
+        let fields = schema.fields().clone();
+        let metadata = schema.metadata.clone();
+        let arrays = vec![Ok(
+            Arc::new(StructArray::from(self.batch.clone())) as ArrayRef
+        )];
+        let array_reader = Box::new(ArrayIterator::new(
+            arrays,
+            Field::new_struct("", fields, false)
+                .with_metadata(metadata)
+                .into(),
+        ));
+
+        to_stream_pycapsule(py, array_reader, requested_schema).map_err(PyErr::from)
+    }
+}
 
 #[pyfunction]
 /// Return the Rust IO backend name for Python diagnostics.
@@ -722,6 +759,7 @@ fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(read_sparse, module)?)?;
     module.add_function(wrap_pyfunction!(read_haplotypes_dense, module)?)?;
     module.add_function(wrap_pyfunction!(read_haplotypes_sparse, module)?)?;
+    module.add_class::<ArrowMetadataFrame>()?;
     Ok(())
 }
 
@@ -1026,38 +1064,103 @@ fn sample_records_to_py(
     py: Python<'_>,
     samples: Vec<genoio_core::SampleRecord>,
     include_haplotype_columns: bool,
-) -> PyResult<Bound<'_, PyDict>> {
+) -> PyResult<Py<ArrowMetadataFrame>> {
     let columns = SampleMetadataColumns::from_records(samples, include_haplotype_columns);
-
-    let dict = PyDict::new(py);
-    dict.set_item("fid", columns.fids)?;
-    dict.set_item("iid", columns.iids)?;
-    dict.set_item("father", columns.fathers)?;
-    dict.set_item("mother", columns.mothers)?;
-    dict.set_item("sex", columns.sexes)?;
-    dict.set_item("phenotype", columns.phenotypes)?;
-    if let Some(source_sample_indices) = columns.source_sample_indices {
-        dict.set_item("source_sample_index", source_sample_indices)?;
-    }
-    if let Some(haplotype_indices) = columns.haplotype_indices {
-        dict.set_item("haplotype_index", haplotype_indices)?;
-    }
-    Ok(dict)
+    Py::new(
+        py,
+        ArrowMetadataFrame {
+            batch: sample_columns_to_arrow_batch(columns)?,
+        },
+    )
 }
 
 fn variant_records_to_py(
     py: Python<'_>,
     variants: Vec<genoio_core::VariantRecord>,
-) -> PyResult<Bound<'_, PyDict>> {
+) -> PyResult<Py<ArrowMetadataFrame>> {
     let columns = VariantMetadataColumns::from_records(variants);
+    Py::new(
+        py,
+        ArrowMetadataFrame {
+            batch: variant_columns_to_arrow_batch(columns)?,
+        },
+    )
+}
 
-    let dict = PyDict::new(py);
-    dict.set_item("chrom", columns.chroms)?;
-    dict.set_item("pos", columns.positions)?;
-    dict.set_item("id", columns.ids)?;
-    dict.set_item("a0", columns.a0s)?;
-    dict.set_item("a1", columns.a1s)?;
-    Ok(dict)
+fn sample_columns_to_arrow_batch(columns: SampleMetadataColumns) -> PyResult<RecordBatch> {
+    let mut fields = vec![
+        Field::new("fid", DataType::Utf8, true),
+        Field::new("iid", DataType::Utf8, false),
+        Field::new("father", DataType::Utf8, true),
+        Field::new("mother", DataType::Utf8, true),
+        Field::new("sex", DataType::Utf8, true),
+        Field::new("phenotype", DataType::Utf8, true),
+    ];
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter(columns.fids)) as ArrayRef,
+        Arc::new(StringArray::from_iter_values(columns.iids)) as ArrayRef,
+        Arc::new(StringArray::from_iter(columns.fathers)) as ArrayRef,
+        Arc::new(StringArray::from_iter(columns.mothers)) as ArrayRef,
+        Arc::new(StringArray::from_iter(columns.sexes)) as ArrayRef,
+        Arc::new(StringArray::from_iter(columns.phenotypes)) as ArrayRef,
+    ];
+
+    if let Some(source_sample_indices) = columns.source_sample_indices {
+        fields.push(Field::new("source_sample_index", DataType::Int64, true));
+        arrays.push(Arc::new(optional_usize_to_i64_array(source_sample_indices)?) as ArrayRef);
+    }
+    if let Some(haplotype_indices) = columns.haplotype_indices {
+        fields.push(Field::new("haplotype_index", DataType::Int64, true));
+        arrays.push(Arc::new(optional_usize_to_i64_array(haplotype_indices)?) as ArrayRef);
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(arrow_error_to_py)
+}
+
+fn variant_columns_to_arrow_batch(columns: VariantMetadataColumns) -> PyResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("pos", DataType::Int64, false),
+        Field::new("id", DataType::Utf8, false),
+        Field::new("a0", DataType::Utf8, false),
+        Field::new("a1", DataType::Utf8, false),
+    ]));
+    let positions = columns
+        .positions
+        .into_iter()
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(columns.chroms)) as ArrayRef,
+        Arc::new(Int64Array::from(positions)) as ArrayRef,
+        Arc::new(StringArray::from_iter_values(columns.ids)) as ArrayRef,
+        Arc::new(StringArray::from_iter_values(columns.a0s)) as ArrayRef,
+        Arc::new(StringArray::from_iter_values(columns.a1s)) as ArrayRef,
+    ];
+
+    RecordBatch::try_new(schema, arrays).map_err(arrow_error_to_py)
+}
+
+fn optional_usize_to_i64_array(values: Vec<Option<usize>>) -> PyResult<Int64Array> {
+    let values = values
+        .into_iter()
+        .map(|value| {
+            value
+                .map(|value| {
+                    i64::try_from(value).map_err(|_| {
+                        pyo3::exceptions::PyOverflowError::new_err(
+                            "array index exceeds supported Arrow int64 range",
+                        )
+                    })
+                })
+                .transpose()
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Int64Array::from(values))
+}
+
+fn arrow_error_to_py(error: ArrowError) -> PyErr {
+    RustInternalError::new_err(format!("failed to build Arrow metadata payload: {error}"))
 }
 
 fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
