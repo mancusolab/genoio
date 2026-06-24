@@ -15,8 +15,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, RegionPredicate, SparseGenotypeMatrix, VariantFilter, VariantRecord,
-    VariantWindow,
+    PartialFilterDecision, RegionPredicate, SparseGenotypeMatrix,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantRecord, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -31,6 +31,12 @@ use super::gt::{
 use super::record::{
     skip_variant_for_region, validate_biallelic_variant, variant_record_from_text_record,
 };
+use super::{VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn};
+
+enum TextSparseReadOutput {
+    Records(SparseGenotypeMatrix),
+    Arrow(SparseGenotypeMatrixArrowVariants),
+}
 
 pub(super) fn read_sparse_records<R: BufRead>(
     path: &Path,
@@ -40,6 +46,71 @@ pub(super) fn read_sparse_records<R: BufRead>(
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<SparseGenotypeMatrix> {
+    match read_sparse_records_with_metadata(
+        path,
+        variant_filter,
+        variant_window,
+        source_region,
+        VcfMetadataReturn {
+            samples: true,
+            variants: true,
+        },
+        VariantMetadataSinkKind::Records,
+        selection,
+        reader,
+    )? {
+        TextSparseReadOutput::Records(output) => Ok(output),
+        TextSparseReadOutput::Arrow(_) => Err(GenoioError::internal_contract(
+            "text VCF sparse row read returned Arrow metadata",
+        )),
+    }
+}
+
+pub(super) fn read_sparse_records_arrow_variants<R: BufRead>(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    source_region: Option<&RegionPredicate>,
+    metadata_return: VcfMetadataReturn,
+    selection: DenseSampleSelection,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    let sink_kind = if metadata_return.variants {
+        VariantMetadataSinkKind::Arrow
+    } else {
+        VariantMetadataSinkKind::None
+    };
+    match read_sparse_records_with_metadata(
+        path,
+        variant_filter,
+        variant_window,
+        source_region,
+        metadata_return,
+        sink_kind,
+        selection,
+        reader,
+    )? {
+        TextSparseReadOutput::Arrow(output) => Ok(output),
+        TextSparseReadOutput::Records(_) => Err(GenoioError::internal_contract(
+            "text VCF sparse Arrow read returned row metadata",
+        )),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "sparse VCF loop receives prevalidated output mode, selection, and reader state"
+)]
+fn read_sparse_records_with_metadata<R: BufRead>(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    source_region: Option<&RegionPredicate>,
+    metadata_return: VcfMetadataReturn,
+    variant_sink_kind: VariantMetadataSinkKind,
+    selection: DenseSampleSelection,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<TextSparseReadOutput> {
     let DenseSampleSelection {
         source_indices,
         samples,
@@ -51,7 +122,7 @@ pub(super) fn read_sparse_records<R: BufRead>(
     indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = Vec::with_capacity(variant_capacity);
+    let mut variants = VariantMetadataSink::new(variant_sink_kind, variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = noodles::Record::default();
     let mut decoded = GtDecodeBuffers::with_capacity(source_indices.len());
@@ -113,21 +184,42 @@ pub(super) fn read_sparse_records<R: BufRead>(
         // Genotype sparse columns store minor-allele dosage by convention.
         flip_values_to_minor_allele(decoded.values_mut(), &mut variant);
         append_sparse_column(&mut indptr, &mut indices, &mut data, decoded.values());
-        variants.push(variant);
+        variants.push_variant(variant)?;
     }
 
-    let n_variants = variants.len();
+    let n_variants = indptr.len().saturating_sub(1);
     diagnostics.retained_variants = n_variants;
-    SparseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        indptr,
-        indices,
-        data,
-        samples,
-        variants,
-        diagnostics,
-    )
+    let samples = if metadata_return.samples {
+        samples
+    } else {
+        Vec::new()
+    };
+    match variant_sink_kind {
+        VariantMetadataSinkKind::Records => SparseGenotypeMatrix::new(
+            n_samples,
+            n_variants,
+            indptr,
+            indices,
+            data,
+            samples,
+            variants.into_records()?,
+            diagnostics,
+        )
+        .map(TextSparseReadOutput::Records),
+        VariantMetadataSinkKind::Arrow | VariantMetadataSinkKind::None => {
+            SparseGenotypeMatrixArrowVariants::new(
+                n_samples,
+                n_variants,
+                indptr,
+                indices,
+                data,
+                samples,
+                variants.into_arrow()?,
+                diagnostics,
+            )
+            .map(TextSparseReadOutput::Arrow)
+        }
+    }
 }
 
 pub(super) fn read_haplotype_sparse_records<R: BufRead>(
@@ -138,19 +230,88 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
 ) -> Result<SparseGenotypeMatrix> {
+    match read_haplotype_sparse_records_with_metadata(
+        path,
+        variant_filter,
+        variant_window,
+        source_region,
+        VcfMetadataReturn {
+            samples: true,
+            variants: true,
+        },
+        VariantMetadataSinkKind::Records,
+        selection,
+        reader,
+    )? {
+        TextSparseReadOutput::Records(output) => Ok(output),
+        TextSparseReadOutput::Arrow(_) => Err(GenoioError::internal_contract(
+            "text VCF haplotype sparse row read returned Arrow metadata",
+        )),
+    }
+}
+
+pub(super) fn read_haplotype_sparse_records_arrow_variants<R: BufRead>(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    source_region: Option<&RegionPredicate>,
+    metadata_return: VcfMetadataReturn,
+    selection: DenseSampleSelection,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    let sink_kind = if metadata_return.variants {
+        VariantMetadataSinkKind::Arrow
+    } else {
+        VariantMetadataSinkKind::None
+    };
+    match read_haplotype_sparse_records_with_metadata(
+        path,
+        variant_filter,
+        variant_window,
+        source_region,
+        metadata_return,
+        sink_kind,
+        selection,
+        reader,
+    )? {
+        TextSparseReadOutput::Arrow(output) => Ok(output),
+        TextSparseReadOutput::Records(_) => Err(GenoioError::internal_contract(
+            "text VCF haplotype sparse Arrow read returned row metadata",
+        )),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "sparse VCF loop receives prevalidated output mode, selection, and reader state"
+)]
+fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
+    path: &Path,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    source_region: Option<&RegionPredicate>,
+    metadata_return: VcfMetadataReturn,
+    variant_sink_kind: VariantMetadataSinkKind,
+    selection: DenseSampleSelection,
+    reader: &mut noodles::io::Reader<R>,
+) -> Result<TextSparseReadOutput> {
     let DenseSampleSelection {
         source_indices,
         samples,
         mut diagnostics,
     } = selection;
     let n_samples = samples.len() * 2;
-    let samples = haplotype_sample_records(&samples, &source_indices);
+    let output_samples = if metadata_return.samples {
+        haplotype_sample_records(&samples, &source_indices)
+    } else {
+        Vec::new()
+    };
     let variant_capacity = variant_window.map_or(0, |window| window.len);
     let mut indptr = Vec::with_capacity(variant_capacity.saturating_add(1));
     indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = Vec::with_capacity(variant_capacity);
+    let mut variants = VariantMetadataSink::new(variant_sink_kind, variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = noodles::Record::default();
     let mut decoded = HaplotypeSparseDecodeBuffers::with_capacity(source_indices.len());
@@ -222,21 +383,37 @@ pub(super) fn read_haplotype_sparse_records<R: BufRead>(
             &mut variant,
             &decoded,
         );
-        variants.push(variant);
+        variants.push_variant(variant)?;
     }
 
-    let n_variants = variants.len();
+    let n_variants = indptr.len().saturating_sub(1);
     diagnostics.retained_variants = n_variants;
-    SparseGenotypeMatrix::new(
-        n_samples,
-        n_variants,
-        indptr,
-        indices,
-        data,
-        samples,
-        variants,
-        diagnostics,
-    )
+    match variant_sink_kind {
+        VariantMetadataSinkKind::Records => SparseGenotypeMatrix::new(
+            n_samples,
+            n_variants,
+            indptr,
+            indices,
+            data,
+            output_samples,
+            variants.into_records()?,
+            diagnostics,
+        )
+        .map(TextSparseReadOutput::Records),
+        VariantMetadataSinkKind::Arrow | VariantMetadataSinkKind::None => {
+            SparseGenotypeMatrixArrowVariants::new(
+                n_samples,
+                n_variants,
+                indptr,
+                indices,
+                data,
+                output_samples,
+                variants.into_arrow()?,
+                diagnostics,
+            )
+            .map(TextSparseReadOutput::Arrow)
+        }
+    }
 }
 
 fn append_haplotype_minor_sparse_column(

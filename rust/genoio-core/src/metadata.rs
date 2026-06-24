@@ -202,6 +202,16 @@ impl VariantMetadataArrowBuffers {
         Ok(())
     }
 
+    pub fn push_record(&mut self, variant: &VariantRecord) -> Result<(), GenoioError> {
+        self.push(
+            &variant.chrom,
+            i64::from(variant.pos),
+            &variant.id,
+            &variant.a0,
+            &variant.a1,
+        )
+    }
+
     pub fn len(&self) -> usize {
         self.positions.len()
     }

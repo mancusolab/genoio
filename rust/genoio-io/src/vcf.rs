@@ -8,8 +8,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, GenoioError, MetadataArrowOutput, MetadataOutput,
-    SampleRecord, SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, GenoioError,
+    MetadataArrowOutput, MetadataOutput, SampleRecord, SparseGenotypeMatrix,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 use noodles_vcf::variant::record::samples::{
@@ -166,6 +167,88 @@ pub fn read_vcf_dense_windowed_with_threads_and_missing_policy(
     )
 }
 
+pub fn read_vcf_dense_windowed_with_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    read_vcf_dense_windowed_with_threads_and_arrow_variants(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        return_samples,
+        return_variants,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python Arrow metadata bridge passes sample and variant return choices explicitly"
+)]
+pub fn read_vcf_dense_windowed_with_threads_and_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+    threads: Option<usize>,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    validate_threaded_read_support(path, threads)?;
+    if is_bcf_path(path) {
+        return Err(GenoioError::unsupported(
+            "Arrow-buffered VCF dense reads are only implemented for text VCF",
+        ));
+    }
+
+    read_text_vcf_with_optional_index(
+        path,
+        variant_filter,
+        || {
+            text::empty_vcf_dense_arrow_variants(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        |region| {
+            text::read_vcf_dense_arrow_variants_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                region,
+                missing_policy,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        || {
+            text::read_vcf_dense_arrow_variants(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                missing_policy,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+    )
+}
+
 fn read_bcf_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -292,6 +375,88 @@ pub fn read_vcf_dosage_dense_windowed_with_threads_and_missing_policy(
     )
 }
 
+pub fn read_vcf_dosage_dense_windowed_with_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    read_vcf_dosage_dense_windowed_with_threads_and_arrow_variants(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        return_samples,
+        return_variants,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python Arrow metadata bridge passes sample and variant return choices explicitly"
+)]
+pub fn read_vcf_dosage_dense_windowed_with_threads_and_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+    threads: Option<usize>,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    validate_threaded_read_support(path, threads)?;
+    if is_bcf_path(path) {
+        return Err(GenoioError::unsupported(
+            "Arrow-buffered VCF dosage dense reads are only implemented for text VCF",
+        ));
+    }
+
+    read_text_vcf_with_optional_index(
+        path,
+        variant_filter,
+        || {
+            text::empty_vcf_dense_arrow_variants(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        |region| {
+            text::read_vcf_dosage_dense_arrow_variants_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                region,
+                missing_policy,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        || {
+            text::read_vcf_dosage_dense_arrow_variants(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                missing_policy,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+    )
+}
+
 fn read_bcf_dosage_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -368,6 +533,79 @@ pub fn read_vcf_sparse_windowed_with_threads(
                 requested_samples,
                 variant_filter,
                 variant_window,
+                threads,
+            )
+        },
+    )
+}
+
+pub fn read_vcf_sparse_windowed_with_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    read_vcf_sparse_windowed_with_threads_and_arrow_variants(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        return_samples,
+        return_variants,
+        None,
+    )
+}
+
+pub fn read_vcf_sparse_windowed_with_threads_and_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+    threads: Option<usize>,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    validate_threaded_read_support(path, threads)?;
+    if is_bcf_path(path) {
+        return Err(GenoioError::unsupported(
+            "Arrow-buffered VCF sparse reads are only implemented for text VCF",
+        ));
+    }
+
+    read_text_vcf_with_optional_index(
+        path,
+        variant_filter,
+        || {
+            text::empty_vcf_sparse_arrow_variants(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        |region| {
+            text::read_vcf_sparse_arrow_variants_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                region,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        || {
+            text::read_vcf_sparse_arrow_variants(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
@@ -507,6 +745,88 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy(
     )
 }
 
+pub fn read_vcf_haplotypes_dense_windowed_with_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    read_vcf_haplotypes_dense_windowed_with_threads_and_arrow_variants(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        return_samples,
+        return_variants,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python Arrow metadata bridge passes sample and variant return choices explicitly"
+)]
+pub fn read_vcf_haplotypes_dense_windowed_with_threads_and_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+    threads: Option<usize>,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    validate_threaded_read_support(path, threads)?;
+    if is_bcf_path(path) {
+        return Err(GenoioError::unsupported(
+            "Arrow-buffered VCF haplotype dense reads are only implemented for text VCF",
+        ));
+    }
+
+    read_text_vcf_with_optional_index(
+        path,
+        variant_filter,
+        || {
+            text::empty_vcf_haplotypes_dense_arrow_variants(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        |region| {
+            text::read_vcf_haplotypes_dense_arrow_variants_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                region,
+                missing_policy,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        || {
+            text::read_vcf_haplotypes_dense_arrow_variants(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                missing_policy,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+    )
+}
+
 fn read_bcf_haplotypes_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
@@ -588,6 +908,79 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
                 requested_samples,
                 variant_filter,
                 variant_window,
+                threads,
+            )
+        },
+    )
+}
+
+pub fn read_vcf_haplotypes_sparse_windowed_with_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    read_vcf_haplotypes_sparse_windowed_with_threads_and_arrow_variants(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        return_samples,
+        return_variants,
+        None,
+    )
+}
+
+pub fn read_vcf_haplotypes_sparse_windowed_with_threads_and_arrow_variants(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+    threads: Option<usize>,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    validate_threaded_read_support(path, threads)?;
+    if is_bcf_path(path) {
+        return Err(GenoioError::unsupported(
+            "Arrow-buffered VCF haplotype sparse reads are only implemented for text VCF",
+        ));
+    }
+
+    read_text_vcf_with_optional_index(
+        path,
+        variant_filter,
+        || {
+            text::empty_vcf_haplotypes_sparse_arrow_variants(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        |region| {
+            text::read_vcf_haplotypes_sparse_arrow_variants_indexed(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                region,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
+        || {
+            text::read_vcf_haplotypes_sparse_arrow_variants(
+                path,
+                requested_samples,
+                variant_filter,
+                variant_window,
+                return_samples,
+                return_variants,
                 threads,
             )
         },

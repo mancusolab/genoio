@@ -6,7 +6,8 @@
 //! transpose.
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, SampleRecord, VariantFilter, VariantRecord,
+    DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
+    SampleRecord, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
 };
 
 use crate::error::Result;
@@ -155,6 +156,45 @@ impl TextDenseOutput {
                     diagnostics,
                 },
                 matrix_only,
+            ),
+        }
+    }
+
+    pub(super) fn finish_arrow_variants(
+        self,
+        n_variants: usize,
+        samples: Vec<SampleRecord>,
+        variants: Option<VariantMetadataArrowBuffers>,
+        diagnostics: genoio_core::DenseDiagnostics,
+    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+        match self {
+            Self::SampleMajor {
+                n_samples,
+                row_width,
+                mut values,
+                ..
+            } => {
+                shrink_sample_major_width(&mut values, n_samples, row_width, n_variants);
+                DenseGenotypeMatrixArrowVariants::new_with_layout(
+                    n_samples,
+                    n_variants,
+                    values,
+                    DenseLayout::SampleMajor,
+                    samples,
+                    variants,
+                    diagnostics,
+                )
+            }
+            Self::VariantMajor {
+                n_samples, values, ..
+            } => DenseGenotypeMatrixArrowVariants::new_with_layout(
+                n_samples,
+                n_variants,
+                values,
+                DenseLayout::VariantMajor,
+                samples,
+                variants,
+                diagnostics,
             ),
         }
     }

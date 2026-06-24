@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::{GenoioError, SampleRecord, VariantRecord};
+use crate::{GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord};
 
 /// Counts describing source selection and variant filtering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -148,6 +148,63 @@ impl DenseGenotypeMatrix {
             layout,
             samples: Vec::new(),
             variants: Vec::new(),
+            diagnostics,
+        })
+    }
+}
+
+/// Dense genotype matrix with public variants staged in Arrow-compatible buffers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DenseGenotypeMatrixArrowVariants {
+    pub n_samples: usize,
+    pub n_variants: usize,
+    pub values: Vec<f32>,
+    pub layout: DenseLayout,
+    pub samples: Vec<SampleRecord>,
+    pub variants: Option<VariantMetadataArrowBuffers>,
+    pub diagnostics: DenseDiagnostics,
+}
+
+impl DenseGenotypeMatrixArrowVariants {
+    /// Build a dense matrix with optional sample metadata and optional Arrow variant metadata.
+    pub fn new_with_layout(
+        n_samples: usize,
+        n_variants: usize,
+        values: Vec<f32>,
+        layout: DenseLayout,
+        samples: Vec<SampleRecord>,
+        variants: Option<VariantMetadataArrowBuffers>,
+        diagnostics: DenseDiagnostics,
+    ) -> Result<Self, GenoioError> {
+        validate_dense_values(n_samples, n_variants, values.len())?;
+        if !samples.is_empty() && samples.len() != n_samples {
+            return Err(GenoioError::invalid_source(
+                "<dense>",
+                format!(
+                    "sample metadata length {} does not match n_samples {n_samples}",
+                    samples.len()
+                ),
+            ));
+        }
+        if let Some(variants) = variants.as_ref() {
+            if variants.len() != n_variants {
+                return Err(GenoioError::invalid_source(
+                    "<dense>",
+                    format!(
+                        "variant metadata length {} does not match n_variants {n_variants}",
+                        variants.len()
+                    ),
+                ));
+            }
+        }
+
+        Ok(Self {
+            n_samples,
+            n_variants,
+            values,
+            layout,
+            samples,
+            variants,
             diagnostics,
         })
     }
