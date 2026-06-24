@@ -23,3 +23,12 @@ def test_text_vcf_backend_has_no_row_variant_sink():
     assert "TextDenseReadOutput::Records" not in combined
     assert "TextSparseReadOutput::Records" not in combined
     assert 'into_records("sparse")' not in combined
+
+
+def test_pyo3_adapter_does_not_normalize_row_matrices():
+    source = Path("rust/genoio-py/src/lib.rs").read_text()
+
+    assert "DenseGenotypeMatrixArrowVariants::from_matrix" not in source
+    assert "SparseGenotypeMatrixArrowVariants::from_matrix" not in source
+    assert "fn read_dense_matrix(" not in source
+    assert "fn read_sparse_matrix(" not in source

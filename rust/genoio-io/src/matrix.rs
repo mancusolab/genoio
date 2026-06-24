@@ -6,8 +6,9 @@
 //! layouts, and construct the public dense or sparse core structs.
 
 use genoio_core::{
-    DenseDiagnostics, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, GenoioError,
-    SampleRecord, SparseGenotypeMatrix, VariantRecord,
+    DenseDiagnostics, DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants, DenseLayout,
+    DenseMissingPolicy, GenoioError, SampleRecord, SparseGenotypeMatrix,
+    SparseGenotypeMatrixArrowVariants, VariantRecord,
 };
 
 use crate::error::Result;
@@ -100,6 +101,28 @@ pub(crate) fn finish_variant_major_dense_matrix(
             diagnostics,
         )
     }
+}
+
+pub(crate) fn dense_matrix_to_arrow_variants(
+    mut matrix: DenseGenotypeMatrix,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    if !return_samples {
+        matrix.samples.clear();
+    }
+    DenseGenotypeMatrixArrowVariants::from_matrix(matrix, return_variants)
+}
+
+pub(crate) fn sparse_matrix_to_arrow_variants(
+    mut matrix: SparseGenotypeMatrix,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    if !return_samples {
+        matrix.samples.clear();
+    }
+    SparseGenotypeMatrixArrowVariants::from_matrix(matrix, return_variants)
 }
 
 pub(crate) fn shrink_sample_major_width<T: Copy>(

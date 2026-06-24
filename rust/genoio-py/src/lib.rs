@@ -524,15 +524,14 @@ fn read_source_metadata(source: &SourceMembers) -> Result<MetadataArrowOutput, G
         SourceMembers::Vcf { path } | SourceMembers::Bcf { path } => {
             genoio_io::read_vcf_public_metadata_arrow(path)
         }
-        SourceMembers::Plink1 { bed, bim, fam } => genoio_io::read_plink1_metadata(bed, bim, fam)
-            .and_then(MetadataArrowOutput::from_metadata),
+        SourceMembers::Plink1 { bed, bim, fam } => {
+            genoio_io::read_plink1_metadata_arrow(bed, bim, fam)
+        }
         SourceMembers::Plink2 { pgen, pvar, psam } => {
-            genoio_io::read_plink2_metadata(pgen, pvar, psam)
-                .and_then(MetadataArrowOutput::from_metadata)
+            genoio_io::read_plink2_metadata_arrow(pgen, pvar, psam)
         }
         SourceMembers::Bgen { bgen, sample } => {
-            genoio_io::read_bgen_metadata(bgen, sample.as_deref())
-                .and_then(MetadataArrowOutput::from_metadata)
+            genoio_io::read_bgen_metadata_arrow(bgen, sample.as_deref())
         }
     }
 }
@@ -544,95 +543,47 @@ fn read_dense_matrix_for_py(
 ) -> Result<genoio_core::DenseGenotypeMatrixArrowVariants, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, false)?;
     match (source, kind, options.dosage) {
-        (SourceMembers::Vcf { path }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_dense_windowed_with_arrow_variants(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.missing,
-                options.return_samples,
-                options.return_variants,
-            )
-        }
-        (SourceMembers::Vcf { path }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_vcf_dosage_dense_windowed_with_arrow_variants(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.missing,
-                options.return_samples,
-                options.return_variants,
-            )
-        }
-        (SourceMembers::Vcf { path }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_haplotypes_dense_windowed_with_arrow_variants(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.missing,
-                options.return_samples,
-                options.return_variants,
-            )
-        }
-        // Non-VCF backends still produce legacy matrix structs internally.
-        // Normalize them here so the Python boundary has one columnar shape.
-        _ => read_dense_matrix(source, kind, options).and_then(|matrix| {
-            genoio_core::DenseGenotypeMatrixArrowVariants::from_matrix(
-                matrix,
-                options.return_variants,
-            )
-        }),
-    }
-}
-
-fn read_dense_matrix(
-    source: &SourceMembers,
-    kind: MatrixKind,
-    options: &ReadOptions,
-) -> Result<genoio_core::DenseGenotypeMatrix, GenoioError> {
-    validate_read_support_impl(source.format(), kind, options.dosage, false)?;
-    match (source, kind, options.dosage) {
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_vcf_dense_windowed_with_arrow_variants(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Genotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_vcf_dosage_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_vcf_dosage_dense_windowed_with_arrow_variants(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_haplotypes_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_vcf_haplotypes_dense_windowed_with_arrow_variants(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_plink1_dense_windowed_with_missing_policy(
+            genoio_io::read_plink1_dense_windowed_with_arrow_variants(
                 bed,
                 bim,
                 fam,
@@ -640,14 +591,15 @@ fn read_dense_matrix(
                 options.variant_filter.as_ref(),
                 options.variant_window,
                 options.missing,
-                options.matrix_only,
+                options.return_samples,
+                options.return_variants,
             )
         }
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_plink2_dense_windowed_with_arrow_variants(
             pgen,
             pvar,
             psam,
@@ -655,13 +607,14 @@ fn read_dense_matrix(
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_dosage_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_plink2_dosage_dense_windowed_with_arrow_variants(
             pgen,
             pvar,
             psam,
@@ -669,13 +622,14 @@ fn read_dense_matrix(
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_haplotypes_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_plink2_haplotypes_dense_windowed_with_arrow_variants(
             pgen,
             pvar,
             psam,
@@ -683,13 +637,14 @@ fn read_dense_matrix(
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
+        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
             pgen,
             pvar,
             psam,
@@ -697,28 +652,31 @@ fn read_dense_matrix(
             options.variant_filter.as_ref(),
             options.variant_window,
             options.missing,
-            options.matrix_only,
+            options.return_samples,
+            options.return_variants,
         ),
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_dosage_dense_windowed_with_missing_policy(
+            genoio_io::read_bgen_dosage_dense_windowed_with_arrow_variants(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
                 options.missing,
-                options.matrix_only,
+                options.return_samples,
+                options.return_variants,
             )
         }
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Haplotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
+            genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
                 options.missing,
-                options.matrix_only,
+                options.return_samples,
+                options.return_variants,
             )
         }
         _ => Err(GenoioError::internal_contract(
@@ -734,97 +692,69 @@ fn read_sparse_matrix_for_py(
 ) -> Result<genoio_core::SparseGenotypeMatrixArrowVariants, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, true)?;
     match (source, kind, options.dosage) {
-        (SourceMembers::Vcf { path }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_sparse_windowed_with_arrow_variants(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.return_samples,
-                options.return_variants,
-            )
-        }
-        (SourceMembers::Vcf { path }, MatrixKind::Haplotype, DosageSource::Hardcall) => {
-            genoio_io::read_vcf_haplotypes_sparse_windowed_with_arrow_variants(
-                path,
-                options.requested_samples.as_deref(),
-                options.variant_filter.as_ref(),
-                options.variant_window,
-                options.return_samples,
-                options.return_variants,
-            )
-        }
-        // Non-VCF backends still produce legacy matrix structs internally.
-        // Normalize them here so the Python boundary has one columnar shape.
-        _ => read_sparse_matrix(source, kind, options).and_then(|matrix| {
-            genoio_core::SparseGenotypeMatrixArrowVariants::from_matrix(
-                matrix,
-                options.return_variants,
-            )
-        }),
-    }
-}
-
-fn read_sparse_matrix(
-    source: &SourceMembers,
-    kind: MatrixKind,
-    options: &ReadOptions,
-) -> Result<genoio_core::SparseGenotypeMatrix, GenoioError> {
-    validate_read_support_impl(source.format(), kind, options.dosage, true)?;
-    match (source, kind, options.dosage) {
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_sparse_windowed(
+        ) => genoio_io::read_vcf_sparse_windowed_with_arrow_variants(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_haplotypes_sparse_windowed(
+        ) => genoio_io::read_vcf_haplotypes_sparse_windowed_with_arrow_variants(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.return_samples,
+            options.return_variants,
         ),
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_plink1_sparse_windowed(
+            genoio_io::read_plink1_sparse_windowed_with_arrow_variants(
                 bed,
                 bim,
                 fam,
                 options.requested_samples.as_deref(),
                 options.variant_filter.as_ref(),
                 options.variant_window,
+                options.return_samples,
+                options.return_variants,
             )
         }
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_sparse_windowed(
+        ) => genoio_io::read_plink2_sparse_windowed_with_arrow_variants(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.return_samples,
+            options.return_variants,
         ),
         (
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_haplotypes_sparse_windowed(
+        ) => genoio_io::read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
             pgen,
             pvar,
             psam,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
             options.variant_window,
+            options.return_samples,
+            options.return_variants,
         ),
         _ => Err(GenoioError::internal_contract(
             "read support validation accepted unsupported sparse dispatch",
@@ -892,7 +822,6 @@ struct ReadOptions {
     missing: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-    matrix_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -922,7 +851,6 @@ fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
         missing: missing_policy_option(options)?,
         return_samples: bool_option(options, "return_samples")?,
         return_variants: bool_option(options, "return_variants")?,
-        matrix_only: required_bool_option(options, "matrix_only")?,
     })
 }
 
@@ -1007,18 +935,6 @@ fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
     };
     if value.is_none() {
         return Ok(false);
-    }
-    value.extract::<bool>()
-}
-
-fn required_bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
-    let value = options
-        .get_item(key)?
-        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("missing option: {key}")))?;
-    if value.is_none() {
-        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "{key} must be a bool"
-        )));
     }
     value.extract::<bool>()
 }

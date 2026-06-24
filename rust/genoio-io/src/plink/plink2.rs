@@ -7,7 +7,11 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, MetadataOutput, SourceCapabilities, VariantFilter};
+use genoio_core::{
+    DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, GenoioError, MetadataArrowOutput,
+    MetadataOutput, SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantWindow,
+};
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
@@ -17,6 +21,7 @@ use crate::hardcall::HardcallBatch as PackedVariantBatch;
 use crate::hardcall::PackedHardcalls as PackedGenotypes;
 #[cfg(test)]
 use crate::hardcall::HARDCALL_BATCH_SIZE;
+use crate::matrix::{dense_matrix_to_arrow_variants, sparse_matrix_to_arrow_variants};
 
 mod dense;
 mod dosage;
@@ -71,6 +76,181 @@ pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<Met
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })
+}
+
+/// Read PLINK2 metadata with variant metadata staged as Arrow-compatible buffers.
+pub fn read_plink2_metadata_arrow(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+) -> Result<MetadataArrowOutput> {
+    read_plink2_metadata(pgen, pvar, psam).and_then(MetadataArrowOutput::from_metadata)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arrow facade mirrors dense read options plus metadata return choices"
+)]
+pub fn read_plink2_dense_windowed_with_arrow_variants(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    let matrix_only = !return_samples && !return_variants;
+    read_plink2_dense_windowed_with_missing_policy(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        matrix_only,
+    )
+    .and_then(|matrix| dense_matrix_to_arrow_variants(matrix, return_samples, return_variants))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arrow facade mirrors dense dosage read options plus metadata return choices"
+)]
+pub fn read_plink2_dosage_dense_windowed_with_arrow_variants(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    let matrix_only = !return_samples && !return_variants;
+    read_plink2_dosage_dense_windowed_with_missing_policy(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        matrix_only,
+    )
+    .and_then(|matrix| dense_matrix_to_arrow_variants(matrix, return_samples, return_variants))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arrow facade mirrors haplotype dense read options plus metadata return choices"
+)]
+pub fn read_plink2_haplotypes_dense_windowed_with_arrow_variants(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    let matrix_only = !return_samples && !return_variants;
+    read_plink2_haplotypes_dense_windowed_with_missing_policy(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        matrix_only,
+    )
+    .and_then(|matrix| dense_matrix_to_arrow_variants(matrix, return_samples, return_variants))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arrow facade mirrors haplotype dosage read options plus metadata return choices"
+)]
+pub fn read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    let matrix_only = !return_samples && !return_variants;
+    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        matrix_only,
+    )
+    .and_then(|matrix| dense_matrix_to_arrow_variants(matrix, return_samples, return_variants))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arrow facade mirrors sparse read options plus metadata return choices"
+)]
+pub fn read_plink2_sparse_windowed_with_arrow_variants(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    read_plink2_sparse_windowed(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+    )
+    .and_then(|matrix| sparse_matrix_to_arrow_variants(matrix, return_samples, return_variants))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Arrow facade mirrors haplotype sparse read options plus metadata return choices"
+)]
+pub fn read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    read_plink2_haplotypes_sparse_windowed(
+        pgen,
+        pvar,
+        psam,
+        requested_samples,
+        variant_filter,
+        variant_window,
+    )
+    .and_then(|matrix| sparse_matrix_to_arrow_variants(matrix, return_samples, return_variants))
 }
 
 #[cfg(test)]
