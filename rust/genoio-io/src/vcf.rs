@@ -20,7 +20,6 @@ use noodles_vcf::variant::record::samples::{
 
 use self::policy::read_text_vcf_with_optional_index;
 use crate::error::Result;
-use crate::matrix::{dense_matrix_to_arrow_variants, sparse_matrix_to_arrow_variants};
 
 mod bcf;
 mod policy;
@@ -203,17 +202,15 @@ pub fn read_vcf_dense_windowed_with_threads_and_arrow_variants(
 ) -> Result<DenseGenotypeMatrixArrowVariants> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_dense_windowed(
+        return bcf::read_dense_windowed_with_arrow_variants(
             path,
             requested_samples,
             variant_filter,
             variant_window,
             missing_policy,
-            !return_samples && !return_variants,
-        )
-        .and_then(|matrix| {
-            dense_matrix_to_arrow_variants(matrix, return_samples, return_variants)
-        });
+            return_samples,
+            return_variants,
+        );
     }
 
     read_text_vcf_with_optional_index(
@@ -419,17 +416,15 @@ pub fn read_vcf_dosage_dense_windowed_with_threads_and_arrow_variants(
 ) -> Result<DenseGenotypeMatrixArrowVariants> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_dosage_dense_windowed(
+        return bcf::read_dosage_dense_windowed_with_arrow_variants(
             path,
             requested_samples,
             variant_filter,
             variant_window,
             missing_policy,
-            !return_samples && !return_variants,
-        )
-        .and_then(|matrix| {
-            dense_matrix_to_arrow_variants(matrix, return_samples, return_variants)
-        });
+            return_samples,
+            return_variants,
+        );
     }
 
     read_text_vcf_with_optional_index(
@@ -584,10 +579,14 @@ pub fn read_vcf_sparse_windowed_with_threads_and_arrow_variants(
 ) -> Result<SparseGenotypeMatrixArrowVariants> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_sparse_windowed(path, requested_samples, variant_filter, variant_window)
-            .and_then(|matrix| {
-                sparse_matrix_to_arrow_variants(matrix, return_samples, return_variants)
-            });
+        return bcf::read_sparse_windowed_with_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            return_samples,
+            return_variants,
+        );
     }
 
     read_text_vcf_with_optional_index(
@@ -798,17 +797,15 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads_and_arrow_variants(
 ) -> Result<DenseGenotypeMatrixArrowVariants> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_haplotypes_dense_windowed(
+        return bcf::read_haplotypes_dense_windowed_with_arrow_variants(
             path,
             requested_samples,
             variant_filter,
             variant_window,
             missing_policy,
-            !return_samples && !return_variants,
-        )
-        .and_then(|matrix| {
-            dense_matrix_to_arrow_variants(matrix, return_samples, return_variants)
-        });
+            return_samples,
+            return_variants,
+        );
     }
 
     read_text_vcf_with_optional_index(
@@ -968,15 +965,14 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads_and_arrow_variants(
 ) -> Result<SparseGenotypeMatrixArrowVariants> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_haplotypes_sparse_windowed(
+        return bcf::read_haplotypes_sparse_windowed_with_arrow_variants(
             path,
             requested_samples,
             variant_filter,
             variant_window,
-        )
-        .and_then(|matrix| {
-            sparse_matrix_to_arrow_variants(matrix, return_samples, return_variants)
-        });
+            return_samples,
+            return_variants,
+        );
     }
 
     read_text_vcf_with_optional_index(

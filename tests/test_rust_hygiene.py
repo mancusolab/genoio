@@ -95,3 +95,10 @@ def test_bgen_arrow_backend_does_not_wrap_row_matrices():
     for function_name in wrapped_entry_points:
         wrapper = re.compile(rf"pub fn {function_name}[\s\S]*?dense_matrix_to_arrow_variants")
         assert wrapper.search(source) is None
+
+
+def test_bcf_arrow_backend_does_not_wrap_row_matrices():
+    source = Path("rust/genoio-io/src/vcf.rs").read_text()
+
+    assert "dense_matrix_to_arrow_variants" not in source
+    assert "sparse_matrix_to_arrow_variants" not in source
