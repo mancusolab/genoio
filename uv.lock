@@ -3,6 +3,41 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
+name = "bgen"
+version = "1.9.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/41/cf75642544a6d96a06445261046efee3847917cc15000759036aec38c968/bgen-1.9.10.tar.gz", hash = "sha256:6c296f3dc23a38721f38d975346e51377c60514d5613f5bdf5a9061520488765", size = 1411667, upload-time = "2026-05-25T17:57:02.29Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/38/4ecb20bb7dedf8a1b122002b38f6e9e318bcf3c3da62dc3038d2503afd74/bgen-1.9.10-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:b9a1fec44bad7c40a174b7e6d171aed8f1ada8aad6251864dfc6950710e1928f", size = 1321450, upload-time = "2026-05-25T17:56:11.42Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/ce/059b8688d7ce7d999f01418b2160c85de87a1f9ac417a239b3492c8a33a5/bgen-1.9.10-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:9cef6755b52eb9b5d8ab6d6f1b855d7e21eab6f0f3cff75ce5d7b30f6d5edc71", size = 3115645, upload-time = "2026-05-25T17:56:13.165Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/8d/fc03e5f1d4121e4035bde8c131604d23a431994dfd0d4469f94718002e7d/bgen-1.9.10-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:78ba76d17b78393728ac5d8d0622020f8335a05491e9768b69bc76a8ec9f78a2", size = 3116500, upload-time = "2026-05-25T17:56:14.963Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/99/cca5ac4fbc425da348a2441db3acd2eeb90e9009c6484c10b7d2f44f48ad/bgen-1.9.10-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:ec6f591b921e01b5d9fe5dc0f94d8ac122bda0ff943a2715730926545cf845c5", size = 4054439, upload-time = "2026-05-25T17:56:17.47Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/67/f20a2088095993f043d7952837a790406dfb4ba3da6c058d260a7e928bd3/bgen-1.9.10-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:80d60523cac964cea3cb9f9730d83b17e1ddd49377c7af106e59b67a18ecc475", size = 4213678, upload-time = "2026-05-25T17:56:19.121Z" },
+    { url = "https://files.pythonhosted.org/packages/64/b7/fbf82f08dc75b47030fbaec7d8cfcc8f14abb2fc5332940a96bd4e8eaf2b/bgen-1.9.10-cp311-cp311-win_amd64.whl", hash = "sha256:a8a1fadb978c61953136b84918267472bc31b9a20a5cc937e269bb06209adceb", size = 912616, upload-time = "2026-05-25T17:56:20.847Z" },
+    { url = "https://files.pythonhosted.org/packages/18/8d/f25e4f432d67dc63284264414f837f7e1cb27a7c6da8ed3b4f6565e10490/bgen-1.9.10-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:8f840af0657e991ae9a7f061634786dbb90535ce23fe9554afde846f057335f1", size = 1323461, upload-time = "2026-05-25T17:56:22.114Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/8f/b56159e9d280bbcab60290e8fed3d84dc9c7e3bcaa0199a408709eade984/bgen-1.9.10-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:50a44b586d4f455b48e7bf080743b561c546c71ab1ec54dde8416808288f664c", size = 3224727, upload-time = "2026-05-25T17:56:23.569Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/19/108143855e80c0f951a9153d1fa015023da6111f0cc27f720f903cc0adc8/bgen-1.9.10-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:141c4e62eb2d6e7c21d44e871bfd822c8d5a1724e12c5c6f05e97dddfe5d69b7", size = 3170993, upload-time = "2026-05-25T17:56:25.439Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/33/f0a461c5bf663124c4a6647b4b46a74de803f9cc45b172f29beb49026885/bgen-1.9.10-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:f5c591e3e018071f84b58c478391ec456bdbe8cd90ba003b583be26cc522f272", size = 4104004, upload-time = "2026-05-25T17:56:27.332Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/fc/a05c342fd547c3162cb08919b8f68063d5707b00b1a1d56adbb7aa1d9362/bgen-1.9.10-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:44da5f45ee491ea14115e11ace39229c79c868f65479bf46eb9055e6dacc79e3", size = 4269341, upload-time = "2026-05-25T17:56:29.32Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/0d/016525af9330d01e41e1b3d3c8d47c3359efbe9534945d88f9493fe972ee/bgen-1.9.10-cp312-cp312-win_amd64.whl", hash = "sha256:edaf6196f2f50a6dde6baf48b6d7f8b2b706a9ddf36ad5bab347492d66d26f31", size = 913222, upload-time = "2026-05-25T17:56:31.005Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/db/2a9dfb8693fc1796dd738f2e2e67f9ea713bc0ab68c4188490001f75289a/bgen-1.9.10-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ba2e07f3d7fef2fdf482dbfa30d2bc8b5dcc71db05e38e1527e7fc1476452072", size = 1322909, upload-time = "2026-05-25T17:56:33.305Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/2a/f403612284e46b76bf6161aee8396eecd2859c87ede98781d769c65905b9/bgen-1.9.10-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:2b113c4add6dd3b7ca32ad627b80a1d488b9fabbf520aa12d9067c5e82e5c0e3", size = 3214178, upload-time = "2026-05-25T17:56:34.676Z" },
+    { url = "https://files.pythonhosted.org/packages/28/68/39108c5ed99049954d057bce1eff73bace07c0cc2ea8c9580f76d4cf2d86/bgen-1.9.10-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6fe983a65a98d3638c23948a4788e1c6cc1a7c2a1e1014cf9bbec2cc4bf84bd3", size = 3164755, upload-time = "2026-05-25T17:56:36.496Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/08/89bad64ea240ab18b4bc4b7ab1f3be01db7b319b41968734f0162f9cbbd4/bgen-1.9.10-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:d2f2b5a61171055d0b9a48f76cd1bf11a7c0f1b7216c70ebd2a9247840a46232", size = 4098219, upload-time = "2026-05-25T17:56:38.087Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/b6/347c5b3422e5c36e66e780352fac017f3d8f75c84d8ae2f88b7c57292ebd/bgen-1.9.10-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:b0e2f3d78acae3dc5a330db7fffc54d1986cfceb69662fe7a1379cf89d03364f", size = 4268966, upload-time = "2026-05-25T17:56:39.613Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/0f/702c20234a981ce111a80f7741b767981f043c6758fe766f6ad4ccdd9f30/bgen-1.9.10-cp313-cp313-win_amd64.whl", hash = "sha256:545428306745279fd7f091f897627289fcc9ec0c9101868b69d125a94ff1a642", size = 913123, upload-time = "2026-05-25T17:56:40.893Z" },
+    { url = "https://files.pythonhosted.org/packages/10/ea/7fb3eba989944187c6c1aa4e75c1b8650ab2562a61a48e2e6e3221863a8f/bgen-1.9.10-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:b289478a89f6235e8a34daf630422ae9a99dd52ae9bc37eb14986dc0b2840fef", size = 1331545, upload-time = "2026-05-25T17:56:42.393Z" },
+    { url = "https://files.pythonhosted.org/packages/01/63/1fe811a283c3b017f8b955288177bb8cd87b2e10436a0835f7c1d5995c68/bgen-1.9.10-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:8fd50662343617d9954611a5ed482f85c980cc093efc2e623c2ea042f1bdb030", size = 3203749, upload-time = "2026-05-25T17:56:44Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/2b/1175c7e6d82b9eea805fc96e303b8745af36de558d4a335d6f769bd5e776/bgen-1.9.10-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:648400240e9b0945b75eb5ebc525d0fb079c88cb8b1fce0ae29f051741793e5d", size = 3161543, upload-time = "2026-05-25T17:56:45.751Z" },
+    { url = "https://files.pythonhosted.org/packages/62/2e/e8b3301ee3ba23d1c53bf6a31d204e709c1e6cfea5b30a944c98f285ae7e/bgen-1.9.10-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:9529304418be63c0ad9546c2828e93bab8606739cfa96e58d941843033955a52", size = 4101896, upload-time = "2026-05-25T17:56:47.229Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/45/5f9fa74e5d6a0f192f27e7df25f1eab1dd3b63207269156c2a1217e036a6/bgen-1.9.10-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:e0fa5a7ac95425a0b4687ec9c2964036bf1c1d133822427a6046ecb0adae569a", size = 4266637, upload-time = "2026-05-25T17:56:49.372Z" },
+    { url = "https://files.pythonhosted.org/packages/15/11/942c437c387011258c37f18503d92b5afc05c4c78c2cf65854b6c0b54a8a/bgen-1.9.10-cp314-cp314-win_amd64.whl", hash = "sha256:6b08d1039e46da7ef6f24b11280f29b3a01f3ff8090c6a90c01ddb45bdff8d6d", size = 930230, upload-time = "2026-05-25T17:56:50.714Z" },
+]
+
+[[package]]
 name = "cfgv"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -61,7 +96,7 @@ wheels = [
 
 [[package]]
 name = "genoio"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
@@ -71,6 +106,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "bgen" },
     { name = "maturin" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -84,6 +120,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bgen", marker = "extra == 'dev'", specifier = ">=1.9.10" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.10,<2" },
     { name = "mkdocstrings-python", marker = "extra == 'docs'", specifier = ">=1.12" },
     { name = "numpy", specifier = ">=1.24" },

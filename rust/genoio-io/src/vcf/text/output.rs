@@ -6,14 +6,14 @@
 //! transpose.
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, SampleRecord, VariantFilter, VariantRecord,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, GenoioError, SampleMetadataBuffers,
+    VariantFilter, VariantMetadataBuffers,
 };
 
 use crate::error::Result;
 use crate::matrix::{
-    apply_dense_missing_policy_to_variant, finish_dense_matrix, finish_variant_major_dense_matrix,
-    shrink_sample_major_width, write_sample_major_variant_slot, DenseMatrixParts,
-    VariantMajorDenseParts,
+    apply_dense_missing_policy_to_variant, shrink_sample_major_width,
+    write_sample_major_variant_slot,
 };
 
 pub(super) fn can_write_sample_major_directly(
@@ -115,13 +115,52 @@ impl TextDenseOutput {
         }
     }
 
+    /// Write a decoded variant that needs no missing-value policy work.
+    ///
+    /// This is the hot path for `missing="nan"` and `missing="raise"` records
+    /// without missing calls. It avoids copying through the reusable scratch
+    /// vector only to discover that the missing policy is a no-op.
+    pub(super) fn write_variant_no_missing_direct(
+        &mut self,
+        variant_index: usize,
+        decoded_values: &[f32],
+    ) -> Result<()> {
+        match self {
+            Self::SampleMajor {
+                n_samples,
+                row_width,
+                values,
+                ..
+            } => write_sample_major_variant_slot(
+                values,
+                *n_samples,
+                *row_width,
+                variant_index,
+                decoded_values,
+            ),
+            Self::VariantMajor {
+                n_samples,
+                values: output_values,
+                ..
+            } => {
+                if decoded_values.len() != *n_samples {
+                    return Err(GenoioError::internal_contract(format!(
+                        "variant value count {} does not match sample count {n_samples}",
+                        decoded_values.len()
+                    )));
+                }
+                output_values.extend_from_slice(decoded_values);
+                Ok(())
+            }
+        }
+    }
+
     pub(super) fn finish(
         self,
         n_variants: usize,
-        samples: Vec<SampleRecord>,
-        variants: Vec<VariantRecord>,
+        samples: Option<SampleMetadataBuffers>,
+        variants: Option<VariantMetadataBuffers>,
         diagnostics: genoio_core::DenseDiagnostics,
-        matrix_only: bool,
     ) -> Result<DenseGenotypeMatrix> {
         match self {
             Self::SampleMajor {
@@ -131,30 +170,26 @@ impl TextDenseOutput {
                 ..
             } => {
                 shrink_sample_major_width(&mut values, n_samples, row_width, n_variants);
-                finish_dense_matrix(
-                    DenseMatrixParts {
-                        n_samples,
-                        n_variants,
-                        values,
-                        samples,
-                        variants,
-                        diagnostics,
-                    },
-                    matrix_only,
+                DenseGenotypeMatrix::new_with_layout(
+                    n_samples,
+                    n_variants,
+                    values,
+                    DenseLayout::SampleMajor,
+                    samples,
+                    variants,
+                    diagnostics,
                 )
             }
             Self::VariantMajor {
                 n_samples, values, ..
-            } => finish_variant_major_dense_matrix(
-                VariantMajorDenseParts {
-                    n_samples,
-                    n_variants,
-                    variant_major_values: values,
-                    samples,
-                    variants,
-                    diagnostics,
-                },
-                matrix_only,
+            } => DenseGenotypeMatrix::new_with_layout(
+                n_samples,
+                n_variants,
+                values,
+                DenseLayout::VariantMajor,
+                samples,
+                variants,
+                diagnostics,
             ),
         }
     }
@@ -173,4 +208,23 @@ fn finalize_variant_values<'a>(
     missing_indices.extend_from_slice(decoded_missing_indices);
     apply_dense_missing_policy_to_variant(scratch_values, missing_indices, missing_policy)?;
     Ok(scratch_values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_missing_direct_write_preserves_variant_values_without_scratch_policy_work() {
+        let mut output = TextDenseOutput::new(3, 2, false);
+
+        output
+            .write_variant_no_missing_direct(0, &[0.0, 1.0, 2.0])
+            .expect("direct write should append variant-major values");
+        let matrix = output
+            .finish(1, None, None, genoio_core::DenseDiagnostics::default())
+            .expect("matrix should finish");
+
+        assert_eq!(matrix.values, vec![0.0, 1.0, 2.0]);
+    }
 }

@@ -185,6 +185,31 @@ def test_all_scenario_names_each_genoio_reader(monkeypatch) -> None:
     assert "genoio_vcf_indexed_region_sample_filtered" in output
 
 
+def test_metadata_scenario_reports_cold_time(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_vcf.py",
+            "--scenario",
+            "metadata",
+            "--backend",
+            "genoio",
+            "--repeats",
+            "1",
+        ],
+    )
+    monkeypatch.setattr(
+        benchmark_vcf,
+        "read_genoio_metadata",
+        lambda args: np.array([2, 3], dtype=np.int64),
+    )
+
+    output = _capture_stdout(benchmark_vcf.main)
+    assert "genoio_vcf_metadata" in output
+    assert "cold=" in output
+
+
 def test_haplotype_sparse_indexed_region_scenario_names_reader(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,

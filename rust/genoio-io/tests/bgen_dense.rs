@@ -12,9 +12,13 @@ use serde_json::json;
 
 mod common;
 
-use common::dense::{
-    assert_values_close_with_nan as assert_values_with_nan, dense_missing_sample_major,
+use common::bgen_output as genoio_io;
+use common::bgen_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major, string_at, variant_a0,
+    variant_a1, variant_alt_allele, variant_chrom, variant_id, variant_ids, variant_ref_allele,
+    variants,
 };
+use common::dense::assert_values_close_with_nan as assert_values_with_nan;
 use common::unique_dir;
 
 const FLAG_LAYOUT2: u32 = 2 << 2;
@@ -957,14 +961,7 @@ fn bgen_dosage_dense_metadata_filters_match_variant_metadata() {
         .expect("bgen dosage metadata filter should decode");
 
         assert_eq!(dense.n_variants, expected_ids.len());
-        assert_eq!(
-            dense
-                .variants
-                .iter()
-                .map(|variant| variant.id.as_str())
-                .collect::<Vec<_>>(),
-            expected_ids
-        );
+        assert_eq!(variant_ids(variants(&dense.variants)), expected_ids);
         assert_eq!(dense.diagnostics.candidate_variants, 3);
         assert_eq!(
             dense.diagnostics.dropped_metadata_variants,
@@ -1134,6 +1131,8 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1142,6 +1141,8 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -1150,6 +1151,8 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -1214,6 +1217,8 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1222,6 +1227,8 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -1230,6 +1237,8 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -1305,7 +1314,7 @@ fn bgen_haplotype_metadata_filters_skip_unphased_records_before_decode() {
     .expect("metadata-rejected unphased probabilities should be skipped");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);
 }
 
@@ -1329,16 +1338,16 @@ fn bgen_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() {
 
     assert_eq!(dense.n_samples, 4);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_values_with_nan(&dense.values, &[1.0, 0.0, f32::NAN, f32::NAN], 0.0);
     assert_eq!(
         dense_missing_sample_major(&dense),
         vec![false, false, true, true]
     );
-    assert_eq!(dense.variants[0].maf, Some(0.5));
-    assert_eq!(dense.variants[0].mac, Some(1));
-    assert_eq!(dense.variants[0].missing_rate, Some(0.5));
-    assert_eq!(dense.variants[0].n_called, Some(1));
+    assert_eq!(variants(&dense.variants).mafs[0], Some(0.5));
+    assert_eq!(variants(&dense.variants).macs[0], Some(1));
+    assert_eq!(variants(&dense.variants).missing_rates[0], Some(0.5));
+    assert_eq!(variants(&dense.variants).n_called[0], Some(1));
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
 }
 
@@ -1366,7 +1375,7 @@ fn bgen_haplotype_dosage_window_is_over_filtered_retained_variants() {
 
     assert_eq!(dense.n_samples, 4);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs3");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs3");
     assert_eq!(
         dense.values,
         vec![
@@ -1402,7 +1411,7 @@ fn bgen_haplotype_dosage_region_filter_uses_bgi_index_to_skip_out_of_region_payl
 
     assert_eq!(dense.n_samples, 4);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_eq!(dense.diagnostics.candidate_variants, 1);
 }
 
@@ -1429,11 +1438,7 @@ fn bgen_haplotype_dosage_indexed_region_preserves_source_variant_order() {
     .expect("indexed haplotype region filter should decode");
 
     assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
+        variant_ids(variants(&dense.variants)),
         vec!["rs_late", "rs_early"]
     );
     assert_eq!(dense.n_samples, 4);
@@ -1463,12 +1468,14 @@ fn bgen_dosage_dense_empty_for_always_false_filter() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
         vec!["sample_1", "sample_2"]
     );
-    assert!(dense.variants.is_empty());
+    assert_eq!(variants(&dense.variants).len(), 0);
     assert_eq!(dense.diagnostics.candidate_variants, 0);
     assert_eq!(dense.diagnostics.retained_variants, 0);
     assert_eq!(dense.diagnostics.dropped_metadata_variants, 0);
@@ -1494,7 +1501,7 @@ fn bgen_dosage_dense_empty_for_metadata_filter_with_no_matches() {
     assert_eq!(dense.n_variants, 0);
     assert!(dense.values.is_empty());
     assert!(dense_missing_sample_major(&dense).is_empty());
-    assert!(dense.variants.is_empty());
+    assert_eq!(variants(&dense.variants).len(), 0);
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 0);
     assert_eq!(dense.diagnostics.dropped_metadata_variants, 2);
@@ -1574,13 +1581,16 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
-        assert_eq!(dense.variants[0].id, expected_id);
+        assert_eq!(variant_id(variants(&dense.variants), 0), expected_id);
         assert_values_with_nan(&dense.values, &expected_values, 2.0 / 255.0);
         assert_eq!(dense_missing_sample_major(&dense), expected_missing);
-        assert_eq!(dense.variants[0].maf, expected_maf);
-        assert_eq!(dense.variants[0].mac, expected_mac);
-        assert_eq!(dense.variants[0].missing_rate, expected_missing_rate);
-        assert_eq!(dense.variants[0].n_called, expected_n_called);
+        assert_eq!(variants(&dense.variants).mafs[0], expected_maf);
+        assert_eq!(variants(&dense.variants).macs[0], expected_mac);
+        assert_eq!(
+            variants(&dense.variants).missing_rates[0],
+            expected_missing_rate
+        );
+        assert_eq!(variants(&dense.variants).n_called[0], expected_n_called);
         assert_eq!(dense.diagnostics.candidate_variants, 2);
         assert_eq!(dense.diagnostics.retained_variants, 1);
         assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -1630,8 +1640,8 @@ fn bgen_dosage_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.samples.is_none());
+    assert!(dense.variants.is_none());
     assert_eq!(
         dense.values,
         vec![
@@ -1670,7 +1680,7 @@ fn bgen_dosage_dense_matrix_only_skips_unneeded_metadata_strings() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 1);
-    assert!(dense.variants.is_empty());
+    assert!(dense.variants.is_none());
     assert_eq!(
         dense.values,
         vec![expected_dosage(8, 204, 26), expected_dosage(8, 51, 128)]
@@ -1700,8 +1710,8 @@ fn bgen_dosage_dense_matrix_only_preserves_variant_count_with_no_selected_sample
 
     assert_eq!(dense.n_samples, 0);
     assert_eq!(dense.n_variants, 2);
-    assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.samples.is_none());
+    assert!(dense.variants.is_none());
     assert!(dense.values.is_empty());
     assert!(dense_missing_sample_major(&dense).is_empty());
 }
@@ -1732,6 +1742,8 @@ fn bgen_dosage_dense_sample_filter_uses_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1778,6 +1790,8 @@ fn bgen_dosage_dense_phased_sample_filter_uses_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1820,7 +1834,7 @@ fn bgen_dosage_dense_window_reads_unfiltered_retained_variants() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_eq!(
         dense.values,
         vec![expected_dosage(8, 0, 255), expected_dosage(8, 102, 102)]
@@ -1852,7 +1866,7 @@ fn bgen_dosage_dense_window_is_over_filtered_retained_variants() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs3");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs3");
     assert_eq!(
         dense.values,
         vec![expected_dosage(8, 255, 0), expected_dosage(8, 0, 0)]
@@ -1879,7 +1893,7 @@ fn bgen_dosage_dense_region_filter_uses_bgi_index_to_skip_out_of_region_payloads
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_eq!(
         dense.values,
         vec![expected_dosage(8, 0, 255), expected_dosage(8, 102, 102)]
@@ -1905,11 +1919,7 @@ fn bgen_dosage_dense_indexed_region_preserves_source_variant_order() {
             .expect("indexed bgen region filter should decode");
 
     assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
+        variant_ids(variants(&dense.variants)),
         vec!["rs_late", "rs_early"]
     );
     assert_eq!(
@@ -1945,7 +1955,7 @@ fn bgen_dosage_dense_stops_after_satisfied_metadata_window() {
     .expect("bgen dosage reader should stop after a satisfied retained window");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs1");
     assert_eq!(dense.diagnostics.candidate_variants, 1);
 }
 
@@ -1982,7 +1992,7 @@ fn bgen_dosage_dense_skips_metadata_rejected_unsupported_probability_block() {
             .expect("metadata-rejected unsupported probabilities should be skipped");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_eq!(dense.values.len(), 2);
 }
 
@@ -2007,7 +2017,7 @@ fn bgen_dosage_dense_skips_metadata_rejected_compressed_probability_block_withou
             .expect("metadata-rejected compressed probabilities should be skipped raw");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     assert_eq!(dense.values.len(), 2);
 }
 
@@ -2049,7 +2059,7 @@ fn bgen_dosage_dense_skips_out_of_window_unsupported_probability_block() {
     .expect("out-of-window unsupported probabilities should be skipped");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
 }
 
 #[test]
@@ -2078,7 +2088,7 @@ fn bgen_dosage_dense_skips_out_of_window_compressed_probability_block_without_de
     .expect("out-of-window compressed probabilities should be skipped raw");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
 }
 
 #[test]
@@ -2117,7 +2127,7 @@ fn bgen_metadata_reads_header_with_free_data_before_flags() {
             .collect::<Vec<_>>(),
         vec!["sample_1", "sample_2"]
     );
-    assert_eq!(metadata.variants[0].id, "rs1");
+    assert_eq!(variant_id(&metadata.variants, 0), "rs1");
 }
 
 #[test]
@@ -2137,32 +2147,30 @@ fn bgen_metadata_reads_embedded_sample_ids_and_variant_rows() {
         vec!["sample_1", "sample_2"]
     );
     assert_eq!(
-        metadata
-            .variants
-            .iter()
-            .map(|variant| {
+        (0..metadata.variants.len())
+            .map(|index| {
                 (
-                    variant.chrom.as_str(),
-                    variant.pos,
-                    variant.id.as_str(),
-                    variant.a0.as_str(),
-                    variant.a1.as_str(),
+                    variant_chrom(&metadata.variants, index),
+                    metadata.variants.positions[index],
+                    variant_id(&metadata.variants, index),
+                    variant_a0(&metadata.variants, index),
+                    variant_a1(&metadata.variants, index),
                 )
             })
             .collect::<Vec<_>>(),
         vec![("1", 10, "rs1", "A", "G"), ("2", 20, "rs2", "C", "T")]
     );
-    assert_eq!(metadata.variants[0].ref_allele.as_deref(), Some("A"));
-    assert_eq!(metadata.variants[0].alt_allele.as_deref(), Some("G"));
-    assert_eq!(metadata.variants[0].source_a0, "A");
-    assert_eq!(metadata.variants[0].source_a1, "G");
-    assert!(!metadata.variants[0].flipped);
-    assert_eq!(metadata.variants[0].qual, None);
-    assert_eq!(metadata.variants[0].af, None);
-    assert_eq!(metadata.variants[0].maf, None);
-    assert_eq!(metadata.variants[0].mac, None);
-    assert_eq!(metadata.variants[0].missing_rate, None);
-    assert_eq!(metadata.variants[0].n_called, None);
+    assert_eq!(variant_ref_allele(&metadata.variants, 0), Some("A"));
+    assert_eq!(variant_alt_allele(&metadata.variants, 0), Some("G"));
+    assert_eq!(string_at(&metadata.variants.source_a0s, 0), "A");
+    assert_eq!(string_at(&metadata.variants.source_a1s, 0), "G");
+    assert!(!metadata.variants.flipped[0]);
+    assert_eq!(metadata.variants.quals[0], None);
+    assert_eq!(metadata.variants.afs[0], None);
+    assert_eq!(metadata.variants.mafs[0], None);
+    assert_eq!(metadata.variants.macs[0], None);
+    assert_eq!(metadata.variants.missing_rates[0], None);
+    assert_eq!(metadata.variants.n_called[0], None);
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
     assert!(!metadata.capabilities.phased);
@@ -2361,7 +2369,7 @@ fn bgen_metadata_uses_variant_id_when_rsid_is_empty() {
 
     let metadata = genoio_io::read_bgen_metadata(&bgen, None).expect("metadata should parse");
 
-    assert_eq!(metadata.variants[0].id, "var1");
+    assert_eq!(variant_id(&metadata.variants, 0), "var1");
 }
 
 #[test]
@@ -2382,14 +2390,7 @@ fn bgen_metadata_skips_compressed_probability_blocks_before_next_variant() {
     let metadata =
         genoio_io::read_bgen_metadata(&bgen, None).expect("compressed metadata should parse");
 
-    assert_eq!(
-        metadata
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -2410,7 +2411,7 @@ fn bgen_metadata_rejects_multiallelic_variants() {
 }
 
 #[test]
-fn bgen_metadata_rejects_invalid_phase_value_probability_blocks() {
+fn bgen_metadata_skips_invalid_phase_value_probability_blocks() {
     let dir = unique_dir("bgen-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2431,14 +2432,42 @@ fn bgen_metadata_rejects_invalid_phase_value_probability_blocks() {
         .expect("invalid-phase probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata(&bgen, None).expect_err("invalid-phase BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
+
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
+}
+
+#[test]
+fn bgen_dosage_dense_rejects_retained_invalid_phase_value_probability_blocks() {
+    let dir = unique_dir("bgen-dense-invalid-phase-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_layout2_probability_block_header(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 2,
+                bit_depth: 8,
+            },
+        )
+        .expect("invalid-phase probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
+        .expect_err("retained invalid-phase BGEN should fail");
 
     assert_genoio_error_contains(error, "phased probability value");
 }
 
 #[test]
-fn bgen_metadata_rejects_variable_ploidy_layout2_probability_blocks() {
+fn bgen_metadata_skips_variable_ploidy_layout2_probability_blocks() {
     let dir = unique_dir("bgen-variable-ploidy-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2459,14 +2488,14 @@ fn bgen_metadata_rejects_variable_ploidy_layout2_probability_blocks() {
         .expect("variable-ploidy probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata(&bgen, None).expect_err("variable-ploidy BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
+fn bgen_metadata_skips_non_diploid_sample_ploidy_bytes() {
     let dir = unique_dir("bgen-non-diploid-sample-ploidy");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2487,10 +2516,10 @@ fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
         .expect("non-diploid probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata(&bgen, None).expect_err("non-diploid BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
@@ -2510,7 +2539,7 @@ fn bgen_metadata_allows_missing_diploid_sample_ploidy_bytes() {
 }
 
 #[test]
-fn bgen_metadata_rejects_zero_bit_depth_probability_blocks() {
+fn bgen_metadata_skips_zero_bit_depth_probability_blocks() {
     let dir = unique_dir("bgen-zero-bit-depth-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2531,13 +2560,14 @@ fn bgen_metadata_rejects_zero_bit_depth_probability_blocks() {
         .expect("zero-bit-depth probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("zero bit depth should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "bit depth");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_too_large_bit_depth_probability_blocks() {
+fn bgen_metadata_skips_too_large_bit_depth_probability_blocks() {
     let dir = unique_dir("bgen-too-large-bit-depth-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2558,14 +2588,14 @@ fn bgen_metadata_rejects_too_large_bit_depth_probability_blocks() {
         .expect("too-large-bit-depth probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata(&bgen, None).expect_err("large bit depth should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "bit depth");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_truncated_packed_probability_bytes() {
+fn bgen_metadata_skips_truncated_packed_probability_bytes() {
     let dir = unique_dir("bgen-truncated-packed-probabilities");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2586,14 +2616,14 @@ fn bgen_metadata_rejects_truncated_packed_probability_bytes() {
         .expect("truncated probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("truncated packed probabilities should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "truncated");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_decompressed_length_mismatch() {
+fn bgen_metadata_skips_zlib_decompressed_length_mismatch() {
     let dir = unique_dir("bgen-zlib-decompressed-length-mismatch");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2603,14 +2633,14 @@ fn bgen_metadata_rejects_zlib_decompressed_length_mismatch() {
             .expect("compressed probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("decompressed length mismatch should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "decompressed probability block length");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
+fn bgen_metadata_skips_probability_block_sample_count_mismatch() {
     let dir = unique_dir("bgen-probability-sample-count-mismatch");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2632,14 +2662,14 @@ fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
         .expect("sample-count-mismatched probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("probability block sample count mismatch should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "sample count does not match");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_invalid_phase_value_probability_blocks() {
+fn bgen_metadata_skips_zlib_compressed_invalid_phase_value_probability_blocks() {
     let dir = unique_dir("bgen-zlib-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2662,14 +2692,14 @@ fn bgen_metadata_rejects_zlib_compressed_invalid_phase_value_probability_blocks(
         .expect("compressed invalid-phase probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zlib-compressed invalid-phase BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "phased probability value");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_variable_ploidy_probability_blocks() {
+fn bgen_metadata_skips_zlib_compressed_variable_ploidy_probability_blocks() {
     let dir = unique_dir("bgen-zlib-variable-ploidy-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2692,14 +2722,14 @@ fn bgen_metadata_rejects_zlib_compressed_variable_ploidy_probability_blocks() {
         .expect("compressed variable-ploidy probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zlib-compressed variable-ploidy BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
+fn bgen_metadata_skips_zlib_compressed_non_diploid_sample_ploidy_bytes() {
     let dir = unique_dir("bgen-zlib-non-diploid-sample-ploidy");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2722,14 +2752,14 @@ fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
         .expect("compressed non-diploid probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zlib-compressed non-diploid BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zstd_compressed_invalid_phase_value_probability_blocks() {
+fn bgen_metadata_skips_zstd_compressed_invalid_phase_value_probability_blocks() {
     let dir = unique_dir("bgen-zstd-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
@@ -2752,14 +2782,14 @@ fn bgen_metadata_rejects_zstd_compressed_invalid_phase_value_probability_blocks(
         .expect("compressed invalid-phase probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zstd-compressed invalid-phase BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "phased probability value");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zstd_compressed_variable_ploidy_probability_blocks() {
+fn bgen_metadata_skips_zstd_compressed_variable_ploidy_probability_blocks() {
     let dir = unique_dir("bgen-zstd-variable-ploidy-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
@@ -2782,14 +2812,14 @@ fn bgen_metadata_rejects_zstd_compressed_variable_ploidy_probability_blocks() {
         .expect("compressed variable-ploidy probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata(&bgen, None)
-        .expect_err("zstd-compressed variable-ploidy BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_compressed_probability_block_shorter_than_length_prefix() {
+fn bgen_metadata_rejects_truncated_compressed_probability_payload_bytes() {
     let dir = unique_dir("bgen-short-compressed-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2800,10 +2830,10 @@ fn bgen_metadata_rejects_compressed_probability_block_shorter_than_length_prefix
             .expect("short C should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata(&bgen, None).expect_err("short compressed block should fail");
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
+        .expect_err("declared compressed payload bytes should be present");
 
-    assert_genoio_error_contains(error, "probability block");
+    assert_genoio_error_contains(error, "failed to read source");
 }
 
 #[test]

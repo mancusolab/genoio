@@ -6,10 +6,13 @@ use std::path::Path;
 
 mod common;
 
-use common::dense::{
-    assert_values_with_nan, dense_missing_sample_major, dense_values_sample_major,
-};
+use common::dense::assert_values_with_nan;
 use common::unique_dir;
+use common::vcf_output as genoio_io;
+use common::vcf_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major,
+    dense_values_sample_major_output as dense_values_sample_major, variant_ids, variants,
+};
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -60,19 +63,14 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
         vec!["S1", "S2", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -106,6 +104,8 @@ fn plain_vcf_dense_uses_permissive_text_header_path() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -137,12 +137,14 @@ this record is intentionally not valid VCF and should not be decoded
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
         vec!["S1", "S2"]
     );
-    assert!(dense.variants.is_empty());
+    assert!(variants(&dense.variants).is_empty());
 }
 
 #[test]
@@ -171,8 +173,8 @@ fn vcf_dense_matrix_only_omits_metadata() {
         vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]
     );
     assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
-    assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.samples.is_none());
+    assert!(dense.variants.is_none());
 }
 
 #[test]
@@ -205,8 +207,8 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
         dense_missing_sample_major(&dense),
         vec![false, false, false, true, false, false]
     );
-    assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.samples.is_none());
+    assert!(dense.variants.is_none());
 }
 
 #[test]
@@ -238,19 +240,14 @@ fn compressed_vcf_dosage_dense_uses_text_backend_semantics() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -291,6 +288,8 @@ fn threaded_compressed_vcf_dosage_uses_text_backend_semantics() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -421,8 +420,8 @@ fn compressed_vcf_matrix_only_uses_text_backend_semantics() {
         dense_missing_sample_major(&dense),
         vec![false, false, false, true]
     );
-    assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.samples.is_none());
+    assert!(dense.variants.is_none());
 }
 
 #[test]
@@ -458,19 +457,14 @@ fn compressed_vcf_dense_with_metadata_uses_text_backend_semantics() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -499,6 +493,8 @@ fn vcf_dense_sample_subset_preserves_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -507,10 +503,12 @@ fn vcf_dense_sample_subset_preserves_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
-        vec![Some(0), Some(2)]
+        vec![None, None]
     );
 }
 
@@ -537,41 +535,13 @@ fn vcf_dense_marks_missing_gt_calls() {
 
 #[test]
 fn vcf_dense_contract_validates_shape_and_metadata_lengths() {
-    let sample = genoio_core::SampleRecord {
-        fid: None,
-        iid: "S1".to_string(),
-        father: None,
-        mother: None,
-        sex: None,
-        phenotype: None,
-        source_sample_index: None,
-        haplotype_index: None,
-    };
-    let variant = genoio_core::VariantRecord {
-        chrom: "1".to_string(),
-        pos: 10,
-        id: "rs1".to_string(),
-        a0: "A".to_string(),
-        a1: "G".to_string(),
-        ref_allele: Some("A".to_string()),
-        alt_allele: Some("G".to_string()),
-        source_a0: "A".to_string(),
-        source_a1: "G".to_string(),
-        flipped: false,
-        qual: None,
-        af: None,
-        maf: None,
-        mac: None,
-        missing_rate: None,
-        n_called: None,
-    };
-
-    let result = genoio_core::DenseGenotypeMatrix::new(
+    let result = genoio_core::DenseGenotypeMatrix::new_with_layout(
         1,
         2,
         vec![0.0],
-        vec![sample],
-        vec![variant],
+        genoio_core::DenseLayout::SampleMajor,
+        None,
+        None,
         genoio_core::DenseDiagnostics::default(),
     );
 

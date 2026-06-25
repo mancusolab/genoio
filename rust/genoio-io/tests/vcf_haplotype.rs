@@ -5,8 +5,12 @@ use std::io::Write;
 
 mod common;
 
-use common::dense::dense_values_sample_major;
 use common::unique_dir;
+use common::vcf_output as genoio_io;
+use common::vcf_output::{
+    dense_values_sample_major_output as dense_values_sample_major, sparse_values_dense_output,
+    variant_a0, variant_a1, variant_ids, variants,
+};
 
 fn phased_vcf() -> String {
     "\
@@ -55,17 +59,6 @@ fn phased_alt_major_vcf() -> String {
     .to_string()
 }
 
-fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
-    let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
-    for col in 0..sparse.n_cols {
-        for offset in sparse.indptr[col]..sparse.indptr[col + 1] {
-            let row = sparse.indices[offset];
-            dense[row * sparse.n_cols + col] = sparse.data[offset];
-        }
-    }
-    dense
-}
-
 fn write_bgzf_file(path: &std::path::Path, contents: &str) {
     let file = fs::File::create(path).expect("test fixture should be created");
     let mut writer = noodles_bgzf::io::Writer::new(file);
@@ -92,6 +85,8 @@ fn phased_vcf_haplotype_dense_counts_a1_by_sample_haplotype_rows() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -114,8 +109,8 @@ fn phased_vcf_haplotype_dense_matrix_only_omits_metadata() {
         dense_values_sample_major(&haplotypes),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
     );
-    assert!(haplotypes.samples.is_empty());
-    assert!(haplotypes.variants.is_empty());
+    assert!(haplotypes.samples.is_none());
+    assert!(haplotypes.variants.is_none());
 }
 
 #[test]
@@ -147,6 +142,8 @@ fn compressed_vcf_haplotype_dense_uses_text_backend_semantics() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>(),
@@ -158,11 +155,7 @@ fn compressed_vcf_haplotype_dense_uses_text_backend_semantics() {
         ]
     );
     assert_eq!(
-        haplotypes
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
+        variant_ids(variants(&haplotypes.variants)),
         vec!["rs1", "rs2"]
     );
 }
@@ -181,6 +174,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -189,6 +184,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -197,6 +194,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -216,7 +215,7 @@ fn phased_vcf_haplotype_sparse_reconstructs_dense_values() {
     assert_eq!(sparse.n_rows, 4);
     assert_eq!(sparse.n_cols, 2);
     assert_eq!(
-        csc_to_dense(&sparse),
+        sparse_values_dense_output(&sparse),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
     );
 }
@@ -233,9 +232,10 @@ fn phased_vcf_haplotype_sparse_flips_common_alt_allele() {
     assert_eq!(sparse.indptr, vec![0, 1]);
     assert_eq!(sparse.indices, vec![3]);
     assert_eq!(sparse.data, vec![1.0]);
-    assert!(sparse.variants[0].flipped);
-    assert_eq!(sparse.variants[0].a0, "G");
-    assert_eq!(sparse.variants[0].a1, "A");
+    let variants = variants(&sparse.variants);
+    assert!(variants.flipped[0]);
+    assert_eq!(variant_a0(variants, 0), "G");
+    assert_eq!(variant_a1(variants, 0), "A");
 }
 
 #[test]
@@ -278,6 +278,8 @@ fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
     assert_eq!(
         sparse
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>(),
@@ -288,14 +290,8 @@ fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
             ("S3", Some(1)),
         ]
     );
-    assert_eq!(
-        sparse
-            .variants
-            .iter()
-            .map(|variant| (variant.id.as_str(), variant.flipped))
-            .collect::<Vec<_>>(),
-        vec![("rs1", true), ("rs2", false)]
-    );
+    assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs1", "rs2"]);
+    assert_eq!(variants(&sparse.variants).flipped, vec![true, false]);
 }
 
 #[test]
@@ -369,11 +365,7 @@ fn haplotype_stat_filter_drops_unphased_genotype_before_separator_check() {
         .expect("unphased dropped genotype should not fail haplotype decode");
 
     assert_eq!(
-        haplotypes
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
+        variant_ids(variants(&haplotypes.variants)),
         vec!["rs_phased"]
     );
     assert_eq!(
@@ -400,8 +392,8 @@ fn haplotype_matrix_only_stat_filter_drops_unphased_genotype_before_separator_ch
 
     assert_eq!(haplotypes.n_samples, 4);
     assert_eq!(haplotypes.n_variants, 1);
-    assert!(haplotypes.samples.is_empty());
-    assert!(haplotypes.variants.is_empty());
+    assert!(haplotypes.samples.is_none());
+    assert!(haplotypes.variants.is_none());
     assert_eq!(
         dense_values_sample_major(&haplotypes),
         vec![0.0, 1.0, 1.0, 0.0]

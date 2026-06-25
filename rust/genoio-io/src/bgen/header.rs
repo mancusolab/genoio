@@ -10,14 +10,15 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use genoio_core::{GenoioError, SampleRecord, VariantRecord};
+use genoio_core::{GenoioError, SampleRecord, VariantMetadataBuffers, VariantRecord};
 
 use crate::Result;
 
-use super::decode::skip_layout2_probability_block;
+use super::decode::skip_layout2_probability_payload_raw;
 use super::io::{
-    read_exact_vec, read_len_prefixed_string_u16, read_len_prefixed_string_u32, read_u16_le,
-    read_u32_le, skip_exact, skip_len_prefixed_string_u16, skip_len_prefixed_string_u32,
+    read_exact_vec, read_len_prefixed_string_u16, read_len_prefixed_string_u32,
+    read_len_prefixed_utf8_u16_with, read_len_prefixed_utf8_u32_with, read_u16_le, read_u32_le,
+    skip_exact, skip_len_prefixed_string_u16, skip_len_prefixed_string_u32,
 };
 
 const BGEN_MAGIC: &[u8; 4] = b"bgen";
@@ -290,18 +291,22 @@ pub(super) fn read_layout2_variant_metadata(
     reader: &mut impl Read,
     path: &Path,
     variant_count: u32,
-    sample_count: u32,
     compression: BgenCompression,
-) -> Result<Vec<VariantRecord>> {
+) -> Result<VariantMetadataBuffers> {
     let mut variants =
-        Vec::with_capacity(usize::try_from(variant_count).map_err(|_| {
+        VariantMetadataBuffers::with_capacity(usize::try_from(variant_count).map_err(|_| {
             GenoioError::invalid_source(path, "bgen variant count is out of range")
         })?);
+    let mut string_scratch = Vec::new();
 
     for _ in 0..variant_count {
-        let variant = read_layout2_variant_identifying_data(reader, path)?;
-        skip_layout2_probability_block(reader, path, sample_count, 2, compression)?;
-        variants.push(variant);
+        read_layout2_variant_identifying_data_metadata(
+            reader,
+            path,
+            &mut variants,
+            &mut string_scratch,
+        )?;
+        skip_layout2_probability_payload_raw(reader, path, compression)?;
     }
 
     if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
@@ -359,6 +364,58 @@ pub(super) fn read_layout2_variant_identifying_data(
         missing_rate: None,
         n_called: None,
     })
+}
+
+fn read_layout2_variant_identifying_data_metadata(
+    reader: &mut impl Read,
+    path: &Path,
+    variants: &mut VariantMetadataBuffers,
+    scratch: &mut Vec<u8>,
+) -> Result<()> {
+    let row_index = variants.len();
+    read_len_prefixed_utf8_u16_with(reader, path, "variant id", scratch, |id| {
+        variants.ids.append_value(id)
+    })?;
+    // Public BGEN IDs prefer rsid when present, but the on-disk order puts the
+    // fallback ID first. Append the fallback, then replace the row only when an
+    // rsid exists so the metadata-buffer path does not materialize both strings.
+    read_len_prefixed_utf8_u16_with(reader, path, "variant rsid", scratch, |rsid| {
+        if !rsid.is_empty() {
+            variants.ids.replace_value(row_index, rsid)?;
+        }
+        Ok(())
+    })?;
+    read_len_prefixed_utf8_u16_with(reader, path, "variant chromosome", scratch, |chrom| {
+        variants.chroms.append_value(chrom)
+    })?;
+    let pos = i64::from(read_u32_le(reader, path)?);
+    let allele_count = read_u16_le(reader, path)?;
+    if allele_count != 2 {
+        return Err(GenoioError::unsupported(
+            "unsupported bgen multiallelic variant metadata; only biallelic records are supported",
+        ));
+    }
+
+    read_len_prefixed_utf8_u32_with(reader, path, "variant allele", scratch, |a0| {
+        variants.a0s.append_value(a0)?;
+        variants.ref_alleles.push(Some(a0.to_owned()));
+        variants.source_a0s.append_value(a0)
+    })?;
+    read_len_prefixed_utf8_u32_with(reader, path, "variant allele", scratch, |a1| {
+        variants.a1s.append_value(a1)?;
+        variants.alt_alleles.push(Some(a1.to_owned()));
+        variants.source_a1s.append_value(a1)
+    })?;
+
+    variants.positions.push(pos);
+    variants.flipped.push(false);
+    variants.quals.push(None);
+    variants.afs.push(None);
+    variants.mafs.push(None);
+    variants.macs.push(None);
+    variants.missing_rates.push(None);
+    variants.n_called.push(None);
+    Ok(())
 }
 
 pub(super) fn skip_layout2_variant_identifying_data(

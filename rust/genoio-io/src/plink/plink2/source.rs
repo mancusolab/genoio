@@ -9,12 +9,12 @@ use std::fs;
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseSampleSelection,
-    GenoioError, SampleRecord, SparseGenotypeMatrix, VariantWindow,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseLayout,
+    DenseSampleSelection, GenoioError, SampleMetadataBuffers, SampleRecord, SparseGenotypeMatrix,
+    VariantMetadataBuffers, VariantWindow,
 };
 
 use crate::error::Result;
-use crate::matrix::{finish_dense_matrix, DenseMatrixParts};
 
 use super::metadata::parse_psam;
 use super::pgen::{
@@ -91,44 +91,72 @@ pub(super) fn variant_output_capacity(
     })
 }
 
-pub(super) fn empty_dense_for_samples(
+pub(super) fn empty_dense_output_for_samples(
     samples: Vec<SampleRecord>,
     mut diagnostics: DenseDiagnostics,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
     diagnostics.retained_variants = 0;
-    finish_dense_matrix(
-        DenseMatrixParts {
-            n_samples: samples.len(),
-            n_variants: 0,
-            values: Vec::new(),
-            samples,
-            variants: Vec::new(),
-            diagnostics,
-        },
-        matrix_only,
+    let n_samples = samples.len();
+    let include_haplotype_columns = samples
+        .iter()
+        .any(|sample| sample.haplotype_index.is_some());
+    let samples = SampleMetadataBuffers::optional_from_records(
+        &samples,
+        return_samples,
+        include_haplotype_columns,
+    )?;
+    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        0,
+        Vec::new(),
+        DenseLayout::SampleMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
 
-pub(super) fn empty_sparse_for_selection(
+pub(super) fn empty_sparse_output_for_selection(
     selection: DenseSampleSelection,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
-    empty_sparse_for_samples(selection.samples, selection.diagnostics)
+    empty_sparse_output_for_samples(
+        selection.samples,
+        selection.diagnostics,
+        return_samples,
+        return_variants,
+    )
 }
 
-pub(super) fn empty_sparse_for_samples(
+pub(super) fn empty_sparse_output_for_samples(
     samples: Vec<SampleRecord>,
     mut diagnostics: DenseDiagnostics,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
     diagnostics.retained_variants = 0;
+    let n_samples = samples.len();
+    let include_haplotype_columns = samples
+        .iter()
+        .any(|sample| sample.haplotype_index.is_some());
+    let samples = SampleMetadataBuffers::optional_from_records(
+        &samples,
+        return_samples,
+        include_haplotype_columns,
+    )?;
+    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     SparseGenotypeMatrix::new(
-        samples.len(),
+        n_samples,
         0,
         vec![0],
         Vec::new(),
         Vec::new(),
         samples,
-        Vec::new(),
+        variants,
         diagnostics,
     )
 }

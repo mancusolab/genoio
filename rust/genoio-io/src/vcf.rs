@@ -24,112 +24,74 @@ mod bcf;
 mod policy;
 mod text;
 
-/// Read VCF/BCF sample and variant metadata without returning genotypes.
-pub fn read_vcf_metadata(path: &Path) -> Result<MetadataOutput> {
+/// Read VCF/BCF sample metadata and public variant metadata as columnar buffers.
+pub fn read_vcf_public_metadata(path: &Path) -> Result<MetadataOutput> {
     if is_bcf_path(path) {
         return bcf::read_metadata(path);
     }
-    text::read_vcf_metadata(path)
+    text::read_vcf_public_metadata(path)
 }
 
-/// Read retained VCF/BCF diploid genotypes as a dense sample-by-variant matrix.
-pub fn read_vcf_dense(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dense_windowed_with_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        None,
-        DenseMissingPolicy::Nan,
-        false,
-    )
-}
-
-/// Read retained VCF/BCF diploid genotypes as dense values over an optional block window.
 pub fn read_vcf_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dense_windowed_with_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-pub fn read_vcf_dense_windowed_with_missing_policy(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dense_windowed_with_threads_and_missing_policy(
+    read_vcf_dense_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
         missing_policy,
-        matrix_only,
+        return_samples,
+        return_variants,
         None,
     )
 }
 
-/// Read retained VCF/BCF diploid genotypes with optional BGZF decompression threads.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python metadata bridge passes sample and variant return choices explicitly"
+)]
 pub fn read_vcf_dense_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-    threads: Option<usize>,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dense_windowed_with_threads_and_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-        threads,
-    )
-}
-
-pub fn read_vcf_dense_windowed_with_threads_and_missing_policy(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_dense_windowed(
+        return bcf::read_dense_windowed(
             path,
             requested_samples,
             variant_filter,
             variant_window,
             missing_policy,
-            matrix_only,
+            return_samples,
+            return_variants,
         );
     }
 
     read_text_vcf_with_optional_index(
         path,
         variant_filter,
-        || text::empty_vcf_dense(path, requested_samples, matrix_only, threads),
+        || {
+            text::empty_vcf_dense(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
         |region| {
             text::read_vcf_dense_indexed(
                 path,
@@ -138,7 +100,8 @@ pub fn read_vcf_dense_windowed_with_threads_and_missing_policy(
                 variant_window,
                 region,
                 missing_policy,
-                matrix_only,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
@@ -149,113 +112,74 @@ pub fn read_vcf_dense_windowed_with_threads_and_missing_policy(
                 variant_filter,
                 variant_window,
                 missing_policy,
-                matrix_only,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
     )
 }
 
-fn read_bcf_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    bcf::read_dense_windowed(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        matrix_only,
-    )
-}
-
-/// Read retained VCF/BCF FORMAT/DS values as dense sample-by-variant dosages.
 pub fn read_vcf_dosage_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dosage_dense_windowed_with_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-pub fn read_vcf_dosage_dense_windowed_with_missing_policy(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dosage_dense_windowed_with_threads_and_missing_policy(
+    read_vcf_dosage_dense_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
         missing_policy,
-        matrix_only,
+        return_samples,
+        return_variants,
         None,
     )
 }
 
-/// Read retained VCF/BCF FORMAT/DS values with optional BGZF decompression threads.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python metadata bridge passes sample and variant return choices explicitly"
+)]
 pub fn read_vcf_dosage_dense_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-    threads: Option<usize>,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_dosage_dense_windowed_with_threads_and_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-        threads,
-    )
-}
-
-pub fn read_vcf_dosage_dense_windowed_with_threads_and_missing_policy(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_dosage_dense_windowed(
+        return bcf::read_dosage_dense_windowed(
             path,
             requested_samples,
             variant_filter,
             variant_window,
             missing_policy,
-            matrix_only,
+            return_samples,
+            return_variants,
         );
     }
 
     read_text_vcf_with_optional_index(
         path,
         variant_filter,
-        || text::empty_vcf_dense(path, requested_samples, matrix_only, threads),
+        || {
+            text::empty_vcf_dense(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
         |region| {
             text::read_vcf_dosage_dense_indexed(
                 path,
@@ -264,7 +188,8 @@ pub fn read_vcf_dosage_dense_windowed_with_threads_and_missing_policy(
                 variant_window,
                 region,
                 missing_policy,
-                matrix_only,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
@@ -275,73 +200,66 @@ pub fn read_vcf_dosage_dense_windowed_with_threads_and_missing_policy(
                 variant_filter,
                 variant_window,
                 missing_policy,
-                matrix_only,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
     )
 }
 
-fn read_bcf_dosage_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    bcf::read_dosage_dense_windowed(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        matrix_only,
-    )
-}
-
-/// Read retained VCF/BCF diploid genotypes as sparse CSC.
-pub fn read_vcf_sparse(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
-    read_vcf_sparse_windowed(path, requested_samples, variant_filter, None)
-}
-
-/// Read retained VCF/BCF diploid genotypes as sparse CSC over an optional block window.
 pub fn read_vcf_sparse_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
     read_vcf_sparse_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        return_samples,
+        return_variants,
         None,
     )
 }
 
-/// Read retained VCF/BCF diploid genotypes as sparse CSC with optional BGZF decompression threads.
 pub fn read_vcf_sparse_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
     threads: Option<usize>,
 ) -> Result<SparseGenotypeMatrix> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_sparse_windowed(path, requested_samples, variant_filter, variant_window);
+        return bcf::read_sparse_windowed(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            return_samples,
+            return_variants,
+        );
     }
 
     read_text_vcf_with_optional_index(
         path,
         variant_filter,
-        || text::empty_vcf_sparse(path, requested_samples, threads),
+        || {
+            text::empty_vcf_sparse(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
         |region| {
             text::read_vcf_sparse_indexed(
                 path,
@@ -349,6 +267,8 @@ pub fn read_vcf_sparse_windowed_with_threads(
                 variant_filter,
                 variant_window,
                 region,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
@@ -358,119 +278,74 @@ pub fn read_vcf_sparse_windowed_with_threads(
                 requested_samples,
                 variant_filter,
                 variant_window,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
     )
 }
 
-fn read_bcf_sparse_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    bcf::read_sparse_windowed(path, requested_samples, variant_filter, variant_window)
-}
-
-/// Read phased VCF/BCF diploid genotypes as dense haplotype rows.
-pub fn read_vcf_haplotypes_dense(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_haplotypes_dense_windowed_with_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        None,
-        DenseMissingPolicy::Nan,
-        false,
-    )
-}
-
-/// Read phased VCF/BCF diploid genotypes as dense haplotype rows over a block window.
 pub fn read_vcf_haplotypes_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_haplotypes_dense_windowed_with_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-pub fn read_vcf_haplotypes_dense_windowed_with_missing_policy(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy(
+    read_vcf_haplotypes_dense_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
         missing_policy,
-        matrix_only,
+        return_samples,
+        return_variants,
         None,
     )
 }
 
-/// Read phased VCF/BCF diploid genotypes as dense haplotype rows with optional BGZF decompression threads.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Python metadata bridge passes sample and variant return choices explicitly"
+)]
 pub fn read_vcf_haplotypes_dense_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-    threads: Option<usize>,
-) -> Result<DenseGenotypeMatrix> {
-    read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-        threads,
-    )
-}
-
-pub fn read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
     threads: Option<usize>,
 ) -> Result<DenseGenotypeMatrix> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_haplotypes_dense_windowed(
+        return bcf::read_haplotypes_dense_windowed(
             path,
             requested_samples,
             variant_filter,
             variant_window,
             missing_policy,
-            matrix_only,
+            return_samples,
+            return_variants,
         );
     }
 
     read_text_vcf_with_optional_index(
         path,
         variant_filter,
-        || text::empty_vcf_haplotypes_dense(path, requested_samples, matrix_only, threads),
+        || {
+            text::empty_vcf_haplotypes_dense(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
         |region| {
             text::read_vcf_haplotypes_dense_indexed(
                 path,
@@ -479,7 +354,8 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy(
                 variant_window,
                 region,
                 missing_policy,
-                matrix_only,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
@@ -490,78 +366,66 @@ pub fn read_vcf_haplotypes_dense_windowed_with_threads_and_missing_policy(
                 variant_filter,
                 variant_window,
                 missing_policy,
-                matrix_only,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
     )
 }
 
-fn read_bcf_haplotypes_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    bcf::read_haplotypes_dense_windowed(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        matrix_only,
-    )
-}
-
-/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows.
-pub fn read_vcf_haplotypes_sparse(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
-    read_vcf_haplotypes_sparse_windowed(path, requested_samples, variant_filter, None)
-}
-
-/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows over a block window.
 pub fn read_vcf_haplotypes_sparse_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
     read_vcf_haplotypes_sparse_windowed_with_threads(
         path,
         requested_samples,
         variant_filter,
         variant_window,
+        return_samples,
+        return_variants,
         None,
     )
 }
 
-/// Read phased VCF/BCF diploid genotypes as sparse haplotype rows with optional BGZF decompression threads.
 pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
     threads: Option<usize>,
 ) -> Result<SparseGenotypeMatrix> {
     validate_threaded_read_support(path, threads)?;
     if is_bcf_path(path) {
-        return read_bcf_haplotypes_sparse_windowed(
+        return bcf::read_haplotypes_sparse_windowed(
             path,
             requested_samples,
             variant_filter,
             variant_window,
+            return_samples,
+            return_variants,
         );
     }
 
     read_text_vcf_with_optional_index(
         path,
         variant_filter,
-        || text::empty_vcf_haplotypes_sparse(path, requested_samples, threads),
+        || {
+            text::empty_vcf_haplotypes_sparse(
+                path,
+                requested_samples,
+                return_samples,
+                return_variants,
+                threads,
+            )
+        },
         |region| {
             text::read_vcf_haplotypes_sparse_indexed(
                 path,
@@ -569,6 +433,8 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
                 variant_filter,
                 variant_window,
                 region,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
@@ -578,19 +444,12 @@ pub fn read_vcf_haplotypes_sparse_windowed_with_threads(
                 requested_samples,
                 variant_filter,
                 variant_window,
+                return_samples,
+                return_variants,
                 threads,
             )
         },
     )
-}
-
-fn read_bcf_haplotypes_sparse_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    bcf::read_haplotypes_sparse_windowed(path, requested_samples, variant_filter, variant_window)
 }
 
 fn validate_threaded_read_support(path: &Path, threads: Option<usize>) -> Result<()> {

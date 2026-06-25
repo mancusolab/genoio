@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::{GenoioError, SampleRecord, VariantRecord};
+use crate::{GenoioError, SampleMetadataBuffers, SampleRecord, VariantMetadataBuffers};
 
 /// Counts describing source selection and variant filtering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub enum DenseMissingPolicy {
     Impute,
 }
 
-/// Dense genotype matrix with layout-tagged flat buffers.
+/// Dense genotype matrix with optional columnar metadata buffers.
 ///
 /// `values` has length `n_samples * n_variants`. Consumers that read flat
 /// buffers directly must inspect `layout`; Python assembly converts either
@@ -48,60 +48,46 @@ pub struct DenseGenotypeMatrix {
     pub n_variants: usize,
     pub values: Vec<f32>,
     pub layout: DenseLayout,
-    pub samples: Vec<SampleRecord>,
-    pub variants: Vec<VariantRecord>,
+    /// Requested sample metadata; `None` means it was omitted.
+    pub samples: Option<SampleMetadataBuffers>,
+    /// Requested variant metadata; `None` means it was omitted.
+    pub variants: Option<VariantMetadataBuffers>,
     pub diagnostics: DenseDiagnostics,
 }
 
 impl DenseGenotypeMatrix {
-    /// Build a dense matrix after validating shape and metadata lengths.
-    pub fn new(
-        n_samples: usize,
-        n_variants: usize,
-        values: Vec<f32>,
-        samples: Vec<SampleRecord>,
-        variants: Vec<VariantRecord>,
-        diagnostics: DenseDiagnostics,
-    ) -> Result<Self, GenoioError> {
-        Self::new_with_layout(
-            n_samples,
-            n_variants,
-            values,
-            DenseLayout::SampleMajor,
-            samples,
-            variants,
-            diagnostics,
-        )
-    }
-
-    /// Build a dense matrix with an explicit flat-buffer layout.
+    /// Build a dense matrix with optional sample and variant metadata.
     pub fn new_with_layout(
         n_samples: usize,
         n_variants: usize,
         values: Vec<f32>,
         layout: DenseLayout,
-        samples: Vec<SampleRecord>,
-        variants: Vec<VariantRecord>,
+        samples: Option<SampleMetadataBuffers>,
+        variants: Option<VariantMetadataBuffers>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
         validate_dense_values(n_samples, n_variants, values.len())?;
-        if samples.len() != n_samples {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "sample metadata length {} does not match n_samples {n_samples}",
-                    samples.len()
-                ),
-            ));
+        if let Some(samples) = samples.as_ref() {
+            if samples.len() != n_samples {
+                return Err(GenoioError::invalid_source(
+                    "<dense>",
+                    format!(
+                        "sample metadata length {} does not match n_samples {n_samples}",
+                        samples.len()
+                    ),
+                ));
+            }
         }
-        if variants.len() != n_variants {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "variant metadata length {} does not match n_variants {n_variants}",
-                    variants.len()
-                ),
-            ));
+        if let Some(variants) = variants.as_ref() {
+            if variants.len() != n_variants {
+                return Err(GenoioError::invalid_source(
+                    "<dense>",
+                    format!(
+                        "variant metadata length {} does not match n_variants {n_variants}",
+                        variants.len()
+                    ),
+                ));
+            }
         }
 
         Ok(Self {
@@ -111,43 +97,6 @@ impl DenseGenotypeMatrix {
             layout,
             samples,
             variants,
-            diagnostics,
-        })
-    }
-
-    /// Build a dense matrix when callers intentionally omitted metadata.
-    pub fn new_matrix_only(
-        n_samples: usize,
-        n_variants: usize,
-        values: Vec<f32>,
-        diagnostics: DenseDiagnostics,
-    ) -> Result<Self, GenoioError> {
-        Self::new_matrix_only_with_layout(
-            n_samples,
-            n_variants,
-            values,
-            DenseLayout::SampleMajor,
-            diagnostics,
-        )
-    }
-
-    /// Build a dense matrix with explicit layout when callers omitted metadata.
-    pub fn new_matrix_only_with_layout(
-        n_samples: usize,
-        n_variants: usize,
-        values: Vec<f32>,
-        layout: DenseLayout,
-        diagnostics: DenseDiagnostics,
-    ) -> Result<Self, GenoioError> {
-        validate_dense_values(n_samples, n_variants, values.len())?;
-
-        Ok(Self {
-            n_samples,
-            n_variants,
-            values,
-            layout,
-            samples: Vec::new(),
-            variants: Vec::new(),
             diagnostics,
         })
     }

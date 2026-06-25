@@ -11,13 +11,13 @@ use std::path::Path;
 
 use genoio_core::{
     DenseDiagnostics, DenseMissingPolicy, DenseSampleSelection, GenoioError, SampleRecord,
-    VariantFilter, VariantRecord, VariantWindow,
+    VariantFilter, VariantMetadataBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
 
 use super::decode::{
-    read_layout2_probability_payload_into, skip_layout2_probability_payload,
+    read_layout2_probability_payload_into, skip_layout2_probability_payload_raw,
     ProbabilityPayloadBuffers,
 };
 use super::header::{
@@ -62,12 +62,11 @@ impl<'a> BgenReadSession<'a> {
         read_bgen_samples(&mut self.reader, self.bgen, sample, &self.header)
     }
 
-    pub(super) fn read_all_variant_metadata(&mut self) -> Result<Vec<VariantRecord>> {
+    pub(super) fn read_all_variant_metadata(&mut self) -> Result<VariantMetadataBuffers> {
         read_layout2_variant_metadata(
             &mut self.reader,
             self.bgen,
             self.header.variant_count,
-            self.header.sample_count,
             self.header.flags.compression,
         )
     }
@@ -113,7 +112,11 @@ impl<'a> BgenReadSession<'a> {
     }
 
     pub(super) fn skip_payload(&mut self) -> Result<()> {
-        skip_layout2_probability_payload(&mut self.reader, self.bgen, self.header.flags.compression)
+        skip_layout2_probability_payload_raw(
+            &mut self.reader,
+            self.bgen,
+            self.header.flags.compression,
+        )
     }
 
     fn validate_index_record_consumed(&mut self, index_record: &BgenIndexRecord) -> Result<()> {
@@ -195,7 +198,7 @@ impl<'a> BgenVariantCursor<'a> {
     }
 }
 
-/// Matrix-only indexed read state that can skip unused variant metadata.
+/// Indexed read state shared by BGEN dense output loops.
 pub(super) struct BgenIndexedReadContext<'a> {
     pub(super) session: &'a mut BgenReadSession<'a>,
     pub(super) selection: DenseSampleSelection,
@@ -203,5 +206,6 @@ pub(super) struct BgenIndexedReadContext<'a> {
     pub(super) variant_filter: Option<&'a VariantFilter>,
     pub(super) variant_window: Option<VariantWindow>,
     pub(super) missing_policy: DenseMissingPolicy,
-    pub(super) matrix_only: bool,
+    pub(super) return_samples: bool,
+    pub(super) return_variants: bool,
 }

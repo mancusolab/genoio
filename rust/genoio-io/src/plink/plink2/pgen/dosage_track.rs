@@ -108,29 +108,14 @@ fn overlay_difflist_dosages(
         ));
     }
 
-    let group_ct = list_len.div_ceil(64);
-    let sample_id_width = sample_id_width(sample_ct);
-    let mut first_ids = Vec::with_capacity(group_ct);
-    for _ in 0..group_ct {
-        first_ids.push(read_fixed_width_sample_id(
-            path,
-            record,
-            cursor,
-            sample_id_width,
-        )?);
-    }
-    ensure_record_bytes(path, record, *cursor, group_ct.saturating_sub(1))?;
-    *cursor += group_ct.saturating_sub(1);
-
-    let deltas_start = *cursor;
-    let mut values_start = deltas_start;
+    let layout = read_difflist_id_layout(path, record, cursor, sample_ct, list_len)?;
+    let mut values_start = layout.deltas_start;
     walk_difflist_ids(
         path,
         record,
         &mut values_start,
         sample_ct,
-        list_len,
-        &first_ids,
+        &layout,
         |_, _| {},
     )?;
 
@@ -139,7 +124,7 @@ fn overlay_difflist_dosages(
     })?;
     ensure_record_bytes(path, record, values_start, dosage_bytes_len)?;
 
-    let mut ids_cursor = deltas_start;
+    let mut ids_cursor = layout.deltas_start;
     // The values follow the encoded sample IDs, so we first walk IDs to find
     // values_start, then walk them again while overlaying selected samples.
     walk_difflist_ids(
@@ -147,8 +132,7 @@ fn overlay_difflist_dosages(
         record,
         &mut ids_cursor,
         sample_ct,
-        list_len,
-        &first_ids,
+        &layout,
         |sample_index, dosage_index| {
             let byte_index = values_start + dosage_index * 2;
             let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
@@ -159,20 +143,56 @@ fn overlay_difflist_dosages(
     Ok(())
 }
 
-fn walk_difflist_ids(
+struct DifflistIdLayout {
+    first_ids_start: usize,
+    deltas_start: usize,
+    group_ct: usize,
+    sample_id_width: usize,
+    list_len: usize,
+}
+
+fn read_difflist_id_layout(
     path: &Path,
     record: &[u8],
     cursor: &mut usize,
     sample_ct: usize,
     list_len: usize,
-    first_ids: &[usize],
+) -> Result<DifflistIdLayout> {
+    let group_ct = list_len.div_ceil(64);
+    let sample_id_width = sample_id_width(sample_ct);
+    let first_ids_start = *cursor;
+    let first_ids_len = group_ct.checked_mul(sample_id_width).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen difflist sample id range is out of range")
+    })?;
+    ensure_record_bytes(path, record, *cursor, first_ids_len)?;
+    *cursor += first_ids_len;
+    ensure_record_bytes(path, record, *cursor, group_ct.saturating_sub(1))?;
+    *cursor += group_ct.saturating_sub(1);
+
+    Ok(DifflistIdLayout {
+        first_ids_start,
+        deltas_start: *cursor,
+        group_ct,
+        sample_id_width,
+        list_len,
+    })
+}
+
+fn walk_difflist_ids(
+    path: &Path,
+    record: &[u8],
+    cursor: &mut usize,
+    sample_ct: usize,
+    layout: &DifflistIdLayout,
     mut visit: impl FnMut(usize, usize),
 ) -> Result<()> {
     let mut previous_sample_id = None;
     let mut entry_index = 0;
-    for (group_index, first_id) in first_ids.iter().copied().enumerate() {
-        let group_len = (list_len - group_index * 64).min(64);
-        let mut sample_id = first_id;
+    for group_index in 0..layout.group_ct {
+        let group_len = (layout.list_len - group_index * 64).min(64);
+        let mut first_id_cursor = layout.first_ids_start + group_index * layout.sample_id_width;
+        let mut sample_id =
+            read_fixed_width_sample_id(path, record, &mut first_id_cursor, layout.sample_id_width)?;
         validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
         visit(sample_id, entry_index);
         entry_index += 1;
@@ -307,6 +327,38 @@ mod tests {
                 f32::from(200_u16) * (2.0 / 32768.0),
                 f32::from(300_u16) * (2.0 / 32768.0),
             ]
+        );
+        assert!(missing_indices.is_empty());
+    }
+
+    #[test]
+    fn variable_width_dosage_list_overlay_crosses_group_boundary() {
+        let path = Path::new("test.pgen");
+        let mut record = vec![65, 0, 64, 0];
+        record.extend(std::iter::repeat_n(1, 63));
+        for value in 1_u16..=65 {
+            record.extend(value.to_le_bytes());
+        }
+        let mut values = vec![0.0, 0.0, 9.0];
+        let mut missing_indices = Vec::new();
+
+        overlay_variable_width_dosages(
+            path,
+            &record,
+            0,
+            1,
+            130,
+            DosageOverlayTarget {
+                source_indices: &[0, 64, 129],
+                values: &mut values,
+                missing_indices: &mut missing_indices,
+            },
+        )
+        .expect("multi-group dosage-list overlay should decode");
+
+        assert_eq!(
+            values,
+            vec![1.0 * (2.0 / 32768.0), 65.0 * (2.0 / 32768.0), 9.0,]
         );
         assert!(missing_indices.is_empty());
     }

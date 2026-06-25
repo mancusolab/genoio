@@ -7,7 +7,9 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, MetadataOutput, SourceCapabilities, VariantFilter};
+use genoio_core::{
+    GenoioError, MetadataOutput, SampleMetadataBuffers, SourceCapabilities, VariantFilter,
+};
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
@@ -27,25 +29,18 @@ mod source;
 mod sparse;
 
 #[doc(inline)]
-pub use dense::{
-    read_plink2_dense, read_plink2_dense_windowed, read_plink2_dense_windowed_with_missing_policy,
-};
+pub use dense::read_plink2_dense_windowed;
 #[doc(inline)]
-pub use dosage::{
-    read_plink2_dosage_dense_windowed, read_plink2_dosage_dense_windowed_with_missing_policy,
-};
+pub use dosage::read_plink2_dosage_dense_windowed;
 #[doc(inline)]
 pub use haplotype::{
-    read_plink2_haplotypes_dense_windowed,
-    read_plink2_haplotypes_dense_windowed_with_missing_policy,
-    read_plink2_haplotypes_dosage_dense_windowed,
-    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy,
-    read_plink2_haplotypes_sparse, read_plink2_haplotypes_sparse_windowed,
+    read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_sparse_windowed,
 };
 #[doc(inline)]
-pub use sparse::{read_plink2_sparse, read_plink2_sparse_windowed};
+pub use sparse::read_plink2_sparse_windowed;
 
-use metadata::{parse_psam, parse_pvar};
+use metadata::{parse_psam, parse_pvar_metadata};
 use pgen::{read_supported_pgen_header, validate_plink2_dimensions};
 
 #[cfg(test)]
@@ -59,15 +54,15 @@ pub(super) fn require_genotype_decision_filter(
     })
 }
 
-/// Read PLINK2 sample and variant metadata without returning genotypes.
+/// Read PLINK2 metadata with variant metadata staged as columnar buffers.
 pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<MetadataOutput> {
     let header = read_supported_pgen_header(pgen)?;
     let samples = parse_psam(psam)?;
-    let variants = parse_pvar(pvar)?;
+    let variants = parse_pvar_metadata(pvar)?;
     validate_plink2_dimensions(pgen, &header, samples.len(), variants.len())?;
 
     Ok(MetadataOutput {
-        samples,
+        samples: SampleMetadataBuffers::from_records(&samples, false)?,
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })

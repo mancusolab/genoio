@@ -8,16 +8,15 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, reject_sparse_missing, DenseGenotypeMatrix, DenseMissingPolicy,
-    GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    append_sparse_value, attach_variant_stats, finish_sparse_column, reject_sparse_missing,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, GenotypeFilterPlan,
+    PartialFilterDecision, SampleMetadataBuffers, SparseGenotypeMatrix, VariantFilter,
+    VariantMetadataBuffers, VariantWindow,
 };
 
 use crate::error::Result;
 use crate::hardcall::evaluate_packed_hardcall_filter;
-use crate::matrix::{
-    apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
-    VariantMajorDenseParts,
-};
+use crate::matrix::apply_dense_missing_policy_to_variant;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use super::evaluate_dosage_filter;
@@ -29,11 +28,15 @@ use super::pgen::{
 };
 use super::require_genotype_decision_filter;
 use super::source::{
-    empty_dense_for_samples, empty_sparse_for_samples, expand_selected_samples_to_haplotypes,
-    require_pvar, variant_output_capacity, Plink2ReadContext,
+    empty_dense_output_for_samples, empty_sparse_output_for_samples,
+    expand_selected_samples_to_haplotypes, require_pvar, variant_output_capacity,
+    Plink2ReadContext,
 };
 
-/// Read retained explicit-phased PLINK2 hard calls as dense haplotype rows.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "output facade mirrors haplotype dense read options plus metadata return choices"
+)]
 pub fn read_plink2_haplotypes_dense_windowed(
     pgen: &Path,
     pvar: &Path,
@@ -41,33 +44,9 @@ pub fn read_plink2_haplotypes_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_haplotypes_dense_windowed_with_missing_policy(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
-)]
-pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let Plink2ReadContext {
         header,
@@ -78,7 +57,12 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         require_pvar(pvar)?;
-        return empty_dense_for_samples(haplotype_samples, diagnostics, matrix_only);
+        return empty_dense_output_for_samples(
+            haplotype_samples,
+            diagnostics,
+            return_samples,
+            return_variants,
+        );
     }
 
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
@@ -87,7 +71,8 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
     let mut haplotype_state = PgenHaplotypeDecodeState::default();
     let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let n_haplotypes = selection.samples.len() * 2;
-    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
@@ -128,7 +113,7 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
                 filter,
                 genotype_filter_plan,
                 Some(&variant),
-                !matrix_only,
+                return_variants,
             )?;
             match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
@@ -151,8 +136,8 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
             &decoder_state,
             &mut haplotype_state,
         )?;
-        if !matrix_only {
-            variants.push(variant);
+        if let Some(variants) = variants.as_mut() {
+            variants.push_record(&variant)?;
         }
         apply_dense_missing_policy_to_variant(
             &mut haplotype_state.selected_haplotype_values,
@@ -173,20 +158,23 @@ pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
-            n_samples,
-            n_variants,
-            variant_major_values,
-            samples: haplotype_samples,
-            variants,
-            diagnostics,
-        },
-        matrix_only,
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        n_variants,
+        variant_major_values,
+        DenseLayout::VariantMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
 
-/// Read retained explicit-phased PLINK2 dosages as dense haplotype rows.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "output facade mirrors haplotype dosage read options plus metadata return choices"
+)]
 pub fn read_plink2_haplotypes_dosage_dense_windowed(
     pgen: &Path,
     pvar: &Path,
@@ -194,33 +182,9 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
-)]
-pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let Plink2ReadContext {
         header,
@@ -231,7 +195,12 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         require_pvar(pvar)?;
-        return empty_dense_for_samples(haplotype_samples, diagnostics, matrix_only);
+        return empty_dense_output_for_samples(
+            haplotype_samples,
+            diagnostics,
+            return_samples,
+            return_variants,
+        );
     }
 
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
@@ -240,7 +209,8 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
     let mut haplotype_state = PgenHaplotypeDecodeState::default();
     let output_variant_capacity = variant_output_capacity(&header, variant_window);
     let n_haplotypes = selection.samples.len() * 2;
-    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
@@ -287,7 +257,7 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
                 &haplotype_state.selected_collapsed_missing_indices,
                 filter,
                 &variant,
-                !matrix_only,
+                return_variants,
             )?;
             match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
@@ -301,8 +271,8 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
                 attach_variant_stats(&mut variant, stats);
             }
         }
-        if !matrix_only {
-            variants.push(variant);
+        if let Some(variants) = variants.as_mut() {
+            variants.push_record(&variant)?;
         }
         apply_dense_missing_policy_to_variant(
             &mut haplotype_state.selected_haplotype_values,
@@ -323,38 +293,23 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
-            n_samples,
-            n_variants,
-            variant_major_values,
-            samples: haplotype_samples,
-            variants,
-            diagnostics,
-        },
-        matrix_only,
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        n_variants,
+        variant_major_values,
+        DenseLayout::VariantMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
 
-/// Read all retained explicit-phased PLINK2 hard calls as sparse haplotype CSC.
-pub fn read_plink2_haplotypes_sparse(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink2_haplotypes_sparse_windowed(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        None,
-    )
-}
-
-/// Read retained explicit-phased PLINK2 hard calls as sparse haplotype CSC.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "output facade mirrors haplotype sparse read options plus metadata return choices"
+)]
 pub fn read_plink2_haplotypes_sparse_windowed(
     pgen: &Path,
     pvar: &Path,
@@ -362,6 +317,8 @@ pub fn read_plink2_haplotypes_sparse_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
     let Plink2ReadContext {
         header,
@@ -373,7 +330,12 @@ pub fn read_plink2_haplotypes_sparse_windowed(
     let n_rows = haplotype_samples.len();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         require_pvar(pvar)?;
-        return empty_sparse_for_samples(haplotype_samples, diagnostics);
+        return empty_sparse_output_for_samples(
+            haplotype_samples,
+            diagnostics,
+            return_samples,
+            return_variants,
+        );
     }
 
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
@@ -381,7 +343,9 @@ pub fn read_plink2_haplotypes_sparse_windowed(
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
     let mut haplotype_state = PgenHaplotypeDecodeState::default();
     let output_variant_capacity = variant_output_capacity(&header, variant_window);
-    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
+    let mut output_variant_count = 0_usize;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
     let genotype_filter_plan = variant_filter.map_or(
@@ -427,7 +391,7 @@ pub fn read_plink2_haplotypes_sparse_windowed(
                 filter,
                 genotype_filter_plan,
                 Some(&variant),
-                true,
+                return_variants,
             )?;
             match retention.genotype_decision(retain_variant, &mut diagnostics) {
                 RetentionAction::Include => {}
@@ -458,7 +422,10 @@ pub fn read_plink2_haplotypes_sparse_windowed(
             &haplotype_state.selected_haplotype_values,
             &haplotype_state.selected_haplotype_missing_indices,
         )?;
-        variants.push(variant);
+        output_variant_count += 1;
+        if let Some(variants) = variants.as_mut() {
+            variants.push_record(&variant)?;
+        }
         if retention.window_is_satisfied() {
             stopped_after_window = true;
             break;
@@ -468,16 +435,18 @@ pub fn read_plink2_haplotypes_sparse_windowed(
         pvar_reader.validate_count(header.variant_ct)?;
     }
 
-    let n_cols = variants.len();
+    let n_cols = output_variant_count;
     diagnostics.retained_variants = n_cols;
 
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
     SparseGenotypeMatrix::new(
         n_rows,
         n_cols,
         indptr,
         indices,
         data,
-        haplotype_samples,
+        samples,
         variants,
         diagnostics,
     )
@@ -485,19 +454,19 @@ pub fn read_plink2_haplotypes_sparse_windowed(
 
 #[inline]
 fn append_haplotype_sparse_column(
-    indptr: &mut Vec<usize>,
-    indices: &mut Vec<usize>,
+    indptr: &mut Vec<i32>,
+    indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
     values: &[f32],
     missing_indices: &[usize],
 ) -> Result<()> {
     reject_sparse_missing(!missing_indices.is_empty())?;
+    // Haplotype decode already returns row-major values, so append nonzeros
+    // directly while reusing the core sparse index range checks.
     for (row, &value) in values.iter().enumerate() {
         if value != 0.0 {
-            indices.push(row);
-            data.push(value);
+            append_sparse_value(indices, data, row, value)?;
         }
     }
-    indptr.push(indices.len());
-    Ok(())
+    finish_sparse_column(indptr, data.len())
 }

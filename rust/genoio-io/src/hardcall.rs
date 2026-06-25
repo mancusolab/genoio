@@ -7,7 +7,7 @@
 
 use genoio_core::{
     variant_stats_from_counts, DenseMissingPolicy, GenoioError, GenotypeFilterConjunction,
-    GenotypeFilterPlan, VariantFilter, VariantRecord, VariantStats,
+    GenotypeFilterPlan, VariantFilter, VariantMetadataView, VariantStats,
 };
 
 use crate::error::Result;
@@ -184,11 +184,11 @@ impl HardcallCounts {
     }
 }
 
-pub(crate) fn evaluate_hardcall_counts_filter(
+pub(crate) fn evaluate_hardcall_counts_filter<V: VariantMetadataView + ?Sized>(
     counts: HardcallCounts,
     filter: &VariantFilter,
     filter_plan: GenotypeFilterPlan,
-    variant: Option<&VariantRecord>,
+    variant: Option<&V>,
     require_stats: bool,
 ) -> Result<(bool, Option<VariantStats>)> {
     if !require_stats {
@@ -199,7 +199,7 @@ pub(crate) fn evaluate_hardcall_counts_filter(
 
     let stats = counts.variant_stats()?;
     let retain = if let Some(variant) = variant {
-        filter.evaluate(variant, Some(&stats))
+        filter.evaluate_view(variant, Some(&stats))
     } else {
         filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
             GenoioError::internal_contract(
@@ -477,13 +477,13 @@ impl PackedHardcalls {
     }
 }
 
-pub(crate) fn evaluate_packed_hardcall_filter(
+pub(crate) fn evaluate_packed_hardcall_filter<V: VariantMetadataView + ?Sized>(
     packed: &PackedHardcalls,
     source_indices: &[usize],
     all_samples_selected: bool,
     filter: &VariantFilter,
     filter_plan: GenotypeFilterPlan,
-    variant: Option<&VariantRecord>,
+    variant: Option<&V>,
     require_stats: bool,
 ) -> Result<(bool, Option<VariantStats>)> {
     // Matrix-only reads can answer common genotype-stat filters from packed
@@ -501,7 +501,7 @@ pub(crate) fn evaluate_packed_hardcall_filter(
 
     let stats = packed.stats_for_selection(source_indices, all_samples_selected)?;
     let retain = if let Some(variant) = variant {
-        filter.evaluate(variant, Some(&stats))
+        filter.evaluate_view(variant, Some(&stats))
     } else {
         filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
             GenoioError::internal_contract(

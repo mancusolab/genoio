@@ -5,23 +5,29 @@
 //! metadata columns used by core records, and keeps source alleles alongside
 //! normalized reference/alternate fields.
 
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use genoio_core::{GenoioError, SampleRecord, VariantRecord, VariantWindow};
+use genoio_core::{
+    GenoioError, SampleRecord, VariantMetadataBuffers, VariantRecord, VariantWindow,
+};
 
 use crate::error::Result;
 use crate::plink::common::{optional_plink_value, PLINK2_MISSING_VALUES};
 
 pub(super) fn parse_psam(path: &Path) -> Result<Vec<SampleRecord>> {
-    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
+    let mut header = None;
+    let mut records = Vec::new();
+    let reader = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut header = None;
-    let mut records = Vec::new();
-    for (line_index, line) in contents.lines().enumerate() {
+    for (line_index, line) in BufReader::new(reader).lines().enumerate() {
+        let line = line.map_err(|source| GenoioError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -107,36 +113,19 @@ fn parse_psam_line(
     })
 }
 
-pub(super) fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
-    let mut reader = open_pvar_reader(path)?;
-    let mut contents = String::new();
-    reader
-        .read_to_string(&mut contents)
-        .map_err(|source| GenoioError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let data_lines = contents
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty() && !line.trim_start().starts_with("##"))
-        .collect::<Vec<_>>();
-    let header_index = data_lines
-        .iter()
-        .rposition(|(_, line)| line.trim_start().starts_with("#CHROM"));
-    let (columns, body_start) = if let Some(header_index) = header_index {
-        (
-            parse_pvar_header(data_lines[header_index].1)?,
-            header_index + 1,
-        )
-    } else {
-        infer_pvar_header(path, data_lines.first().map(|(_, line)| *line))?
-    };
-    data_lines
-        .into_iter()
-        .skip(body_start)
-        .map(|(index, line)| parse_pvar_line(path, index + 1, &columns, line))
-        .collect()
+pub(super) fn parse_pvar_metadata(path: &Path) -> Result<VariantMetadataBuffers> {
+    let mut variants = VariantMetadataBuffers::with_capacity(0);
+    let mut reader = PvarLineReader::new(path)?;
+    while let Some(line) = reader.next_line()? {
+        append_pvar_metadata_line(
+            path,
+            line.line_number,
+            &line.columns,
+            &line.text,
+            &mut variants,
+        )?;
+    }
+    Ok(variants)
 }
 
 pub(super) fn parse_pvar_source_window(
@@ -144,64 +133,104 @@ pub(super) fn parse_pvar_source_window(
     window: VariantWindow,
     expected_variant_ct: usize,
 ) -> Result<Vec<(usize, VariantRecord)>> {
-    let reader = open_pvar_reader(path)?;
-    let mut columns = None;
-    let mut body_started = false;
-    let mut source_index = 0_usize;
     let window_end = window.start.saturating_add(window.len);
     let mut records = Vec::with_capacity(window.len);
-
-    for (line_index, line_result) in reader.lines().enumerate() {
-        let line = line_result.map_err(|source| GenoioError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("##") {
-            continue;
-        }
-        if trimmed.starts_with("#CHROM") {
-            columns = Some(parse_pvar_header(trimmed)?);
-            body_started = true;
-            continue;
-        }
-        if !body_started {
-            // Headerless PVAR has PLINK-specific default columns. Infer once
-            // from the first data row, then use the same parser as headered
-            // PVAR rows.
-            let (inferred, _) = infer_pvar_header(path, Some(trimmed))?;
-            columns = Some(inferred);
-            body_started = true;
-        }
-
-        let Some(columns) = columns.as_ref() else {
-            return Err(GenoioError::invalid_source(
-                path,
-                "pvar columns were not initialized before parsing body rows",
-            ));
-        };
-        let variant = parse_pvar_line(path, line_index + 1, columns, trimmed)?;
+    let mut reader = PvarRecordReader::new(path)?;
+    if window_end == 0 {
+        return Ok(records);
+    }
+    while let Some((source_index, variant)) = reader.next_record()? {
         if source_index >= window.start && source_index < window_end {
             records.push((source_index, variant));
         }
-        source_index += 1;
-        if source_index >= window_end {
+        if source_index + 1 >= window_end {
             break;
         }
     }
 
     let required_rows = window_end.min(expected_variant_ct);
-    if source_index < required_rows {
+    if reader.source_index() < required_rows {
         return Err(GenoioError::invalid_source(
             path,
-            format!("pvar variant count {source_index} is shorter than requested source window"),
+            format!(
+                "pvar variant count {} is shorter than requested source window",
+                reader.source_index()
+            ),
         ));
     }
 
     Ok(records)
 }
 
-pub(super) struct PvarRecordReader {
+fn append_pvar_metadata_line(
+    path: &Path,
+    line_number: usize,
+    columns: &PvarColumns,
+    line: &str,
+    variants: &mut VariantMetadataBuffers,
+) -> Result<()> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let required = columns
+        .chrom
+        .max(columns.pos)
+        .max(columns.id)
+        .max(columns.ref_allele)
+        .max(columns.alt_allele)
+        .max(columns.qual.unwrap_or(0));
+    if fields.len() <= required {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!("pvar line {line_number} has too few fields"),
+        ));
+    }
+    let pos = fields[columns.pos].parse::<i64>().map_err(|error| {
+        GenoioError::invalid_source(
+            path,
+            format!("pvar line {line_number} has invalid position: {error}"),
+        )
+    })?;
+    let ref_allele = fields[columns.ref_allele];
+    let alt_allele = fields[columns.alt_allele];
+    let first_alt = alt_allele.split(',').next().unwrap_or("");
+    if first_alt.is_empty() {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!("pvar line {line_number} has empty ALT allele"),
+        ));
+    }
+    let qual = columns
+        .qual
+        .map(|index| parse_optional_qual(path, line_number, fields[index]))
+        .transpose()?
+        .flatten();
+
+    variants.chroms.append_value(fields[columns.chrom])?;
+    variants.positions.push(pos);
+    variants.ids.append_value(fields[columns.id])?;
+    variants.a0s.append_value(ref_allele)?;
+    variants.a1s.append_value(first_alt)?;
+    variants.ref_alleles.push(Some(ref_allele.to_string()));
+    variants.alt_alleles.push(Some(alt_allele.to_string()));
+    variants.source_a0s.append_value(ref_allele)?;
+    variants.source_a1s.append_value(first_alt)?;
+    variants.flipped.push(false);
+    variants.quals.push(qual);
+    variants.afs.push(None);
+    variants.mafs.push(None);
+    variants.macs.push(None);
+    variants.missing_rates.push(None);
+    variants.n_called.push(None);
+    Ok(())
+}
+
+struct PvarBodyLine {
+    source_index: usize,
+    line_number: usize,
+    columns: PvarColumns,
+    text: String,
+}
+
+struct PvarLineReader {
     path: PathBuf,
     lines: std::iter::Enumerate<std::io::Lines<Box<dyn BufRead>>>,
     columns: Option<PvarColumns>,
@@ -209,8 +238,8 @@ pub(super) struct PvarRecordReader {
     source_index: usize,
 }
 
-impl PvarRecordReader {
-    pub(super) fn new(path: &Path) -> Result<Self> {
+impl PvarLineReader {
+    fn new(path: &Path) -> Result<Self> {
         Ok(Self {
             path: path.to_path_buf(),
             lines: open_pvar_reader(path)?.lines().enumerate(),
@@ -220,7 +249,7 @@ impl PvarRecordReader {
         })
     }
 
-    pub(super) fn next_record(&mut self) -> Result<Option<(usize, VariantRecord)>> {
+    fn next_line(&mut self) -> Result<Option<PvarBodyLine>> {
         for (line_index, line_result) in self.lines.by_ref() {
             let line = line_result.map_err(|source| GenoioError::Io {
                 path: self.path.clone(),
@@ -236,8 +265,7 @@ impl PvarRecordReader {
                 continue;
             }
             if !self.body_started {
-                let (inferred, _) = infer_pvar_header(&self.path, Some(trimmed))?;
-                self.columns = Some(inferred);
+                self.columns = Some(infer_pvar_header(&self.path, trimmed)?);
                 self.body_started = true;
             }
 
@@ -247,21 +275,59 @@ impl PvarRecordReader {
                     "pvar columns were not initialized before parsing body rows",
                 ));
             };
-            let variant = parse_pvar_line(&self.path, line_index + 1, columns, trimmed)?;
             let source_index = self.source_index;
             self.source_index += 1;
-            return Ok(Some((source_index, variant)));
+            return Ok(Some(PvarBodyLine {
+                source_index,
+                line_number: line_index + 1,
+                columns: *columns,
+                text: trimmed.to_string(),
+            }));
         }
         Ok(None)
     }
 
+    fn source_index(&self) -> usize {
+        self.source_index
+    }
+}
+
+/// Streams PVAR body rows as source-indexed variant records.
+pub(super) struct PvarRecordReader {
+    line_reader: PvarLineReader,
+}
+
+impl PvarRecordReader {
+    pub(super) fn new(path: &Path) -> Result<Self> {
+        Ok(Self {
+            line_reader: PvarLineReader::new(path)?,
+        })
+    }
+
+    pub(super) fn next_record(&mut self) -> Result<Option<(usize, VariantRecord)>> {
+        let Some(line) = self.line_reader.next_line()? else {
+            return Ok(None);
+        };
+        let variant = parse_pvar_line(
+            &self.line_reader.path,
+            line.line_number,
+            &line.columns,
+            &line.text,
+        )?;
+        Ok(Some((line.source_index, variant)))
+    }
+
+    pub(super) fn source_index(&self) -> usize {
+        self.line_reader.source_index()
+    }
+
     pub(super) fn validate_count(&self, expected_variant_ct: usize) -> Result<()> {
-        if self.source_index != expected_variant_ct {
+        if self.source_index() != expected_variant_ct {
             return Err(GenoioError::invalid_source(
-                &self.path,
+                &self.line_reader.path,
                 format!(
                     "pvar variant count {} does not match pgen variant count {expected_variant_ct}",
-                    self.source_index
+                    self.source_index()
                 ),
             ));
         }
@@ -324,44 +390,25 @@ fn parse_pvar_header(line: &str) -> Result<PvarColumns> {
     })
 }
 
-fn infer_pvar_header(path: &Path, first_data_line: Option<&str>) -> Result<(PvarColumns, usize)> {
-    let Some(line) = first_data_line else {
-        return Ok((
-            PvarColumns {
-                chrom: 0,
-                id: 1,
-                pos: 2,
-                alt_allele: 3,
-                ref_allele: 4,
-                qual: None,
-            },
-            0,
-        ));
-    };
+fn infer_pvar_header(path: &Path, line: &str) -> Result<PvarColumns> {
     let field_count = line.split_whitespace().count();
     match field_count {
-        5 => Ok((
-            PvarColumns {
-                chrom: 0,
-                id: 1,
-                pos: 2,
-                alt_allele: 3,
-                ref_allele: 4,
-                qual: None,
-            },
-            0,
-        )),
-        count if count >= 6 => Ok((
-            PvarColumns {
-                chrom: 0,
-                id: 1,
-                pos: 3,
-                alt_allele: 4,
-                ref_allele: 5,
-                qual: None,
-            },
-            0,
-        )),
+        5 => Ok(PvarColumns {
+            chrom: 0,
+            id: 1,
+            pos: 2,
+            alt_allele: 3,
+            ref_allele: 4,
+            qual: None,
+        }),
+        count if count >= 6 => Ok(PvarColumns {
+            chrom: 0,
+            id: 1,
+            pos: 3,
+            alt_allele: 4,
+            ref_allele: 5,
+            qual: None,
+        }),
         _ => Err(GenoioError::invalid_source(
             path,
             "pvar without header must have at least five columns",

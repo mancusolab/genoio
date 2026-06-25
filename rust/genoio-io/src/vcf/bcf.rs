@@ -12,11 +12,11 @@ use std::fs::File;
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
-    flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele, reject_sparse_missing,
-    select_samples_source_order, DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection,
-    GenoioError, MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantRecord, VariantStats, VariantWindow,
+    append_sparse_column, compute_dosage_variant_stats, reject_sparse_missing,
+    select_samples_source_order, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -29,17 +29,166 @@ use noodles_vcf::variant::record::{
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::hardcall::{evaluate_hardcall_counts_filter, HardcallCounts};
-use crate::matrix::{
-    apply_dense_missing_policy_to_variant, finish_variant_major_dense_matrix,
-    VariantMajorDenseParts,
-};
+use crate::matrix::apply_dense_missing_policy_to_variant;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
-use super::text::variant_record_from_noodles_variant_record;
+use super::text::append_public_variant_metadata_from_noodles_variant_record;
 use super::{
-    haplotype_sample_records, sample_records_from_noodles_header,
+    finite_qual, haplotype_sample_records, sample_records_from_noodles_header,
     variant_record_has_phased_genotype,
 };
+
+const BCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
+
+/// Borrowed metadata view over a lazy BCF record.
+///
+/// BCF matrix loops use this for metadata filters, validation, and metadata append
+/// without building an owned `VariantRecord` on the normal retained path.
+struct BcfVariantView<'a> {
+    chrom: &'a str,
+    pos: u32,
+    ids: bcf::record::Ids<'a>,
+    ref_allele: bcf::record::ReferenceBases<'a>,
+    alternate_bases: bcf::record::AlternateBases<'a>,
+    multi_alt_allele: Option<String>,
+    qual: Option<f32>,
+}
+
+impl VariantMetadataView for BcfVariantView<'_> {
+    fn chrom(&self) -> &str {
+        self.chrom
+    }
+
+    fn pos(&self) -> u32 {
+        self.pos
+    }
+
+    fn id(&self) -> &str {
+        self.ids.iter().next().unwrap_or(".")
+    }
+
+    fn a0(&self) -> &str {
+        std::str::from_utf8(self.ref_allele.as_ref()).unwrap_or("")
+    }
+
+    fn a1(&self) -> &str {
+        match self.alternate_bases.iter().next().transpose() {
+            Ok(Some(alt)) => alt,
+            _ => "",
+        }
+    }
+
+    fn ref_allele(&self) -> Option<&str> {
+        Some(self.a0())
+    }
+
+    fn alt_allele(&self) -> Option<&str> {
+        Some(
+            self.multi_alt_allele
+                .as_deref()
+                .unwrap_or_else(|| self.a1()),
+        )
+    }
+
+    fn qual(&self) -> Option<f32> {
+        self.qual
+    }
+}
+
+fn bcf_variant_view_from_record<'a>(
+    path: &Path,
+    header: &'a noodles::Header,
+    record: &'a bcf::Record,
+) -> Result<BcfVariantView<'a>> {
+    let chrom = <bcf::Record as noodles::variant::Record>::reference_sequence_name(record, header)
+        .map_err(|error| GenoioError::invalid_source(path, format!("bcf chrom error: {error}")))?;
+    if chrom.is_empty() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "bcf record is missing a chromosome id",
+        ));
+    }
+
+    let pos = record
+        .variant_start()
+        .transpose()
+        .map_err(|error| GenoioError::invalid_source(path, format!("bcf position error: {error}")))?
+        .ok_or_else(|| GenoioError::invalid_source(path, "bcf record position is missing"))?;
+    let pos = u32::try_from(pos.get())
+        .map_err(|_| GenoioError::invalid_source(path, "bcf record position is out of range"))?;
+
+    let ref_allele = record.reference_bases();
+    std::str::from_utf8(ref_allele.as_ref()).map_err(|error| {
+        GenoioError::invalid_source(path, format!("bcf reference allele is not UTF-8: {error}"))
+    })?;
+    let ids = record.ids();
+    let alternate_bases = record.alternate_bases();
+    let multi_alt_allele = bcf_multi_alt_allele_string(path, &alternate_bases)?;
+    let qual = record
+        .quality_score()
+        .map_err(|error| GenoioError::invalid_source(path, format!("bcf qual error: {error}")))?
+        .and_then(finite_qual);
+
+    Ok(BcfVariantView {
+        chrom,
+        pos,
+        ids,
+        ref_allele,
+        alternate_bases,
+        multi_alt_allele,
+        qual,
+    })
+}
+
+fn bcf_multi_alt_allele_string(
+    path: &Path,
+    alternate_bases: &bcf::record::AlternateBases<'_>,
+) -> Result<Option<String>> {
+    let mut iter = alternate_bases.iter();
+    let first = iter
+        .next()
+        .transpose()
+        .map_err(|error| GenoioError::invalid_source(path, format!("bcf alt error: {error}")))?
+        .ok_or_else(|| GenoioError::invalid_source(path, "bcf record is missing ALT"))?;
+    let Some(second) = iter.next() else {
+        return Ok(None);
+    };
+
+    let mut joined = String::from(first);
+    joined.push(',');
+    joined.push_str(
+        second.map_err(|error| {
+            GenoioError::invalid_source(path, format!("bcf alt error: {error}"))
+        })?,
+    );
+    for alt in iter {
+        joined.push(',');
+        joined.push_str(alt.map_err(|error| {
+            GenoioError::invalid_source(path, format!("bcf alt error: {error}"))
+        })?);
+    }
+    Ok(Some(joined))
+}
+
+fn push_bcf_variant_row(
+    variants: &mut Option<VariantMetadataBuffers>,
+    variant: &BcfVariantView<'_>,
+    stats: Option<VariantStats>,
+    flipped: bool,
+) -> Result<()> {
+    let Some(variants) = variants.as_mut() else {
+        return Ok(());
+    };
+    let row_index = variants.len();
+    variants.push_view(variant)?;
+    if let Some(stats) = stats {
+        variants.attach_stats(row_index, stats)?;
+    }
+    if flipped {
+        variants.flip_to_minor_allele(row_index)?;
+    }
+    Ok(())
+}
 
 pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
     let file = File::open(path)
@@ -50,10 +199,9 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf header error: {error}")))?;
     let samples = sample_records_from_noodles_header(&header);
 
-    let mut variants = Vec::new();
+    let mut variants = VariantMetadataBuffers::with_capacity(BCF_METADATA_INITIAL_VARIANT_CAPACITY);
     let mut has_phased_genotype_evidence = false;
-    // Reuse noodles' lazy BCF record buffer so metadata scans do not allocate a
-    // full RecordBuf for each variant before genotype decoding exists.
+    // Reuse noodles' lazy BCF record buffer and append public columns directly.
     let mut record = bcf::Record::default();
     loop {
         let n = reader.read_record(&mut record).map_err(|error| {
@@ -68,9 +216,12 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
         {
             has_phased_genotype_evidence = true;
         }
-        variants.push(variant_record_from_noodles_variant_record(
-            path, &header, &record,
-        )?);
+        append_public_variant_metadata_from_noodles_variant_record(
+            path,
+            &header,
+            &record,
+            &mut variants,
+        )?;
     }
 
     let capabilities = if has_phased_genotype_evidence {
@@ -80,48 +231,10 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
     };
 
     Ok(MetadataOutput {
-        samples,
+        samples: SampleMetadataBuffers::from_records(&samples, false)?,
         variants,
         capabilities,
     })
-}
-
-pub(super) fn read_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_dense_windowed_with_field(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        matrix_only,
-        DenseField::Gt,
-    )
-}
-
-pub(super) fn read_dosage_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_dense_windowed_with_field(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        matrix_only,
-        DenseField::Ds,
-    )
 }
 
 struct BcfInput {
@@ -151,6 +264,8 @@ pub(super) fn read_sparse_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
     let BcfInput {
         mut reader,
@@ -164,12 +279,13 @@ pub(super) fn read_sparse_windowed(
     } = selection;
 
     let n_rows = samples.len();
-    let mut indptr = vec![0];
+    let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = Vec::new();
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
+    let mut decoded = BcfDenseDecodeBuffers::with_capacity(source_indices.len());
 
     while !retention.window_is_satisfied() {
         let n = reader.read_record(&mut record).map_err(|error| {
@@ -179,9 +295,9 @@ pub(super) fn read_sparse_windowed(
             break;
         }
 
-        let mut variant = variant_record_from_noodles_variant_record(path, &header, &record)?;
+        let variant = bcf_variant_view_from_record(path, &header, &record)?;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
+            filter.partial_decision_view(&variant)
         });
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -192,17 +308,18 @@ pub(super) fn read_sparse_windowed(
         validate_biallelic_variant(path, &variant)?;
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        let decoded = decode_gt_record(
+        decode_gt_record(
             path,
             &header,
             &record,
             &source_indices,
             BcfStatsMode::from_needed(needs_genotype_decision),
+            &mut decoded,
         )?;
         if needs_genotype_decision {
             match retention.genotype_decision(
                 variant_filter
-                    .is_none_or(|filter| filter.evaluate(&variant, decoded.stats.as_ref())),
+                    .is_none_or(|filter| filter.evaluate_view(&variant, decoded.stats.as_ref())),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
@@ -211,18 +328,15 @@ pub(super) fn read_sparse_windowed(
             }
         }
 
-        if let Some(stats) = decoded.stats {
-            attach_variant_stats(&mut variant, stats);
-        }
         reject_sparse_missing(!decoded.missing_indices.is_empty())?;
-        let mut values = decoded.values;
-        flip_values_to_minor_allele(&mut values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &values);
-        variants.push(variant);
+        let flipped = flip_values_to_minor_allele(decoded.values.as_mut_slice());
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoded.values)?;
+        push_bcf_variant_row(&mut variants, &variant, decoded.stats, flipped)?;
     }
 
-    let n_cols = variants.len();
+    let n_cols = indptr.len() - 1;
     diagnostics.retained_variants = n_cols;
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, false)?;
     SparseGenotypeMatrix::new(
         n_rows,
         n_cols,
@@ -241,7 +355,8 @@ pub(super) fn read_haplotypes_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let BcfInput {
         mut reader,
@@ -254,11 +369,13 @@ pub(super) fn read_haplotypes_dense_windowed(
         mut diagnostics,
     } = selection;
 
-    let mut variants = Vec::new();
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut variant_major_values = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
+    let mut decoded_gt = BcfDenseDecodeBuffers::with_capacity(source_indices.len());
+    let mut decoded = BcfHaplotypeDecodeBuffers::with_capacity(source_indices.len());
 
     while !retention.window_is_satisfied() {
         let n = reader.read_record(&mut record).map_err(|error| {
@@ -268,59 +385,41 @@ pub(super) fn read_haplotypes_dense_windowed(
             break;
         }
 
-        let variant = if !matrix_only || variant_filter.is_some() {
-            Some(variant_record_from_noodles_variant_record(
-                path, &header, &record,
-            )?)
-        } else {
-            None
-        };
-        let partial_decision = match (variant_filter, variant.as_ref()) {
-            (Some(filter), Some(variant)) => filter.partial_decision(variant),
-            (Some(_), None) => {
-                return Err(GenoioError::internal_contract(
-                    "bcf filter requires variant metadata",
-                ));
-            }
-            (None, _) => PartialFilterDecision::Accept,
-        };
+        let variant = bcf_variant_view_from_record(path, &header, &record)?;
+        let partial_decision = variant_filter
+            .map(|filter| filter.partial_decision_view(&variant))
+            .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
             MetadataRetentionAction::Skip => continue,
             MetadataRetentionAction::Stop => break,
         }
 
-        if let Some(variant) = variant.as_ref() {
-            validate_biallelic_variant(path, variant)?;
-        } else {
-            validate_biallelic_lazy_record(path, &header, &record)?;
-        }
+        validate_biallelic_variant(path, &variant)?;
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         let filter_result = if needs_genotype_decision {
-            let variant = variant.as_ref().ok_or_else(|| {
-                GenoioError::internal_contract("bcf filter requires variant metadata")
-            })?;
             let filter = variant_filter.ok_or_else(|| {
                 GenoioError::internal_contract("genotype decision requires a variant filter")
             })?;
-            let decoded_gt = decode_gt_record(
+            decode_gt_record(
                 path,
                 &header,
                 &record,
                 &source_indices,
-                if matrix_only {
-                    BcfStatsMode::Counts
-                } else {
+                if return_variants {
                     BcfStatsMode::Compute
+                } else {
+                    BcfStatsMode::Counts
                 },
+                &mut decoded_gt,
             )?;
             Some(evaluate_bcf_gt_filter(
                 &decoded_gt,
                 filter,
-                variant,
-                matrix_only,
+                &variant,
+                return_variants,
                 "haplotype",
             )?)
         } else {
@@ -334,43 +433,32 @@ pub(super) fn read_haplotypes_dense_windowed(
             }
         }
 
-        if !matrix_only {
-            let mut variant = variant.ok_or_else(|| {
-                GenoioError::internal_contract("bcf metadata output requires variant metadata")
-            })?;
-            if let Some((_, Some(stats))) = filter_result {
-                attach_variant_stats(&mut variant, stats);
-            }
-            variants.push(variant);
-        }
+        let stats_to_attach = filter_result.and_then(|(_, stats)| stats);
+        push_bcf_variant_row(&mut variants, &variant, stats_to_attach, false)?;
 
-        let mut decoded = decode_phased_haplotype_record(path, &header, &record, &source_indices)?;
+        decode_phased_haplotype_record(path, &header, &record, &source_indices, &mut decoded)?;
         apply_dense_missing_policy_to_variant(
             &mut decoded.values,
             &decoded.missing_indices,
             missing_policy,
         )?;
         n_variants += 1;
-        variant_major_values.extend(decoded.values);
+        variant_major_values.extend_from_slice(&decoded.values);
     }
 
-    let samples = if matrix_only {
-        Vec::new()
-    } else {
-        haplotype_sample_records(&selected_samples, &source_indices)
-    };
+    let haplotype_samples = haplotype_sample_records(&selected_samples, &source_indices);
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
     let n_samples = selected_samples.len() * 2;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
-            n_samples,
-            n_variants,
-            variant_major_values,
-            samples,
-            variants,
-            diagnostics,
-        },
-        matrix_only,
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        n_variants,
+        variant_major_values,
+        DenseLayout::VariantMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
 
@@ -379,6 +467,8 @@ pub(super) fn read_haplotypes_sparse_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<SparseGenotypeMatrix> {
     let BcfInput {
         mut reader,
@@ -391,14 +481,18 @@ pub(super) fn read_haplotypes_sparse_windowed(
         mut diagnostics,
     } = selection;
 
-    let samples = haplotype_sample_records(&selected_samples, &source_indices);
-    let n_rows = samples.len();
-    let mut indptr = vec![0];
+    let haplotype_samples = haplotype_sample_records(&selected_samples, &source_indices);
+    let output_samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    let n_rows = selected_samples.len() * 2;
+    let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = Vec::new();
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
+    let mut decoded = BcfHaplotypeDecodeBuffers::with_capacity(source_indices.len());
+    let mut stats_decoded = BcfDenseDecodeBuffers::with_capacity(source_indices.len());
 
     while !retention.window_is_satisfied() {
         let n = reader.read_record(&mut record).map_err(|error| {
@@ -408,9 +502,9 @@ pub(super) fn read_haplotypes_sparse_windowed(
             break;
         }
 
-        let mut variant = variant_record_from_noodles_variant_record(path, &header, &record)?;
+        let variant = bcf_variant_view_from_record(path, &header, &record)?;
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
+            filter.partial_decision_view(&variant)
         });
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -422,23 +516,25 @@ pub(super) fn read_haplotypes_sparse_windowed(
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
         let stats = if needs_genotype_decision {
+            decode_gt_record(
+                path,
+                &header,
+                &record,
+                &source_indices,
+                BcfStatsMode::Compute,
+                &mut stats_decoded,
+            )?;
             Some(
-                decode_gt_record(
-                    path,
-                    &header,
-                    &record,
-                    &source_indices,
-                    BcfStatsMode::Compute,
-                )?
-                .stats
-                .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
+                stats_decoded
+                    .stats
+                    .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
             )
         } else {
             None
         };
         if needs_genotype_decision {
             match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                variant_filter.is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref())),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
@@ -447,18 +543,14 @@ pub(super) fn read_haplotypes_sparse_windowed(
             }
         }
 
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
-        }
-        let decoded = decode_phased_haplotype_record(path, &header, &record, &source_indices)?;
+        decode_phased_haplotype_record(path, &header, &record, &source_indices, &mut decoded)?;
         reject_sparse_missing(!decoded.missing_indices.is_empty())?;
-        let mut values = decoded.values;
-        flip_haplotype_values_to_minor_allele(&mut values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &values);
-        variants.push(variant);
+        let flipped = flip_haplotype_values_to_minor_allele(decoded.values.as_mut_slice());
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoded.values)?;
+        push_bcf_variant_row(&mut variants, &variant, stats, flipped)?;
     }
 
-    let n_cols = variants.len();
+    let n_cols = indptr.len() - 1;
     diagnostics.retained_variants = n_cols;
     SparseGenotypeMatrix::new(
         n_rows,
@@ -466,7 +558,7 @@ pub(super) fn read_haplotypes_sparse_windowed(
         indptr,
         indices,
         data,
-        samples,
+        output_samples,
         variants,
         diagnostics,
     )
@@ -478,13 +570,60 @@ enum DenseField {
     Ds,
 }
 
+pub(super) fn read_dense_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrix> {
+    read_dense_windowed_with_field(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        return_samples,
+        return_variants,
+        DenseField::Gt,
+    )
+}
+
+pub(super) fn read_dosage_dense_windowed(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    variant_filter: Option<&VariantFilter>,
+    variant_window: Option<VariantWindow>,
+    missing_policy: DenseMissingPolicy,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrix> {
+    read_dense_windowed_with_field(
+        path,
+        requested_samples,
+        variant_filter,
+        variant_window,
+        missing_policy,
+        return_samples,
+        return_variants,
+        DenseField::Ds,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared BCF dense loop mirrors read options plus field and metadata return choices"
+)]
 fn read_dense_windowed_with_field(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
     field: DenseField,
 ) -> Result<DenseGenotypeMatrix> {
     let BcfInput {
@@ -498,11 +637,12 @@ fn read_dense_windowed_with_field(
         mut diagnostics,
     } = selection;
 
-    let mut variants = Vec::new();
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut variant_major_values = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
+    let mut decoded = BcfDenseDecodeBuffers::with_capacity(source_indices.len());
 
     while !retention.window_is_satisfied() {
         let n = reader.read_record(&mut record).map_err(|error| {
@@ -512,55 +652,40 @@ fn read_dense_windowed_with_field(
             break;
         }
 
-        let variant = if !matrix_only || variant_filter.is_some() {
-            Some(variant_record_from_noodles_variant_record(
-                path, &header, &record,
-            )?)
-        } else {
-            None
-        };
-        let partial_decision = match (variant_filter, variant.as_ref()) {
-            (Some(filter), Some(variant)) => filter.partial_decision(variant),
-            (Some(_), None) => {
-                return Err(GenoioError::internal_contract(
-                    "bcf filter requires variant metadata",
-                ));
-            }
-            (None, _) => PartialFilterDecision::Accept,
-        };
+        let variant = bcf_variant_view_from_record(path, &header, &record)?;
+        let partial_decision = variant_filter
+            .map(|filter| filter.partial_decision_view(&variant))
+            .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
             MetadataRetentionAction::Skip => continue,
             MetadataRetentionAction::Stop => break,
         }
 
-        if let Some(variant) = variant.as_ref() {
-            validate_biallelic_variant(path, variant)?;
-        } else {
-            validate_biallelic_lazy_record(path, &header, &record)?;
-        }
+        validate_biallelic_variant(path, &variant)?;
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-        let mut decoded = match field {
+        match field {
             DenseField::Gt => decode_gt_record(
                 path,
                 &header,
                 &record,
                 &source_indices,
-                match (needs_genotype_decision, matrix_only) {
-                    (true, true) => BcfStatsMode::Counts,
-                    (true, false) => BcfStatsMode::Compute,
+                match (needs_genotype_decision, return_variants) {
+                    (true, false) => BcfStatsMode::Counts,
+                    (true, true) => BcfStatsMode::Compute,
                     (false, _) => BcfStatsMode::Skip,
                 },
+                &mut decoded,
             )?,
-            DenseField::Ds => decode_ds_record(path, &header, &record, &source_indices, false)?,
+            DenseField::Ds => {
+                decode_ds_record(path, &header, &record, &source_indices, false, &mut decoded)?
+            }
         };
 
+        let mut stats_to_attach = None;
         if needs_genotype_decision {
-            let variant_ref = variant.as_ref().ok_or_else(|| {
-                GenoioError::internal_contract("bcf filter requires variant metadata")
-            })?;
             let (retain_variant, stats) = match field {
                 DenseField::Gt => {
                     let filter = variant_filter.ok_or_else(|| {
@@ -568,7 +693,7 @@ fn read_dense_windowed_with_field(
                             "genotype decision requires a variant filter",
                         )
                     })?;
-                    evaluate_bcf_gt_filter(&decoded, filter, variant_ref, matrix_only, "GT")?
+                    evaluate_bcf_gt_filter(&decoded, filter, &variant, return_variants, "GT")?
                 }
                 DenseField::Ds => {
                     let filter = variant_filter.ok_or_else(|| {
@@ -580,8 +705,8 @@ fn read_dense_windowed_with_field(
                         &decoded.values,
                         &decoded.missing_indices,
                         filter,
-                        variant_ref,
-                        !matrix_only,
+                        &variant,
+                        return_variants,
                     )?
                 }
             };
@@ -590,21 +715,9 @@ fn read_dense_windowed_with_field(
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-            if !matrix_only {
-                let mut variant = variant.ok_or_else(|| {
-                    GenoioError::internal_contract("bcf metadata output requires variant metadata")
-                })?;
-                if let Some(stats) = stats {
-                    attach_variant_stats(&mut variant, stats);
-                }
-                variants.push(variant);
-            }
-        } else if !matrix_only {
-            let variant = variant.ok_or_else(|| {
-                GenoioError::internal_contract("bcf metadata output requires variant metadata")
-            })?;
-            variants.push(variant);
+            stats_to_attach = stats;
         }
+        push_bcf_variant_row(&mut variants, &variant, stats_to_attach, false)?;
 
         n_variants += 1;
         apply_dense_missing_policy_to_variant(
@@ -612,36 +725,33 @@ fn read_dense_windowed_with_field(
             &decoded.missing_indices,
             missing_policy,
         )?;
-        variant_major_values.extend(decoded.values);
+        variant_major_values.extend_from_slice(&decoded.values);
     }
 
     let n_samples = samples.len();
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
-            n_samples,
-            n_variants,
-            variant_major_values,
-            samples,
-            variants,
-            diagnostics,
-        },
-        matrix_only,
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, false)?;
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        n_variants,
+        variant_major_values,
+        DenseLayout::VariantMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
 
-fn evaluate_bcf_gt_filter(
-    decoded: &DecodedBcfDenseValues,
+fn evaluate_bcf_gt_filter<V: VariantMetadataView + ?Sized>(
+    decoded: &BcfDenseDecodeBuffers,
     filter: &VariantFilter,
-    variant: &VariantRecord,
-    matrix_only: bool,
+    variant: &V,
+    require_stats: bool,
     context: &str,
 ) -> Result<(bool, Option<VariantStats>)> {
-    if matrix_only {
+    if !require_stats {
         let counts = decoded.counts.ok_or_else(|| {
-            GenoioError::internal_contract(format!(
-                "matrix-only bcf {context} filter missing counts"
-            ))
+            GenoioError::internal_contract(format!("bcf {context} filter fast path missing counts"))
         })?;
         return evaluate_hardcall_counts_filter(
             counts,
@@ -655,41 +765,27 @@ fn evaluate_bcf_gt_filter(
     let stats = decoded.stats.ok_or_else(|| {
         GenoioError::internal_contract(format!("bcf {context} filter missing stats"))
     })?;
-    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
+    Ok((filter.evaluate_view(variant, Some(&stats)), Some(stats)))
 }
 
-fn validate_biallelic_lazy_record(
+fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
     path: &Path,
-    header: &noodles::Header,
-    record: &bcf::Record,
+    variant: &V,
 ) -> Result<()> {
-    if record.alternate_bases().len() == 1 {
-        return Ok(());
-    }
-
-    let variant = variant_record_from_noodles_variant_record(path, header, record)?;
-    validate_biallelic_variant(path, &variant)
-}
-
-fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()> {
     if variant
-        .alt_allele
-        .as_deref()
+        .alt_allele()
         .is_some_and(|alt| !alt.is_empty() && !alt.contains(','))
     {
         return Ok(());
     }
 
-    if variant
-        .alt_allele
-        .as_deref()
-        .is_some_and(|alt| alt.contains(','))
-    {
+    if variant.alt_allele().is_some_and(|alt| alt.contains(',')) {
         return Err(GenoioError::invalid_source(
             path,
             format!(
                 "vcf dense reads require biallelic records; record {}:{} has multi-ALT alleles: multi-ALT records are not supported",
-                variant.chrom, variant.pos
+                variant.chrom(),
+                variant.pos()
             ),
         ));
     }
@@ -698,19 +794,62 @@ fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()
         path,
         format!(
             "vcf dense reads require biallelic records; record {}:{} is not biallelic",
-            variant.chrom, variant.pos
+            variant.chrom(),
+            variant.pos()
         ),
     ))
 }
 
-/// Dense BCF decode result for one retained variant.
+fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
+    let a1_count = values.iter().sum::<f32>();
+    let a0_count = 2.0 * values.len() as f32 - a1_count;
+    if a1_count <= a0_count {
+        return false;
+    }
+    for value in values {
+        *value = 2.0 - *value;
+    }
+    true
+}
+
+fn flip_haplotype_values_to_minor_allele(values: &mut [f32]) -> bool {
+    let a1_count = values.iter().sum::<f32>();
+    let a0_count = values.len() as f32 - a1_count;
+    if a1_count <= a0_count {
+        return false;
+    }
+    for value in values {
+        *value = 1.0 - *value;
+    }
+    true
+}
+
+/// Reusable dense BCF decode buffers for one retained variant.
 ///
 /// Missing indices are sparse positions in `values` after sample selection.
-struct DecodedBcfDenseValues {
+struct BcfDenseDecodeBuffers {
     values: Vec<f32>,
     missing_indices: Vec<usize>,
     stats: Option<VariantStats>,
     counts: Option<HardcallCounts>,
+}
+
+impl BcfDenseDecodeBuffers {
+    fn with_capacity(n_values: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(n_values),
+            missing_indices: Vec::new(),
+            stats: None,
+            counts: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.missing_indices.clear();
+        self.stats = None;
+        self.counts = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -736,7 +875,9 @@ fn decode_gt_record(
     record: &bcf::Record,
     source_indices: &[usize],
     stats_mode: BcfStatsMode,
-) -> Result<DecodedBcfDenseValues> {
+    decoded: &mut BcfDenseDecodeBuffers,
+) -> Result<()> {
+    decoded.clear();
     let samples = record.samples().map_err(|error| {
         GenoioError::invalid_source(path, format!("bcf samples error: {error}"))
     })?;
@@ -747,8 +888,6 @@ fn decode_gt_record(
             GenoioError::invalid_source(path, format!("bcf genotype series error: {error}"))
         })?;
 
-    let mut values = Vec::with_capacity(source_indices.len());
-    let mut missing_indices = Vec::new();
     let mut counts = HardcallCounts::default();
 
     for source_index in source_indices {
@@ -762,27 +901,18 @@ fn decode_gt_record(
             }
         }
         if call.is_missing() {
-            missing_indices.push(values.len());
+            decoded.missing_indices.push(decoded.values.len());
         }
-        values.push(call.value);
+        decoded.values.push(call.value);
     }
 
-    let stats = if matches!(stats_mode, BcfStatsMode::Compute) {
-        Some(counts.variant_stats()?)
-    } else {
-        None
-    };
-    let counts = if matches!(stats_mode, BcfStatsMode::Counts) {
-        Some(counts)
-    } else {
-        None
-    };
-    Ok(DecodedBcfDenseValues {
-        values,
-        missing_indices,
-        stats,
-        counts,
-    })
+    if matches!(stats_mode, BcfStatsMode::Compute) {
+        decoded.stats = Some(counts.variant_stats()?);
+    }
+    if matches!(stats_mode, BcfStatsMode::Counts) {
+        decoded.counts = Some(counts);
+    }
+    Ok(())
 }
 
 fn decode_ds_record(
@@ -791,7 +921,9 @@ fn decode_ds_record(
     record: &bcf::Record,
     source_indices: &[usize],
     collect_stats: bool,
-) -> Result<DecodedBcfDenseValues> {
+    decoded: &mut BcfDenseDecodeBuffers,
+) -> Result<()> {
+    decoded.clear();
     let samples = record.samples().map_err(|error| {
         GenoioError::invalid_source(path, format!("bcf samples error: {error}"))
     })?;
@@ -806,8 +938,6 @@ fn decode_ds_record(
             ))
         })?;
 
-    let mut values = Vec::with_capacity(source_indices.len());
-    let mut missing_indices = Vec::new();
     for source_index in source_indices {
         let value = ds_series
             .get(header, *source_index)
@@ -828,8 +958,8 @@ fn decode_ds_record(
             })?;
 
         let Some(value) = value else {
-            missing_indices.push(values.len());
-            values.push(0.0);
+            decoded.missing_indices.push(decoded.values.len());
+            decoded.values.push(0.0);
             continue;
         };
         let NoodlesSampleValue::Float(value) = value else {
@@ -846,28 +976,38 @@ fn decode_ds_record(
                 ),
             ));
         }
-        values.push(value);
+        decoded.values.push(value);
     }
 
-    let stats = if collect_stats {
-        Some(compute_dosage_variant_stats(&values, &missing_indices)?)
-    } else {
-        None
-    };
-    Ok(DecodedBcfDenseValues {
-        values,
-        missing_indices,
-        stats,
-        counts: None,
-    })
+    if collect_stats {
+        decoded.stats = Some(compute_dosage_variant_stats(
+            &decoded.values,
+            &decoded.missing_indices,
+        )?);
+    }
+    Ok(())
 }
 
-/// Dense phased BCF haplotype decode result for one retained variant.
+/// Reusable dense phased BCF haplotype decode buffers for one retained variant.
 ///
 /// Missing indices are haplotype-row positions in `values`.
-struct DecodedBcfHaplotypes {
+struct BcfHaplotypeDecodeBuffers {
     values: Vec<f32>,
     missing_indices: Vec<usize>,
+}
+
+impl BcfHaplotypeDecodeBuffers {
+    fn with_capacity(n_samples: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(n_samples * 2),
+            missing_indices: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.missing_indices.clear();
+    }
 }
 
 fn decode_phased_haplotype_record(
@@ -875,7 +1015,9 @@ fn decode_phased_haplotype_record(
     header: &noodles::Header,
     record: &bcf::Record,
     source_indices: &[usize],
-) -> Result<DecodedBcfHaplotypes> {
+    decoded: &mut BcfHaplotypeDecodeBuffers,
+) -> Result<()> {
+    decoded.clear();
     let samples = record.samples().map_err(|error| {
         GenoioError::invalid_source(path, format!("bcf samples error: {error}"))
     })?;
@@ -886,24 +1028,19 @@ fn decode_phased_haplotype_record(
             GenoioError::invalid_source(path, format!("bcf genotype series error: {error}"))
         })?;
 
-    let mut values = Vec::with_capacity(source_indices.len() * 2);
-    let mut missing_indices = Vec::new();
     for source_index in source_indices {
         let (sample_values, sample_missing) =
             decode_phased_haplotype_call(path, header, record, &gt_series, *source_index)?;
-        let row_offset = values.len();
-        values.extend(sample_values);
+        let row_offset = decoded.values.len();
+        decoded.values.extend(sample_values);
         for (offset, is_missing) in sample_missing.into_iter().enumerate() {
             if is_missing {
-                missing_indices.push(row_offset + offset);
+                decoded.missing_indices.push(row_offset + offset);
             }
         }
     }
 
-    Ok(DecodedBcfHaplotypes {
-        values,
-        missing_indices,
-    })
+    Ok(())
 }
 
 fn decode_phased_haplotype_call(
@@ -932,28 +1069,24 @@ fn decode_phased_haplotype_call(
     let Some(NoodlesSampleValue::Genotype(genotype)) = value else {
         return Ok(([0.0, 0.0], [true, true]));
     };
-    let alleles = genotype
-        .iter()
-        .map(|result| {
-            result.map_err(|error| {
-                GenoioError::invalid_source(path, format!("bcf genotype allele error: {error}"))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if alleles.len() != 2 {
-        return Err(GenoioError::invalid_source(
-            path,
-            format!(
-                "vcf record {} has non-diploid GT with {} alleles",
-                record_id(record),
-                alleles.len()
-            ),
-        ));
-    }
-
     let mut values = [0.0, 0.0];
     let mut missing = [false, false];
-    for (allele_index, (allele, phasing)) in alleles.into_iter().enumerate() {
+    let mut allele_count = 0_usize;
+    for result in genotype.iter() {
+        let (allele, phasing) = result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("bcf genotype allele error: {error}"))
+        })?;
+        if allele_count >= 2 {
+            return Err(GenoioError::invalid_source(
+                path,
+                format!(
+                    "vcf record {} has non-diploid GT with at least 3 alleles",
+                    record_id(record)
+                ),
+            ));
+        }
+        let allele_index = allele_count;
+        allele_count += 1;
         if allele_index > 0 && phasing == NoodlesGenotypePhasing::Unphased {
             return Err(GenoioError::unsupported(format!(
                 "vcf haplotype read record {} contains an unphased GT separator in a retained haplotype variant",
@@ -974,6 +1107,16 @@ fn decode_phased_haplotype_call(
                 ));
             }
         }
+    }
+
+    if allele_count != 2 {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!(
+                "vcf record {} has non-diploid GT with {allele_count} alleles",
+                record_id(record),
+            ),
+        ));
     }
 
     Ok((values, missing))
@@ -1029,27 +1172,22 @@ fn decode_gt_call(
         });
     };
 
-    let alleles = genotype
-        .iter()
-        .map(|result| {
-            result.map(|(position, _)| position).map_err(|error| {
-                GenoioError::invalid_source(path, format!("bcf genotype allele error: {error}"))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if alleles.len() != 2 {
-        return Err(GenoioError::invalid_source(
-            path,
-            format!(
-                "vcf record {} has non-diploid GT with {} alleles",
-                record_id(record),
-                alleles.len()
-            ),
-        ));
-    }
-
     let mut alt_count = 0_u8;
-    for allele in alleles {
+    let mut allele_count = 0_usize;
+    for result in genotype.iter() {
+        let (allele, _) = result.map_err(|error| {
+            GenoioError::invalid_source(path, format!("bcf genotype allele error: {error}"))
+        })?;
+        if allele_count >= 2 {
+            return Err(GenoioError::invalid_source(
+                path,
+                format!(
+                    "vcf record {} has non-diploid GT with at least 3 alleles",
+                    record_id(record)
+                ),
+            ));
+        }
+        allele_count += 1;
         let Some(allele) = allele else {
             return Ok(BcfGtCall {
                 value: 0.0,
@@ -1069,6 +1207,15 @@ fn decode_gt_call(
                 ));
             }
         }
+    }
+    if allele_count != 2 {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!(
+                "vcf record {} has non-diploid GT with {allele_count} alleles",
+                record_id(record),
+            ),
+        ));
     }
 
     let class = match alt_count {
@@ -1091,9 +1238,12 @@ fn record_id(record: &bcf::Record) -> String {
 mod tests {
     use std::fs;
 
-    use super::super::read_vcf_dense_windowed_with_threads;
+    use super::super::read_vcf_dense_windowed_with_threads as read_vcf_dense_windowed_with_threads_facade;
     use super::*;
-    use genoio_core::DenseLayout;
+    use genoio_core::{
+        DenseGenotypeMatrix, DenseLayout, SparseGenotypeMatrix, StringColumnBuffers,
+        VariantMetadataBuffers,
+    };
     use noodles_core::Position;
     use noodles_vcf::{
         self as noodles_vcf,
@@ -1120,6 +1270,138 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
+    }
+
+    fn variants(output: &Option<VariantMetadataBuffers>) -> &VariantMetadataBuffers {
+        output
+            .as_ref()
+            .expect("variant metadata buffers should be returned")
+    }
+
+    fn string_at(column: &StringColumnBuffers, index: usize) -> &str {
+        let start = column.offsets[index] as usize;
+        let end = column.offsets[index + 1] as usize;
+        std::str::from_utf8(&column.values[start..end]).expect("string column should be UTF-8")
+    }
+
+    fn variant_ids(variants: &VariantMetadataBuffers) -> Vec<&str> {
+        (0..variants.len())
+            .map(|index| string_at(&variants.ids, index))
+            .collect()
+    }
+
+    fn variant_id(variants: &VariantMetadataBuffers, index: usize) -> &str {
+        string_at(&variants.ids, index)
+    }
+
+    fn read_vcf_dense_windowed_with_threads_for_test(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        matrix_only: bool,
+        threads: Option<usize>,
+    ) -> Result<DenseGenotypeMatrix> {
+        read_vcf_dense_windowed_with_threads_facade(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            DenseMissingPolicy::Nan,
+            !matrix_only,
+            !matrix_only,
+            threads,
+        )
+    }
+
+    fn read_dense_windowed_for_test(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
+        matrix_only: bool,
+    ) -> Result<DenseGenotypeMatrix> {
+        read_dense_windowed_with_field(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            missing_policy,
+            !matrix_only,
+            !matrix_only,
+            DenseField::Gt,
+        )
+    }
+
+    fn read_dosage_dense_windowed_for_test(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
+        matrix_only: bool,
+    ) -> Result<DenseGenotypeMatrix> {
+        super::read_dosage_dense_windowed(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            missing_policy,
+            !matrix_only,
+            !matrix_only,
+        )
+    }
+
+    fn read_sparse_windowed_for_test(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+    ) -> Result<SparseGenotypeMatrix> {
+        super::read_sparse_windowed(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            true,
+            true,
+        )
+    }
+
+    fn read_haplotypes_dense_windowed_for_test(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
+        matrix_only: bool,
+    ) -> Result<DenseGenotypeMatrix> {
+        super::read_haplotypes_dense_windowed(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            missing_policy,
+            !matrix_only,
+            !matrix_only,
+        )
+    }
+
+    fn read_haplotypes_sparse_windowed_for_test(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+    ) -> Result<SparseGenotypeMatrix> {
+        super::read_haplotypes_sparse_windowed(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            true,
+            true,
+        )
     }
 
     fn write_test_bcf(path: &Path) {
@@ -1319,7 +1601,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1333,14 +1615,7 @@ mod tests {
         assert_eq!(dense.n_variants, 2);
         assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(
-            dense
-                .variants
-                .iter()
-                .map(|variant| variant.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["rs1", "rs2"]
-        );
+        assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
     }
 
     #[test]
@@ -1351,13 +1626,119 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let error =
-            read_vcf_dense_windowed_with_threads(file.path(), None, None, None, false, Some(2))
-                .expect_err("BCF should reject explicit thread count");
+        let error = read_vcf_dense_windowed_with_threads_for_test(
+            file.path(),
+            None,
+            None,
+            None,
+            false,
+            Some(2),
+        )
+        .expect_err("BCF should reject explicit thread count");
 
         assert!(error
             .to_string()
             .contains("threaded BCF reads are not supported"));
+    }
+
+    #[test]
+    fn bcf_dense_gt_rejects_non_diploid_calls_without_collecting_alleles() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        {
+            let out = fs::File::create(file.path()).expect("test BCF should be created");
+            let mut writer = noodles_bcf::io::Writer::new(out);
+            let header = noodles_vcf::Header::builder()
+                .add_contig("1", Map::<Contig>::new())
+                .add_format(key::GENOTYPE, Map::<Format>::from(key::GENOTYPE))
+                .add_sample_name("s1")
+                .add_sample_name("s2")
+                .build();
+            writer
+                .write_header(&header)
+                .expect("test BCF header should be written");
+            writer
+                .write_variant_record(
+                    &header,
+                    &bcf_test_record("rs_triploid", 10, "A", &["G"], ["0/1/1", "0/0"]),
+                )
+                .expect("triploid BCF record should be written");
+        }
+
+        let error = read_dense_windowed_for_test(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            true,
+        )
+        .expect_err("non-diploid BCF GT should fail");
+
+        assert!(error.to_string().contains("non-diploid GT"), "{error}");
+    }
+
+    #[test]
+    fn bcf_dense_gt_rejects_multiallelic_allele_indexes_without_collecting_alleles() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        {
+            let out = fs::File::create(file.path()).expect("test BCF should be created");
+            let mut writer = noodles_bcf::io::Writer::new(out);
+            let header = noodles_vcf::Header::builder()
+                .add_contig("1", Map::<Contig>::new())
+                .add_format(key::GENOTYPE, Map::<Format>::from(key::GENOTYPE))
+                .add_sample_name("s1")
+                .add_sample_name("s2")
+                .build();
+            writer
+                .write_header(&header)
+                .expect("test BCF header should be written");
+            writer
+                .write_variant_record(
+                    &header,
+                    &bcf_test_record("rs_gt2", 10, "A", &["G"], ["0/2", "0/0"]),
+                )
+                .expect("multiallelic GT-index BCF record should be written");
+        }
+
+        let error = read_dense_windowed_for_test(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            true,
+        )
+        .expect_err("multiallelic BCF GT allele index should fail");
+
+        assert!(
+            error.to_string().contains("multiallelic GT allele index"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bcf_sparse_gt_rejects_missing_calls_after_streaming_decode() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf(file.path());
+
+        let error = read_sparse_windowed_for_test(
+            file.path(),
+            None,
+            None,
+            Some(VariantWindow { start: 1, len: 1 }),
+        )
+        .expect_err("sparse BCF GT should reject retained missing calls");
+
+        assert!(error.to_string().contains("sparse missing values"));
     }
 
     #[test]
@@ -1368,7 +1749,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1381,7 +1762,7 @@ mod tests {
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
-        assert_eq!(dense.variants[0].id, "rs2");
+        assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     }
 
     #[test]
@@ -1399,7 +1780,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             Some(&samples),
             Some(&filter),
@@ -1412,10 +1793,15 @@ mod tests {
         assert_eq!(dense.n_samples, 1);
         assert_eq!(dense.n_variants, 1);
         assert_eq!(dense.values, vec![1.0]);
-        assert_eq!(dense.samples[0].iid, "s2");
-        assert_eq!(dense.variants[0].id, "rs1");
-        assert_eq!(dense.variants[0].mac, Some(1));
-        assert_eq!(dense.variants[0].n_called, Some(1));
+        let samples = dense.samples.as_ref().expect("sample metadata");
+        assert_eq!(
+            samples.iter().next().expect("first sample").iid.as_str(),
+            "s2"
+        );
+        let variant_metadata = variants(&dense.variants);
+        assert_eq!(variant_id(variant_metadata, 0), "rs1");
+        assert_eq!(variant_metadata.macs[0], Some(1));
+        assert_eq!(variant_metadata.n_called[0], Some(1));
     }
 
     #[test]
@@ -1432,7 +1818,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             None,
             Some(&filter),
@@ -1444,9 +1830,40 @@ mod tests {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
-        assert!(dense.samples.is_empty());
-        assert!(dense.variants.is_empty());
+        assert!(dense.samples.is_none());
+        assert!(dense.variants.is_none());
         assert_eq!(dense.values, vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn bcf_dense_gt_can_return_samples_without_variant_buffers() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf(file.path());
+
+        let dense = super::read_dense_windowed(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            true,
+            false,
+        )
+        .expect("BCF dense GT output should decode without variant buffers");
+
+        assert_eq!(dense.n_samples, 2);
+        assert_eq!(dense.n_variants, 2);
+        assert_eq!(dense.layout, DenseLayout::VariantMajor);
+        let samples = dense.samples.as_ref().expect("sample metadata");
+        assert_eq!(
+            samples.iter().next().expect("first sample").iid.as_str(),
+            "s1"
+        );
+        assert!(dense.variants.is_none());
+        assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
     }
 
     #[test]
@@ -1457,7 +1874,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_with_ds(file.path());
 
-        let dense = read_dosage_dense_windowed(
+        let dense = read_dosage_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1471,14 +1888,7 @@ mod tests {
         assert_eq!(dense.n_variants, 2);
         assert_values_with_nan(&dense.values, &[0.2, 1.4, 2.0, f32::NAN]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(
-            dense
-                .variants
-                .iter()
-                .map(|variant| variant.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["rs1", "rs2"]
-        );
+        assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
     }
 
     #[test]
@@ -1495,7 +1905,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dosage_dense_windowed(
+        let dense = read_dosage_dense_windowed_for_test(
             file.path(),
             None,
             Some(&filter),
@@ -1507,8 +1917,8 @@ mod tests {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
-        assert!(dense.samples.is_empty());
-        assert!(dense.variants.is_empty());
+        assert!(dense.samples.is_none());
+        assert!(dense.variants.is_none());
         assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
     }
 
@@ -1526,7 +1936,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let sparse = read_sparse_windowed(file.path(), None, Some(&filter), None)
+        let sparse = read_sparse_windowed_for_test(file.path(), None, Some(&filter), None)
             .expect("BCF sparse GT should decode");
 
         assert_eq!(sparse.n_rows, 2);
@@ -1534,7 +1944,34 @@ mod tests {
         assert_eq!(sparse.indptr, vec![0, 1]);
         assert_eq!(sparse.indices, vec![1]);
         assert_eq!(sparse.data, vec![1.0]);
-        assert_eq!(sparse.variants[0].id, "rs1");
+        assert_eq!(variant_id(variants(&sparse.variants), 0), "rs1");
+    }
+
+    #[test]
+    fn bcf_sparse_gt_can_omit_samples_and_variant_buffers() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf(file.path());
+        let filter = VariantFilter::from_json_value(serde_json::json!({
+            "op": "predicate",
+            "name": "mac",
+            "params": {"min": 1}
+        }))
+        .expect("filter should parse");
+
+        let sparse =
+            super::read_sparse_windowed(file.path(), None, Some(&filter), None, false, false)
+                .expect("BCF sparse GT output should decode without metadata buffers");
+
+        assert_eq!(sparse.n_rows, 2);
+        assert_eq!(sparse.n_cols, 1);
+        assert!(sparse.samples.is_none());
+        assert!(sparse.variants.is_none());
+        assert_eq!(sparse.indptr, vec![0, 1]);
+        assert_eq!(sparse.indices, vec![1]);
+        assert_eq!(sparse.data, vec![1.0]);
     }
 
     #[test]
@@ -1545,7 +1982,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_phased(file.path());
 
-        let dense = read_haplotypes_dense_windowed(
+        let dense = read_haplotypes_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1559,9 +1996,13 @@ mod tests {
         assert_eq!(dense.n_variants, 2);
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(dense.samples[0].iid, "s1");
-        assert_eq!(dense.samples[0].haplotype_index, Some(0));
-        assert_eq!(dense.samples[1].haplotype_index, Some(1));
+        let samples = dense.samples.as_ref().expect("sample metadata");
+        let mut samples = samples.iter();
+        let first = samples.next().expect("first haplotype sample");
+        let second = samples.next().expect("second haplotype sample");
+        assert_eq!(first.iid.as_str(), "s1");
+        assert_eq!(first.haplotype_index, Some(0));
+        assert_eq!(second.haplotype_index, Some(1));
     }
 
     #[test]
@@ -1578,7 +2019,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_haplotypes_dense_windowed(
+        let dense = read_haplotypes_dense_windowed_for_test(
             file.path(),
             None,
             Some(&filter),
@@ -1590,8 +2031,8 @@ mod tests {
 
         assert_eq!(dense.n_samples, 4);
         assert_eq!(dense.n_variants, 1);
-        assert!(dense.samples.is_empty());
-        assert!(dense.variants.is_empty());
+        assert!(dense.samples.is_none());
+        assert!(dense.variants.is_none());
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
     }
 
@@ -1603,7 +2044,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_phased(file.path());
 
-        let sparse = read_haplotypes_sparse_windowed(file.path(), None, None, None)
+        let sparse = read_haplotypes_sparse_windowed_for_test(file.path(), None, None, None)
             .expect("BCF sparse haplotypes should decode");
 
         assert_eq!(sparse.n_rows, 4);
@@ -1611,7 +2052,7 @@ mod tests {
         assert_eq!(sparse.indptr, vec![0, 1, 2]);
         assert_eq!(sparse.indices, vec![0, 0]);
         assert_eq!(sparse.data, vec![1.0, 1.0]);
-        assert!(sparse.variants[0].flipped);
-        assert!(!sparse.variants[1].flipped);
+        assert!(variants(&sparse.variants).flipped[0]);
+        assert!(!variants(&sparse.variants).flipped[1]);
     }
 }

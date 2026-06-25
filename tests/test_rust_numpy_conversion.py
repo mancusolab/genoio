@@ -158,8 +158,8 @@ def test_rust_sparse_indices_transfer_ownership_to_numpy_without_bytearray_base(
 
     assert isinstance(indptr, np.ndarray)
     assert isinstance(indices, np.ndarray)
-    assert indptr.dtype == np.dtype("int64")
-    assert indices.dtype == np.dtype("int64")
+    assert indptr.dtype == np.dtype("int32")
+    assert indices.dtype == np.dtype("int32")
     assert not _is_bytearray_backed(indptr)
     assert not _is_bytearray_backed(indices)
 

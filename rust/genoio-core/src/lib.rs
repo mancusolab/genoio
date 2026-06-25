@@ -32,11 +32,16 @@ pub use error::GenoioError;
 pub use filter::{
     attach_variant_stats, compute_dosage_variant_stats, is_dosage_polymorphic,
     variant_stats_from_counts, GenotypeFilterConjunction, GenotypeFilterPlan,
-    PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats, VariantWindow,
+    PartialFilterDecision, RegionPredicate, VariantFilter, VariantMetadataView, VariantStats,
+    VariantWindow,
 };
-pub use metadata::{MetadataOutput, SampleRecord, VariantRecord};
+pub use metadata::{
+    MetadataOutput, NullableStringColumnBuffers, SampleMetadataBuffers, SampleRecord,
+    StringColumnBuffers, VariantMetadataBuffers, VariantRecord,
+};
 pub use sparse::{
-    append_sparse_column, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
+    append_sparse_column, append_sparse_value, finish_sparse_column,
+    flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,
     should_flip_haplotype_to_minor_allele, SparseGenotypeMatrix,
 };

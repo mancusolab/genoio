@@ -210,33 +210,6 @@ pub(super) fn decode_buffered_haplotype_values(
     Ok(())
 }
 
-pub(super) fn skip_layout2_probability_block(
-    reader: &mut impl Read,
-    path: &Path,
-    expected_sample_count: u32,
-    variant_allele_count: u16,
-    compression: BgenCompression,
-) -> Result<()> {
-    let payload = read_layout2_probability_payload(reader, path, compression)?;
-    let decoded =
-        DecodedDosageVariant::decode(path, &payload, expected_sample_count, variant_allele_count)?;
-    decoded.debug_assert_supported_subset();
-    let mut values = Vec::new();
-    let mut missing = Vec::new();
-    decoded.decode_source_order(path, &mut values, &mut missing)?;
-    Ok(())
-}
-
-fn read_layout2_probability_payload(
-    reader: &mut impl Read,
-    path: &Path,
-    compression: BgenCompression,
-) -> Result<Vec<u8>> {
-    let mut buffers = ProbabilityPayloadBuffers::default();
-    read_layout2_probability_payload_into(reader, path, compression, &mut buffers)?;
-    Ok(buffers.payload)
-}
-
 pub(super) fn read_layout2_probability_payload_into(
     reader: &mut impl Read,
     path: &Path,
@@ -301,7 +274,12 @@ pub(super) fn read_layout2_probability_payload_into(
     }
 }
 
-pub(super) fn skip_layout2_probability_payload(
+/// Skip a Layout 2 probability payload by byte length only.
+///
+/// This is for metadata-only or otherwise discarded records. Retained matrix
+/// records must call `read_layout2_probability_payload_into` so the decoded
+/// probability contents are validated before use.
+pub(super) fn skip_layout2_probability_payload_raw(
     reader: &mut impl Read,
     path: &Path,
     compression: BgenCompression,
@@ -525,6 +503,7 @@ impl<'a> DecodedDosageVariant<'a> {
         );
     }
 
+    #[cfg(test)]
     fn decode_source_order(
         &self,
         path: &Path,
@@ -1164,12 +1143,19 @@ fn decompress_probability_block_into(
                 })?;
         }
         BgenCompression::Zstd => {
-            let decoded =
-                zstd::stream::decode_all(compressed_payload).map_err(|source| GenoioError::Io {
+            let mut decoder =
+                zstd::stream::read::Decoder::new(compressed_payload).map_err(|source| {
+                    GenoioError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
+            decoder
+                .read_to_end(decompressed)
+                .map_err(|source| GenoioError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
-            decompressed.extend_from_slice(&decoded);
         }
         BgenCompression::None | BgenCompression::Reserved => {
             return Err(GenoioError::invalid_source(

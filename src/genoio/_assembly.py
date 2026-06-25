@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import sparse as scipy_sparse
 
 SparseMatrixResult = scipy_sparse.csc_matrix | scipy_sparse.csr_matrix
@@ -26,10 +26,16 @@ _DENSE_LAYOUT_SAMPLE_MAJOR = "sample_major"
 _DENSE_LAYOUT_VARIANT_MAJOR = "variant_major"
 
 
+@runtime_checkable
+class ArrowStreamExportable(Protocol):
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object: ...
+
+
 MetadataColumns = dict[str, Sequence[Any]]
+MetadataPayload = MetadataColumns | ArrowStreamExportable
 
 
-def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool = False) -> pl.DataFrame:
+def samples_frame(columns: MetadataPayload, *, include_haplotype_columns: bool = False) -> pl.DataFrame:
     r"""Build the public sample metadata frame from Rust sample columns.
 
     **Arguments:**
@@ -42,10 +48,13 @@ def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool =
 
     Polars DataFrame in source sample order.
     """
-    frame = pl.DataFrame(
-        {column: columns[column] for column in _SAMPLE_COLUMNS},
-        schema=_SAMPLE_COLUMNS,
-    )
+    if isinstance(columns, ArrowStreamExportable):
+        frame = _frame_from_arrow_stream(columns, _SAMPLE_COLUMNS)
+        if not include_haplotype_columns:
+            return frame.select(_SAMPLE_COLUMNS)
+        return frame
+
+    frame = pl.DataFrame({column: columns[column] for column in _SAMPLE_COLUMNS}, schema=_SAMPLE_COLUMNS)
     haplotype_indices = columns.get("haplotype_index")
     if include_haplotype_columns or (haplotype_indices and all(index is not None for index in haplotype_indices)):
         source_sample_indices = columns.get("source_sample_index", [None] * frame.height)
@@ -57,7 +66,7 @@ def samples_frame(columns: MetadataColumns, *, include_haplotype_columns: bool =
     return frame
 
 
-def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
+def variants_frame(columns: MetadataPayload) -> pl.DataFrame:
     r"""Build the public variant metadata frame from Rust variant columns.
 
     **Arguments:**
@@ -70,19 +79,28 @@ def variants_frame(columns: MetadataColumns) -> pl.DataFrame:
     limited to the columns needed to interpret matrix columns and counted
     allele orientation.
     """
-    # Rust returns in-memory columns across the PyO3 boundary. Eager DataFrame
-    # assembly is the adapter boundary here because there is no file scan or
-    # deferred query plan for Polars to optimize, and source order is already
-    # the downstream contract.
+    if isinstance(columns, ArrowStreamExportable):
+        return _frame_from_arrow_stream(columns, _VARIANT_COLUMNS).select(_VARIANT_COLUMNS)
+
     return pl.DataFrame(
         {column: columns[column] for column in _VARIANT_COLUMNS},
         schema=_VARIANT_COLUMNS,
     )
 
 
+def _frame_from_arrow_stream(payload: ArrowStreamExportable, columns: list[str]) -> pl.DataFrame:
+    frame = pl.from_arrow(payload)
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError(f"Arrow metadata payload produced {type(frame).__name__}, expected Polars DataFrame")
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise KeyError(f"Arrow metadata payload missing columns: {missing}")
+    return frame
+
+
 def dense_array_from_rust(
     *,
-    values: Sequence[float] | NDArray[Any],
+    values: ArrayLike,
     shape: tuple[int, int],
     dtype: np.dtype[Any],
     values_layout: str = "sample_major",
@@ -106,7 +124,10 @@ def dense_array_from_rust(
     Dense NumPy matrix with shape `shape`.
     """
     values_layout = _validate_dense_layout(values_layout)
-    values_array = np.asarray(values, dtype=dtype)
+    target_dtype = np.dtype(dtype)
+    values_array = np.asarray(values)
+    if values_array.dtype != target_dtype:
+        values_array = values_array.astype(target_dtype)
     return _reshape_dense_payload(values_array, shape, values_layout)
 
 
@@ -134,18 +155,19 @@ def _validate_dense_layout(values_layout: str) -> str:
 
 def sparse_matrix_from_rust(
     *,
-    indptr: list[int],
-    indices: list[int],
-    data: list[float],
+    indptr: Any,
+    indices: Any,
+    data: Any,
     shape: tuple[int, int],
     dtype: np.dtype[Any],
     sparse_format: str,
 ) -> SparseMatrixResult:
     r"""Convert Rust CSC arrays into the requested SciPy sparse format.
 
-    Rust always emits CSC because variants are accumulated column-wise. CSR is
-    a Python-side view conversion after the validated CSC arrays cross the
-    extension boundary.
+    Rust always emits CSC because variants are accumulated column-wise. Sparse
+    indices arrive as NumPy `int32` arrays, matching SciPy's default index
+    width. This boundary validates that contract and avoids a second dtype
+    conversion before SciPy takes ownership of the arrays.
 
     **Arguments:**
 
@@ -163,8 +185,8 @@ def sparse_matrix_from_rust(
     matrix = scipy_sparse.csc_matrix(
         (
             np.asarray(data, dtype=dtype),
-            np.asarray(indices, dtype=np.int64),
-            np.asarray(indptr, dtype=np.int64),
+            _sparse_index_array(indices, name="indices"),
+            _sparse_index_array(indptr, name="indptr"),
         ),
         shape=shape,
     )
@@ -173,6 +195,14 @@ def sparse_matrix_from_rust(
     if sparse_format == "csr":
         return matrix.tocsr()
     raise AssertionError(f"unvalidated sparse format: {sparse_format}")
+
+
+def _sparse_index_array(values: Any, *, name: str) -> NDArray[Any]:
+    """Return a CSC index array after enforcing Rust's int32 sparse contract."""
+    array = np.asarray(values)
+    if array.dtype != np.dtype("int32"):
+        raise AssertionError(f"sparse {name} dtype {array.dtype} is not supported; expected int32")
+    return array
 
 
 def read_result_tuple(

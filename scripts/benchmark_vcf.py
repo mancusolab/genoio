@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from bench_common import benchmark, compare_summaries, nonnegative_float, positive_int
+from bench_common import benchmark, compare_summaries, matrix_summary, nonnegative_float, positive_int, print_result
 
 SCENARIOS = (
     "metadata",
@@ -116,6 +118,24 @@ def read_genoio_metadata(args: argparse.Namespace) -> np.ndarray:
     samples = dataset.samples()
     variants = dataset.variants()
     return np.array([samples.height, variants.height], dtype=np.int64)
+
+
+def benchmark_metadata(name: str, fn: Callable[[], Any], repeats: int) -> Any:
+    start = time.perf_counter()
+    first = fn()
+    cold_time = time.perf_counter() - start
+    summary = matrix_summary(first)
+    times = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        observed = fn()
+        times.append(time.perf_counter() - start)
+        observed_summary = matrix_summary(observed)
+        if observed_summary["shape"] != summary["shape"]:
+            raise RuntimeError(f"{name} shape changed between repeats")
+    print_result(name, summary, times)
+    print(f"  cold={cold_time:.4f}s")
+    return first
 
 
 def read_genoio_with_variants(args: argparse.Namespace) -> Any:
@@ -246,7 +266,7 @@ def selected_scenarios(scenario: str) -> tuple[str, ...]:
 
 def benchmark_genoio_scenario(scenario: str, args: argparse.Namespace) -> Any:
     if scenario == "metadata":
-        return benchmark(
+        return benchmark_metadata(
             _genoio_label(args.kind, scenario, args.sparse),
             lambda: read_genoio_metadata(args),
             args.repeats,

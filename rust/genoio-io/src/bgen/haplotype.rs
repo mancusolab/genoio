@@ -8,16 +8,14 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection,
-    GenoioError, PartialFilterDecision, SampleRecord, VariantFilter, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataBuffers, SampleRecord,
+    VariantFilter, VariantMetadataBuffers, VariantWindow,
 };
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
-use crate::matrix::{
-    apply_dense_missing_policy_to_variant, finish_dense_matrix, finish_variant_major_dense_matrix,
-    DenseMatrixParts, VariantMajorDenseParts,
-};
+use crate::matrix::apply_dense_missing_policy_to_variant;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 use super::decode::{decode_buffered_haplotype_values, HaplotypeDecodeBuffers};
@@ -25,33 +23,40 @@ use super::filter::apply_genotype_filter_result;
 use super::index::{indexed_region_records, BgenIndexRecord};
 use super::session::{BgenIndexedReadContext, BgenReadSession, BgenVariantCursor};
 
+fn empty_dense_output_for_samples(
+    samples: Vec<SampleRecord>,
+    mut diagnostics: genoio_core::DenseDiagnostics,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrix> {
+    diagnostics.retained_variants = 0;
+    let n_samples = samples.len();
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, true)?;
+    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        0,
+        Vec::new(),
+        DenseLayout::SampleMajor,
+        samples,
+        variants,
+        diagnostics,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "output facade mirrors haplotype dosage read options plus metadata return choices"
+)]
 pub fn read_bgen_haplotypes_dosage_dense_windowed(
     bgen: &Path,
     sample: Option<&Path>,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
-        bgen,
-        sample,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
-    bgen: &Path,
-    sample: Option<&Path>,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
+    return_samples: bool,
+    return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let mut session = BgenReadSession::open(bgen)?;
     let all_samples = session.read_samples(sample)?;
@@ -60,16 +65,11 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         diagnostics.retained_variants = 0;
-        return finish_dense_matrix(
-            DenseMatrixParts {
-                n_samples: haplotype_samples.len(),
-                n_variants: 0,
-                values: Vec::new(),
-                samples: haplotype_samples,
-                variants: Vec::new(),
-                diagnostics,
-            },
-            matrix_only,
+        return empty_dense_output_for_samples(
+            haplotype_samples,
+            diagnostics,
+            return_samples,
+            return_variants,
         );
     }
     if let Some(index_records) = indexed_region_records(bgen, variant_filter)? {
@@ -80,7 +80,8 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
             variant_filter,
             variant_window,
             missing_policy,
-            matrix_only,
+            return_samples,
+            return_variants,
         };
         return read_bgen_haplotypes_dosage_dense_indexed(context, &index_records);
     }
@@ -93,7 +94,8 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
         window.len.min(header_variant_count)
     });
     let n_haplotypes = selection.samples.len() * 2;
-    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
@@ -139,7 +141,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
                         )
                     })?,
                     &variant,
-                    !matrix_only,
+                    return_variants,
                 )?;
                 match apply_genotype_filter_result(
                     &mut retention,
@@ -165,8 +167,8 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
                 &mut decode_buffers,
             )?;
         }
-        if !matrix_only {
-            variants.push(variant);
+        if let Some(variants) = variants.as_mut() {
+            variants.push_record(&variant)?;
         }
         apply_dense_missing_policy_to_variant(
             &mut decode_buffers.selected_haplotype_values,
@@ -180,16 +182,16 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
-            n_samples,
-            n_variants,
-            variant_major_values,
-            samples: haplotype_samples,
-            variants,
-            diagnostics,
-        },
-        matrix_only,
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        n_variants,
+        variant_major_values,
+        DenseLayout::VariantMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
 
@@ -219,7 +221,8 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         variant_filter,
         variant_window,
         missing_policy,
-        matrix_only,
+        return_samples,
+        return_variants,
     } = context;
     let bgen = session.bgen;
     let sample_count = session.header.sample_count;
@@ -228,7 +231,8 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         window.len.min(index_records.len())
     });
     let n_haplotypes = selection.samples.len() * 2;
-    let mut variants = Vec::with_capacity(output_variant_capacity);
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
@@ -277,7 +281,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
                         )
                     })?,
                     &variant,
-                    !matrix_only,
+                    return_variants,
                 )?;
                 match apply_genotype_filter_result(
                     &mut retention,
@@ -308,8 +312,8 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
             )?;
         }
         position.validate_if_indexed(session)?;
-        if !matrix_only {
-            variants.push(variant);
+        if let Some(variants) = variants.as_mut() {
+            variants.push_record(&variant)?;
         }
         apply_dense_missing_policy_to_variant(
             &mut decode_buffers.selected_haplotype_values,
@@ -323,15 +327,15 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    finish_variant_major_dense_matrix(
-        VariantMajorDenseParts {
-            n_samples,
-            n_variants,
-            variant_major_values,
-            samples: haplotype_samples,
-            variants,
-            diagnostics,
-        },
-        matrix_only,
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    DenseGenotypeMatrix::new_with_layout(
+        n_samples,
+        n_variants,
+        variant_major_values,
+        DenseLayout::VariantMajor,
+        samples,
+        variants,
+        diagnostics,
     )
 }
