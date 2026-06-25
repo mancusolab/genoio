@@ -448,7 +448,7 @@ fn decode_plink2_dense_matrix_only_genotype_filter(
             }
         }
 
-        let (retain_variant, _) = evaluate_packed_hardcall_filter(
+        let (retain_variant, _) = evaluate_packed_hardcall_filter::<genoio_core::VariantRecord>(
             &decoder_state.packed,
             &selection.source_indices,
             all_samples_selected,

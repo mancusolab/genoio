@@ -16,7 +16,7 @@ use genoio_core::{
     DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, DenseSampleSelection, GenoioError,
     MetadataArrowOutput, PartialFilterDecision, RegionPredicate, SampleMetadataArrowBuffers,
     SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantRecord, VariantStats, VariantWindow,
+    VariantMetadataArrowBuffers, VariantMetadataView, VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -34,7 +34,7 @@ use self::header::read_sample_records_from_header;
 use self::output::{can_write_sample_major_directly, TextDenseOutput};
 use self::record::{
     append_public_variant_metadata_from_text_record, skip_variant_for_region,
-    validate_biallelic_variant, variant_record_from_text_record,
+    text_variant_view_from_text_record, validate_biallelic_variant,
 };
 use self::source::{
     ensure_text_indexed_vcf_supported, ensure_text_vcf_supported, open_compressed_reader,
@@ -65,6 +65,7 @@ pub(in crate::vcf) use self::record::{
 
 pub(super) const VCF_TEXT_BUFFER_SIZE: usize = 1 << 20;
 const VCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
+const VCF_TEXT_INITIAL_MATRIX_VARIANT_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VcfMetadataReturn {
@@ -109,9 +110,47 @@ impl VariantMetadataSink {
         }
     }
 
-    fn push_variant(&mut self, variant: VariantRecord) -> Result<()> {
+    fn push_view<V: VariantMetadataView + ?Sized>(&mut self, variant: &V) -> Result<()> {
+        self.push_view_row(variant).map(|_| ())
+    }
+
+    fn push_view_row<V: VariantMetadataView + ?Sized>(
+        &mut self,
+        variant: &V,
+    ) -> Result<Option<usize>> {
         match self {
-            Self::Arrow(variants) => variants.push_record(&variant)?,
+            Self::Arrow(variants) => {
+                let row_index = variants.len();
+                variants.push_view(variant)?;
+                Ok(Some(row_index))
+            }
+            Self::None => Ok(None),
+        }
+    }
+
+    fn push_view_with_stats<V: VariantMetadataView + ?Sized>(
+        &mut self,
+        variant: &V,
+        stats: VariantStats,
+    ) -> Result<()> {
+        match self {
+            Self::Arrow(variants) => variants.push_view_with_stats(variant, stats)?,
+            Self::None => {}
+        }
+        Ok(())
+    }
+
+    fn attach_stats(&mut self, row_index: usize, stats: VariantStats) -> Result<()> {
+        match self {
+            Self::Arrow(variants) => variants.attach_stats(row_index, stats)?,
+            Self::None => {}
+        }
+        Ok(())
+    }
+
+    fn flip_to_minor_allele(&mut self, row_index: usize) -> Result<()> {
+        match self {
+            Self::Arrow(variants) => variants.flip_to_minor_allele(row_index)?,
             Self::None => {}
         }
         Ok(())
@@ -123,6 +162,25 @@ impl VariantMetadataSink {
             Self::None => Ok(None),
         }
     }
+}
+
+fn dense_output_variant_capacity(variant_window: Option<VariantWindow>) -> usize {
+    variant_window.map_or(VCF_TEXT_INITIAL_MATRIX_VARIANT_CAPACITY, |window| {
+        window.len
+    })
+}
+
+fn write_dense_text_variant(
+    output: &mut TextDenseOutput,
+    variant_index: usize,
+    values: &[f32],
+    missing_indices: &[usize],
+    missing_policy: DenseMissingPolicy,
+) -> Result<()> {
+    if missing_indices.is_empty() {
+        return output.write_variant_no_missing_direct(variant_index, values);
+    }
+    output.write_variant(variant_index, values, missing_indices, missing_policy)
 }
 
 enum TextDenseReadOutput {
@@ -1195,7 +1253,7 @@ fn read_dense_records_with_metadata<R: BufRead>(
 ) -> Result<TextDenseReadOutput> {
     let mut diagnostics = selection.diagnostics.clone();
     let n_samples = selection.samples.len();
-    let output_variant_capacity = variant_window.map_or(0, |window| window.len);
+    let output_variant_capacity = dense_output_variant_capacity(variant_window);
     let direct_sample_major = metadata_return.matrix_only()
         && variant_window.is_some()
         && can_write_sample_major_directly(selection, source.sample_count, variant_filter);
@@ -1217,7 +1275,7 @@ fn read_dense_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_text_record(path, &record)?;
+        let variant = text_variant_view_from_text_record(path, &record)?;
         // Tabix/CSI chunks can include neighboring records from the same BGZF
         // block. Keep the text backend's exact region contract independent of the
         // lower-level chunk boundaries.
@@ -1225,7 +1283,7 @@ fn read_dense_records_with_metadata<R: BufRead>(
             continue;
         }
         let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision(&variant))
+            .map(|filter| filter.partial_decision_view(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -1268,12 +1326,16 @@ fn read_dense_records_with_metadata<R: BufRead>(
                 RetentionAction::Stop => break,
             }
             if let Some(stats) = stats {
-                genoio_core::attach_variant_stats(&mut variant, stats);
+                variants.push_view_with_stats(&variant, stats)?;
+            } else {
+                variants.push_view(&variant)?;
             }
+        } else {
+            variants.push_view(&variant)?;
         }
-        variants.push_variant(variant)?;
 
-        output.write_variant(
+        write_dense_text_variant(
+            &mut output,
             output_variant_count,
             decoded.values(),
             decoded.missing_indices(),
@@ -1343,7 +1405,7 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
 ) -> Result<TextDenseReadOutput> {
     let mut diagnostics = selection.diagnostics.clone();
     let n_samples = selection.samples.len();
-    let output_variant_capacity = variant_window.map_or(0, |window| window.len);
+    let output_variant_capacity = dense_output_variant_capacity(variant_window);
     let direct_sample_major = metadata_return.matrix_only()
         && variant_window.is_some()
         && can_write_sample_major_directly(selection, source.sample_count, variant_filter);
@@ -1365,12 +1427,12 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_text_record(path, &record)?;
+        let variant = text_variant_view_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source.region) {
             continue;
         }
         let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision(&variant))
+            .map(|filter| filter.partial_decision_view(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -1398,15 +1460,17 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-            if !metadata_return.matrix_only() {
-                if let Some(stats) = stats {
-                    genoio_core::attach_variant_stats(&mut variant, stats);
-                }
+            if let Some(stats) = stats {
+                variants.push_view_with_stats(&variant, stats)?;
+            } else {
+                variants.push_view(&variant)?;
             }
+        } else {
+            variants.push_view(&variant)?;
         }
-        variants.push_variant(variant)?;
 
-        output.write_variant(
+        write_dense_text_variant(
+            &mut output,
             output_variant_count,
             decoded.values(),
             decoded.missing_indices(),
@@ -1480,7 +1544,7 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
         mut diagnostics,
     } = selection;
     let n_samples = samples.len() * 2;
-    let output_variant_capacity = variant_window.map_or(0, |window| window.len);
+    let output_variant_capacity = dense_output_variant_capacity(variant_window);
     let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, false);
     let mut variants = VariantMetadataSink::new(variant_sink_kind, output_variant_capacity);
     let mut output_variant_count = 0;
@@ -1500,12 +1564,12 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_text_record(path, &record)?;
+        let variant = text_variant_view_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }
         let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision(&variant))
+            .map(|filter| filter.partial_decision_view(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -1547,11 +1611,13 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-            if !metadata_return.matrix_only() {
-                if let Some(stats) = stats {
-                    genoio_core::attach_variant_stats(&mut variant, stats);
-                }
+            if let Some(stats) = stats {
+                variants.push_view_with_stats(&variant, stats)?;
+            } else {
+                variants.push_view(&variant)?;
             }
+        } else {
+            variants.push_view(&variant)?;
         }
         decode_phased_gt_dense_record(
             path,
@@ -1560,11 +1626,11 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
             GtStatsMode::Skip,
             &mut decoded,
         )?;
-        variants.push_variant(variant)?;
 
         // Dense haplotype reads expose source allele-1 indicators. Sparse
         // haplotype output flips columns to minor allele later to reduce nnz.
-        output.write_variant(
+        write_dense_text_variant(
+            &mut output,
             output_variant_count,
             decoded.values(),
             decoded.missing_indices(),
@@ -1590,10 +1656,10 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
         .map(TextDenseReadOutput::Arrow)
 }
 
-fn evaluate_text_gt_filter(
+fn evaluate_text_gt_filter<V: VariantMetadataView + ?Sized>(
     decoded: &GtDecodeBuffers,
     filter: &VariantFilter,
-    variant: &VariantRecord,
+    variant: &V,
     matrix_only: bool,
     context: &str,
 ) -> Result<(bool, Option<VariantStats>)> {
@@ -1615,7 +1681,7 @@ fn evaluate_text_gt_filter(
     let stats = decoded.stats().ok_or_else(|| {
         GenoioError::internal_contract(format!("vcf {context} filter missing stats"))
     })?;
-    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
+    Ok((filter.evaluate_view(variant, Some(&stats)), Some(stats)))
 }
 
 #[cfg(test)]

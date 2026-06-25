@@ -12,11 +12,10 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, append_sparse_value, attach_variant_stats, finish_sparse_column,
-    flip_values_to_minor_allele, flip_variant_metadata_to_minor_allele, reject_sparse_missing,
+    append_sparse_column, append_sparse_value, finish_sparse_column, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
     PartialFilterDecision, RegionPredicate, SampleMetadataArrowBuffers,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantRecord, VariantWindow,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -29,9 +28,11 @@ use super::gt::{
     HaplotypeSparseDecodeBuffers,
 };
 use super::record::{
-    skip_variant_for_region, validate_biallelic_variant, variant_record_from_text_record,
+    skip_variant_for_region, text_variant_view_from_text_record, validate_biallelic_variant,
 };
-use super::{VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn};
+use super::{
+    dense_output_variant_capacity, VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn,
+};
 
 pub(super) enum TextSparseReadOutput {
     Arrow(SparseGenotypeMatrixArrowVariants),
@@ -65,7 +66,7 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
         mut diagnostics,
     } = selection;
     let n_samples = samples.len();
-    let variant_capacity = variant_window.map_or(0, |window| window.len);
+    let variant_capacity = dense_output_variant_capacity(variant_window);
     let mut indptr = Vec::with_capacity(variant_capacity.saturating_add(1));
     indptr.push(0);
     let mut indices = Vec::new();
@@ -86,12 +87,12 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_text_record(path, &record)?;
+        let variant = text_variant_view_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }
         let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision(&variant))
+            .map(|filter| filter.partial_decision_view(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -113,26 +114,32 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
             &mut decoded,
         )?;
 
+        let mut stats_to_attach = None;
         if needs_genotype_decision {
             let stats = decoded.stats();
             match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                variant_filter.is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref())),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-            if let Some(stats) = stats {
-                attach_variant_stats(&mut variant, stats);
-            }
+            stats_to_attach = stats;
         }
 
         reject_sparse_missing(!decoded.missing_indices().is_empty())?;
         // Genotype sparse columns store minor-allele dosage by convention.
-        flip_values_to_minor_allele(decoded.values_mut(), &mut variant);
+        let flipped = flip_values_to_minor_allele(decoded.values_mut());
         append_sparse_column(&mut indptr, &mut indices, &mut data, decoded.values())?;
-        variants.push_variant(variant)?;
+        if let Some(row_index) = variants.push_view_row(&variant)? {
+            if let Some(stats) = stats_to_attach {
+                variants.attach_stats(row_index, stats)?;
+            }
+            if flipped {
+                variants.flip_to_minor_allele(row_index)?;
+            }
+        }
     }
 
     let n_variants = indptr.len().saturating_sub(1);
@@ -181,7 +188,7 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
         metadata_return.samples,
         true,
     )?;
-    let variant_capacity = variant_window.map_or(0, |window| window.len);
+    let variant_capacity = dense_output_variant_capacity(variant_window);
     let mut indptr = Vec::with_capacity(variant_capacity.saturating_add(1));
     indptr.push(0);
     let mut indices = Vec::new();
@@ -203,12 +210,12 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let mut variant = variant_record_from_text_record(path, &record)?;
+        let variant = text_variant_view_from_text_record(path, &record)?;
         if skip_variant_for_region(&variant, source_region) {
             continue;
         }
         let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision(&variant))
+            .map(|filter| filter.partial_decision_view(&variant))
             .unwrap_or(PartialFilterDecision::Accept);
         match retention.metadata_decision(partial_decision, &mut diagnostics) {
             MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
@@ -219,6 +226,7 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
 
         let needs_genotype_decision =
             matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let mut stats_to_attach = None;
         if needs_genotype_decision {
             // Apply genotype-stat filters before phased decoding so rejected
             // unphased records do not fail a haplotype sparse read.
@@ -231,16 +239,14 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
             )?;
             let stats = stats_decoded.stats();
             match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate(&variant, stats.as_ref())),
+                variant_filter.is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref())),
                 &mut diagnostics,
             ) {
                 RetentionAction::Include => {}
                 RetentionAction::Skip => continue,
                 RetentionAction::Stop => break,
             }
-            if let Some(stats) = stats {
-                attach_variant_stats(&mut variant, stats);
-            }
+            stats_to_attach = stats;
         }
 
         decode_phased_gt_sparse_record(
@@ -251,14 +257,16 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
             &mut decoded,
         )?;
         reject_sparse_missing(decoded.has_missing())?;
-        append_haplotype_minor_sparse_column(
-            &mut indptr,
-            &mut indices,
-            &mut data,
-            &mut variant,
-            &decoded,
-        )?;
-        variants.push_variant(variant)?;
+        let flipped =
+            append_haplotype_minor_sparse_column(&mut indptr, &mut indices, &mut data, &decoded)?;
+        if let Some(row_index) = variants.push_view_row(&variant)? {
+            if let Some(stats) = stats_to_attach {
+                variants.attach_stats(row_index, stats)?;
+            }
+            if flipped {
+                variants.flip_to_minor_allele(row_index)?;
+            }
+        }
     }
 
     let n_variants = indptr.len().saturating_sub(1);
@@ -280,19 +288,31 @@ fn append_haplotype_minor_sparse_column(
     indptr: &mut Vec<i32>,
     indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
-    variant: &mut VariantRecord,
     decoded: &HaplotypeSparseDecodeBuffers,
-) -> Result<()> {
+) -> Result<bool> {
     let a1_rows = decoded.a1_rows();
-    if should_flip_haplotype_to_minor_allele(a1_rows.len(), decoded.n_rows()) {
-        flip_variant_metadata_to_minor_allele(variant);
+    let flipped = should_flip_haplotype_to_minor_allele(a1_rows.len(), decoded.n_rows());
+    if flipped {
         // `a1_rows` is sorted because selected samples are scanned in source
         // order and each phased call contributes rows in haplotype order.
         append_haplotype_complement_column(indices, data, decoded.n_rows(), a1_rows)?;
     } else {
         append_haplotype_rows(indices, data, a1_rows)?;
     }
-    finish_sparse_column(indptr, data.len())
+    finish_sparse_column(indptr, data.len())?;
+    Ok(flipped)
+}
+
+fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
+    let a1_count = values.iter().sum::<f32>();
+    let a0_count = 2.0 * values.len() as f32 - a1_count;
+    if a1_count <= a0_count {
+        return false;
+    }
+    for value in values {
+        *value = 2.0 - *value;
+    }
+    true
 }
 
 fn append_haplotype_rows(

@@ -464,7 +464,7 @@ fn read_plink1_dense_matrix_only_genotype_filter_arrow(
             &mut decoder_state,
         )?;
 
-        let (retain_variant, _) = evaluate_packed_hardcall_filter(
+        let (retain_variant, _) = evaluate_packed_hardcall_filter::<genoio_core::VariantRecord>(
             &decoder_state.packed,
             &context.selection.source_indices,
             context.all_samples_selected,

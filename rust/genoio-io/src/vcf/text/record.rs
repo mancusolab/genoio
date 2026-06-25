@@ -16,6 +16,53 @@ use crate::error::Result;
 
 use super::super::finite_qual;
 
+/// Borrowed metadata view over a noodles text VCF record.
+///
+/// Text VCF matrix reads use this to evaluate metadata predicates and append
+/// returned variant rows without allocating a full [`VariantRecord`] first.
+pub(super) struct TextVariantView<'a> {
+    chrom: &'a str,
+    pos: u32,
+    ids: noodles::record::Ids<'a>,
+    ref_allele: &'a str,
+    alternate_bases: noodles::record::AlternateBases<'a>,
+    qual: Option<f32>,
+}
+
+impl VariantMetadataView for TextVariantView<'_> {
+    fn chrom(&self) -> &str {
+        self.chrom
+    }
+
+    fn pos(&self) -> u32 {
+        self.pos
+    }
+
+    fn id(&self) -> &str {
+        first_id_str(self.ids.as_ref())
+    }
+
+    fn a0(&self) -> &str {
+        self.ref_allele
+    }
+
+    fn a1(&self) -> &str {
+        first_alt_allele_str(self.alternate_bases.as_ref()).unwrap_or("")
+    }
+
+    fn ref_allele(&self) -> Option<&str> {
+        Some(self.ref_allele)
+    }
+
+    fn alt_allele(&self) -> Option<&str> {
+        Some(self.alternate_bases.as_ref())
+    }
+
+    fn qual(&self) -> Option<f32> {
+        self.qual
+    }
+}
+
 /// Convert a noodles VCF/BCF record into genoio's metadata shape.
 pub(in crate::vcf) fn variant_record_from_noodles_variant_record<R>(
     path: &Path,
@@ -117,59 +164,48 @@ where
     variants.push(chrom, pos, &id, &ref_allele, &first_alt)
 }
 
-pub(super) fn variant_in_region(variant: &VariantRecord, region: &RegionPredicate) -> bool {
-    variant.chrom == region.chrom && variant.pos >= region.start && variant.pos <= region.end
+pub(super) fn variant_in_region_view<V: VariantMetadataView + ?Sized>(
+    variant: &V,
+    region: &RegionPredicate,
+) -> bool {
+    variant.chrom() == region.chrom && variant.pos() >= region.start && variant.pos() <= region.end
 }
 
-pub(super) fn skip_variant_for_region(
-    variant: &VariantRecord,
+pub(super) fn skip_variant_for_region<V: VariantMetadataView + ?Sized>(
+    variant: &V,
     region: Option<&RegionPredicate>,
 ) -> bool {
-    region.is_some_and(|region| !variant_in_region(variant, region))
+    region.is_some_and(|region| !variant_in_region_view(variant, region))
 }
 
-pub(super) fn variant_record_from_text_record(
+pub(super) fn text_variant_view_from_text_record<'a>(
     path: &Path,
-    record: &noodles::Record,
-) -> Result<VariantRecord> {
-    let chrom = text_record_chrom(path, record)?.to_string();
+    record: &'a noodles::Record,
+) -> Result<TextVariantView<'a>> {
+    let chrom = text_record_chrom(path, record)?;
     let pos = text_record_pos(path, record)?;
-
     let ref_allele = record.reference_bases();
     let alternate_bases = record.alternate_bases();
     let alt_allele = alternate_bases.as_ref();
-    let ref_allele = ref_allele.to_string();
-    let alt_allele = alt_allele.to_string();
-    let first_alt = first_alt_allele_str(&alt_allele)
-        .ok_or_else(|| {
-            GenoioError::invalid_source(
-                path,
-                format!("vcf record {chrom}:{pos} has fewer than two alleles"),
-            )
-        })?
-        .to_string();
+    let _ = first_alt_allele_str(alt_allele).ok_or_else(|| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
+        )
+    })?;
+    let qual = record
+        .quality_score()
+        .transpose()
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf qual error: {error}")))?
+        .and_then(finite_qual);
 
-    Ok(VariantRecord {
+    Ok(TextVariantView {
         chrom,
         pos,
-        id: first_id(record),
-        a0: ref_allele.clone(),
-        a1: first_alt.clone(),
-        ref_allele: Some(ref_allele.clone()),
-        alt_allele: Some(alt_allele.clone()),
-        source_a0: ref_allele,
-        source_a1: first_alt,
-        flipped: false,
-        qual: record
-            .quality_score()
-            .transpose()
-            .map_err(|error| GenoioError::invalid_source(path, format!("vcf qual error: {error}")))?
-            .and_then(finite_qual),
-        af: None,
-        maf: None,
-        mac: None,
-        missing_rate: None,
-        n_called: None,
+        ids: record.ids(),
+        ref_allele,
+        alternate_bases,
+        qual,
     })
 }
 
@@ -178,27 +214,15 @@ pub(super) fn append_public_variant_metadata_from_text_record(
     record: &noodles::Record,
     variants: &mut VariantMetadataArrowBuffers,
 ) -> Result<()> {
-    let chrom = text_record_chrom(path, record)?;
-    let pos = text_record_pos(path, record)?;
+    let view = text_variant_view_from_text_record(path, record)?;
+    append_public_variant_metadata_from_text_view(&view, variants)
+}
 
-    let ref_allele = record.reference_bases();
-    let alternate_bases = record.alternate_bases();
-    let alt_allele = alternate_bases.as_ref();
-    let first_alt = first_alt_allele_str(alt_allele).ok_or_else(|| {
-        GenoioError::invalid_source(
-            path,
-            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
-        )
-    })?;
-
-    let ids = record.ids();
-    variants.push(
-        chrom,
-        i64::from(pos),
-        first_id_str(ids.as_ref()),
-        ref_allele,
-        first_alt,
-    )
+pub(super) fn append_public_variant_metadata_from_text_view(
+    variant: &TextVariantView<'_>,
+    variants: &mut VariantMetadataArrowBuffers,
+) -> Result<()> {
+    variants.push_view(variant)
 }
 
 fn text_record_chrom<'a>(path: &Path, record: &'a noodles::Record) -> Result<&'a str> {
@@ -273,11 +297,6 @@ where
     first
 }
 
-fn first_id(record: &noodles::Record) -> String {
-    let ids = record.ids();
-    first_id_str(ids.as_ref()).to_string()
-}
-
 fn first_id_str(id: &str) -> &str {
     if id.is_empty() {
         return ".";
@@ -321,4 +340,57 @@ fn validate_biallelic_record(path: &Path, chrom: &str, pos: u32, alt: Option<&st
         path,
         format!("vcf dense reads require biallelic records; record {chrom}:{pos} is not biallelic"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use genoio_core::VariantFilter;
+
+    use super::*;
+
+    fn read_text_record(line: &str) -> noodles::Record {
+        let mut reader = noodles::io::Reader::new(Cursor::new(line.as_bytes()));
+        let mut record = noodles::Record::default();
+        reader
+            .read_record(&mut record)
+            .expect("record should parse");
+        record
+    }
+
+    #[test]
+    fn text_variant_view_borrows_fields_for_filtering_and_arrow_append() {
+        let record = read_text_record("chr1\t42\trs1;rs2\tA\tG,T\t30\tPASS\t.\tGT\t0/1\n");
+        let view = text_variant_view_from_text_record(Path::new("fixture.vcf"), &record)
+            .expect("view should borrow text record metadata");
+        let filter = VariantFilter::from_json_value(serde_json::json!({
+            "op": "and",
+            "left": {"op": "predicate", "name": "chrom", "params": {"value": "chr1"}},
+            "right": {"op": "predicate", "name": "qual", "params": {"min": 20.0}}
+        }))
+        .expect("filter should parse");
+        let mut variants = VariantMetadataArrowBuffers::with_capacity(1);
+
+        append_public_variant_metadata_from_text_view(&view, &mut variants)
+            .expect("borrowed view should append to Arrow buffers");
+
+        assert_eq!(filter.metadata_decision_view(&view), Some(true));
+        assert!(skip_variant_for_region(
+            &view,
+            Some(&RegionPredicate {
+                chrom: "chr2".to_string(),
+                start: 1,
+                end: 100,
+            })
+        ));
+        assert_eq!(variants.positions, vec![42]);
+        assert_eq!(variants.chroms.values, b"chr1");
+        assert_eq!(variants.ids.values, b"rs1");
+        assert_eq!(variants.a0s.values, b"A");
+        assert_eq!(variants.a1s.values, b"G");
+        assert_eq!(variants.ref_alleles, vec![Some("A".to_string())]);
+        assert_eq!(variants.alt_alleles, vec![Some("G,T".to_string())]);
+        assert_eq!(variants.quals, vec![Some(30.0)]);
+    }
 }

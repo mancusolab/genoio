@@ -6,8 +6,8 @@
 //! transpose.
 
 use genoio_core::{
-    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, SampleMetadataArrowBuffers,
-    VariantFilter, VariantMetadataArrowBuffers,
+    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, GenoioError,
+    SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers,
 };
 
 use crate::error::Result;
@@ -115,6 +115,46 @@ impl TextDenseOutput {
         }
     }
 
+    /// Write a decoded variant that needs no missing-value policy work.
+    ///
+    /// This is the hot path for `missing="nan"` and `missing="raise"` records
+    /// without missing calls. It avoids copying through the reusable scratch
+    /// vector only to discover that the missing policy is a no-op.
+    pub(super) fn write_variant_no_missing_direct(
+        &mut self,
+        variant_index: usize,
+        decoded_values: &[f32],
+    ) -> Result<()> {
+        match self {
+            Self::SampleMajor {
+                n_samples,
+                row_width,
+                values,
+                ..
+            } => write_sample_major_variant_slot(
+                values,
+                *n_samples,
+                *row_width,
+                variant_index,
+                decoded_values,
+            ),
+            Self::VariantMajor {
+                n_samples,
+                values: output_values,
+                ..
+            } => {
+                if decoded_values.len() != *n_samples {
+                    return Err(GenoioError::internal_contract(format!(
+                        "variant value count {} does not match sample count {n_samples}",
+                        decoded_values.len()
+                    )));
+                }
+                output_values.extend_from_slice(decoded_values);
+                Ok(())
+            }
+        }
+    }
+
     pub(super) fn finish_arrow_variants(
         self,
         n_variants: usize,
@@ -168,4 +208,23 @@ fn finalize_variant_values<'a>(
     missing_indices.extend_from_slice(decoded_missing_indices);
     apply_dense_missing_policy_to_variant(scratch_values, missing_indices, missing_policy)?;
     Ok(scratch_values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_missing_direct_write_preserves_variant_values_without_scratch_policy_work() {
+        let mut output = TextDenseOutput::new(3, 2, false);
+
+        output
+            .write_variant_no_missing_direct(0, &[0.0, 1.0, 2.0])
+            .expect("direct write should append variant-major values");
+        let matrix = output
+            .finish_arrow_variants(1, None, None, genoio_core::DenseDiagnostics::default())
+            .expect("matrix should finish");
+
+        assert_eq!(matrix.values, vec![0.0, 1.0, 2.0]);
+    }
 }

@@ -7,7 +7,7 @@
 
 use genoio_core::{
     compute_dosage_variant_stats, is_dosage_polymorphic, GenoioError, GenotypeFilterConjunction,
-    GenotypeFilterPlan, VariantFilter, VariantRecord, VariantStats,
+    GenotypeFilterPlan, VariantFilter, VariantMetadataView, VariantStats,
 };
 
 use crate::error::Result;
@@ -179,11 +179,11 @@ fn validate_missing_indices(values_len: usize, missing_indices: &[usize]) -> Res
     Ok(())
 }
 
-pub(crate) fn evaluate_dosage_filter(
+pub(crate) fn evaluate_dosage_filter<V: VariantMetadataView + ?Sized>(
     values: &[f32],
     missing_indices: &[usize],
     filter: &VariantFilter,
-    variant: &VariantRecord,
+    variant: &V,
     require_stats: bool,
 ) -> Result<(bool, Option<VariantStats>)> {
     let plan = filter.genotype_filter_plan();
@@ -202,12 +202,13 @@ pub(crate) fn evaluate_dosage_filter(
     }
 
     let stats = compute_dosage_variant_stats(values, missing_indices)?;
-    Ok((filter.evaluate(variant, Some(&stats)), Some(stats)))
+    Ok((filter.evaluate_view(variant, Some(&stats)), Some(stats)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genoio_core::VariantRecord;
     use serde_json::json;
 
     fn test_variant() -> VariantRecord {
