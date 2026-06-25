@@ -63,6 +63,8 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -102,6 +104,8 @@ fn plain_vcf_dense_uses_permissive_text_header_path() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -133,6 +137,8 @@ this record is intentionally not valid VCF and should not be decoded
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -167,7 +173,7 @@ fn vcf_dense_matrix_only_omits_metadata() {
         vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]
     );
     assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
-    assert!(dense.samples.is_empty());
+    assert!(dense.samples.is_none());
     assert!(dense.variants.is_none());
 }
 
@@ -201,7 +207,7 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
         dense_missing_sample_major(&dense),
         vec![false, false, false, true, false, false]
     );
-    assert!(dense.samples.is_empty());
+    assert!(dense.samples.is_none());
     assert!(dense.variants.is_none());
 }
 
@@ -234,6 +240,8 @@ fn compressed_vcf_dosage_dense_uses_text_backend_semantics() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -280,6 +288,8 @@ fn threaded_compressed_vcf_dosage_uses_text_backend_semantics() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -410,7 +420,7 @@ fn compressed_vcf_matrix_only_uses_text_backend_semantics() {
         dense_missing_sample_major(&dense),
         vec![false, false, false, true]
     );
-    assert!(dense.samples.is_empty());
+    assert!(dense.samples.is_none());
     assert!(dense.variants.is_none());
 }
 
@@ -447,6 +457,8 @@ fn compressed_vcf_dense_with_metadata_uses_text_backend_semantics() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -481,6 +493,8 @@ fn vcf_dense_sample_subset_preserves_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -489,10 +503,12 @@ fn vcf_dense_sample_subset_preserves_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
-        vec![Some(0), Some(2)]
+        vec![None, None]
     );
 }
 

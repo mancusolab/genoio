@@ -9,8 +9,9 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
-    GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+    GenotypeFilterPlan, PartialFilterDecision, SampleMetadataArrowBuffers,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
+    VariantWindow,
 };
 
 use crate::error::Result;
@@ -186,11 +187,11 @@ pub fn read_plink2_sparse_windowed_with_arrow_variants(
 
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     SparseGenotypeMatrixArrowVariants::new(
         n_samples,
         n_variants,
@@ -329,11 +330,11 @@ fn read_plink2_sparse_source_window_arrow(
     let n_variants = indptr.len().saturating_sub(1);
     diagnostics.candidate_variants = n_variants;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     SparseGenotypeMatrixArrowVariants::new(
         n_samples,
         n_variants,

@@ -104,7 +104,7 @@ fn sparse_arrow_contract_rejects_negative_indices() {
         vec![0, -1],
         vec![],
         vec![],
-        Vec::new(),
+        None,
         None,
         DenseDiagnostics::default(),
     );
@@ -119,7 +119,7 @@ fn sparse_arrow_contract_rejects_negative_indices() {
         vec![0, 1],
         vec![-1],
         vec![1.0],
-        Vec::new(),
+        None,
         None,
         DenseDiagnostics::default(),
     );
@@ -137,7 +137,7 @@ fn sparse_arrow_contract_rejects_dimensions_outside_i32_index_range() {
         vec![0],
         vec![],
         vec![],
-        Vec::new(),
+        None,
         None,
         DenseDiagnostics::default(),
     );
@@ -152,7 +152,7 @@ fn sparse_arrow_contract_rejects_dimensions_outside_i32_index_range() {
         vec![0],
         vec![],
         vec![],
-        Vec::new(),
+        None,
         None,
         DenseDiagnostics::default(),
     );

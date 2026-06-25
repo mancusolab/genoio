@@ -86,6 +86,210 @@ impl SampleMetadataColumns {
     }
 }
 
+/// Arrow-compatible nullable UTF-8 column buffers for Python/Arrow adapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NullableStringColumnBuffers {
+    /// Arrow Utf8 byte offsets with a leading zero and one offset per row end.
+    pub offsets: Vec<i32>,
+    /// Contiguous UTF-8 bytes for all non-null values.
+    pub values: Vec<u8>,
+    /// Per-row validity bits; false rows reuse the previous byte offset.
+    pub validity: Vec<bool>,
+}
+
+impl NullableStringColumnBuffers {
+    /// Allocate a nullable string column with Arrow-compatible initial offset state.
+    pub fn with_capacity(row_capacity: usize, value_capacity: usize) -> Self {
+        let mut offsets = Vec::with_capacity(row_capacity.saturating_add(1));
+        offsets.push(0);
+        Self {
+            offsets,
+            values: Vec::with_capacity(value_capacity),
+            validity: Vec::with_capacity(row_capacity),
+        }
+    }
+
+    /// Append one optional UTF-8 value while preserving Arrow offset invariants.
+    pub fn append_option(&mut self, value: Option<&str>) -> Result<(), GenoioError> {
+        match value {
+            Some(value) => {
+                append_utf8_value(&mut self.offsets, &mut self.values, value)?;
+                self.validity.push(true);
+            }
+            None => {
+                self.offsets.push(*self.offsets.last().ok_or_else(|| {
+                    GenoioError::internal_contract("nullable string column missing initial offset")
+                })?);
+                self.validity.push(false);
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the number of logical rows in the column.
+    pub fn len(&self) -> usize {
+        self.validity.len()
+    }
+
+    /// Return true when the column contains no logical rows.
+    pub fn is_empty(&self) -> bool {
+        self.validity.is_empty()
+    }
+}
+
+/// Sample metadata with public fields staged in Arrow-compatible column buffers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleMetadataArrowBuffers {
+    /// Family IDs; nullable because VCF/BGEN sources may not provide them.
+    pub fids: NullableStringColumnBuffers,
+    /// Individual/sample IDs; required for every public sample row.
+    pub iids: StringColumnBuffers,
+    /// Paternal IDs from pedigree-style metadata, when present.
+    pub fathers: NullableStringColumnBuffers,
+    /// Maternal IDs from pedigree-style metadata, when present.
+    pub mothers: NullableStringColumnBuffers,
+    /// Source sex labels, when present.
+    pub sexes: NullableStringColumnBuffers,
+    /// Source phenotype labels, when present.
+    pub phenotypes: NullableStringColumnBuffers,
+    /// Source sample row for haplotype-expanded outputs; absent for genotype outputs.
+    pub source_sample_indices: Option<Vec<Option<usize>>>,
+    /// Haplotype row index for haplotype-expanded outputs; absent for genotype outputs.
+    pub haplotype_indices: Option<Vec<Option<usize>>>,
+}
+
+/// Borrowed view of a string inside columnar sample metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleMetadataStr<'a>(&'a str);
+
+impl<'a> SampleMetadataStr<'a> {
+    /// Return the underlying UTF-8 value.
+    pub fn as_str(self) -> &'a str {
+        self.0
+    }
+}
+
+/// Borrowed row view produced from columnar sample metadata on demand.
+///
+/// This exists for tests and diagnostics that need row-shaped assertions. The
+/// main reader and Python paths should keep using `SampleMetadataArrowBuffers`
+/// directly so they do not re-materialize sample records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleMetadataRow<'a> {
+    pub fid: Option<SampleMetadataStr<'a>>,
+    pub iid: SampleMetadataStr<'a>,
+    pub father: Option<SampleMetadataStr<'a>>,
+    pub mother: Option<SampleMetadataStr<'a>>,
+    pub sex: Option<SampleMetadataStr<'a>>,
+    pub phenotype: Option<SampleMetadataStr<'a>>,
+    pub source_sample_index: Option<usize>,
+    pub haplotype_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SampleMetadataRows<'a> {
+    buffers: &'a SampleMetadataArrowBuffers,
+    index: usize,
+}
+
+impl SampleMetadataArrowBuffers {
+    /// Allocate sample metadata columns for `row_capacity` public sample rows.
+    ///
+    /// `include_haplotype_columns` controls whether the public Arrow schema
+    /// includes source-sample and haplotype mapping columns. Genotype outputs
+    /// leave those columns absent to preserve the existing public schema.
+    pub fn with_capacity(row_capacity: usize, include_haplotype_columns: bool) -> Self {
+        Self {
+            fids: NullableStringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(8),
+            ),
+            iids: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(12)),
+            fathers: NullableStringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(8),
+            ),
+            mothers: NullableStringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(8),
+            ),
+            sexes: NullableStringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(8),
+            ),
+            phenotypes: NullableStringColumnBuffers::with_capacity(
+                row_capacity,
+                row_capacity.saturating_mul(8),
+            ),
+            source_sample_indices: include_haplotype_columns
+                .then(|| Vec::with_capacity(row_capacity)),
+            haplotype_indices: include_haplotype_columns.then(|| Vec::with_capacity(row_capacity)),
+        }
+    }
+
+    /// Append one normalized sample record into the columnar buffers.
+    pub fn push_record(&mut self, sample: &SampleRecord) -> Result<(), GenoioError> {
+        self.fids.append_option(sample.fid.as_deref())?;
+        self.iids.append_value(&sample.iid)?;
+        self.fathers.append_option(sample.father.as_deref())?;
+        self.mothers.append_option(sample.mother.as_deref())?;
+        self.sexes.append_option(sample.sex.as_deref())?;
+        self.phenotypes.append_option(sample.phenotype.as_deref())?;
+        if let Some(source_sample_indices) = self.source_sample_indices.as_mut() {
+            source_sample_indices.push(sample.source_sample_index);
+        }
+        if let Some(haplotype_indices) = self.haplotype_indices.as_mut() {
+            haplotype_indices.push(sample.haplotype_index);
+        }
+        Ok(())
+    }
+
+    /// Build Arrow-compatible public sample buffers from normalized records.
+    pub fn from_records(
+        samples: &[SampleRecord],
+        include_haplotype_columns: bool,
+    ) -> Result<Self, GenoioError> {
+        let mut output = Self::with_capacity(samples.len(), include_haplotype_columns);
+        for sample in samples {
+            output.push_record(sample)?;
+        }
+        Ok(output)
+    }
+
+    /// Build sample buffers only when the caller requested sample metadata.
+    ///
+    /// Returning `None` distinguishes omitted metadata from a requested but
+    /// empty sample table, which is important at the PyO3 boundary.
+    pub fn optional_from_records(
+        samples: &[SampleRecord],
+        return_samples: bool,
+        include_haplotype_columns: bool,
+    ) -> Result<Option<Self>, GenoioError> {
+        if !return_samples {
+            return Ok(None);
+        }
+        Self::from_records(samples, include_haplotype_columns).map(Some)
+    }
+
+    /// Return the number of public sample rows represented by these buffers.
+    pub fn len(&self) -> usize {
+        self.iids.len()
+    }
+
+    /// Return true when no public sample rows are present.
+    pub fn is_empty(&self) -> bool {
+        self.iids.is_empty()
+    }
+
+    /// Iterate over borrowed row views without changing the columnar storage.
+    pub fn iter(&self) -> SampleMetadataRows<'_> {
+        SampleMetadataRows {
+            buffers: self,
+            index: 0,
+        }
+    }
+}
+
 /// Public variant metadata columns for Python/Arrow adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantMetadataColumns {
@@ -125,11 +329,14 @@ impl VariantMetadataColumns {
 /// Arrow-compatible UTF-8 column buffers for Python/Arrow adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringColumnBuffers {
+    /// Arrow Utf8 byte offsets with a leading zero and one offset per row end.
     pub offsets: Vec<i32>,
+    /// Contiguous UTF-8 bytes for all values.
     pub values: Vec<u8>,
 }
 
 impl StringColumnBuffers {
+    /// Allocate a non-null string column with Arrow-compatible initial offset state.
     pub fn with_capacity(row_capacity: usize, value_capacity: usize) -> Self {
         let mut offsets = Vec::with_capacity(row_capacity.saturating_add(1));
         offsets.push(0);
@@ -139,27 +346,85 @@ impl StringColumnBuffers {
         }
     }
 
+    /// Append one non-null UTF-8 value while preserving Arrow offset invariants.
     pub fn append_value(&mut self, value: &str) -> Result<(), GenoioError> {
-        let next_offset = self.values.len().checked_add(value.len()).ok_or_else(|| {
-            GenoioError::unsupported("variant metadata string column exceeds addressable memory")
-        })?;
-        let next_offset = i32::try_from(next_offset).map_err(|_| {
-            GenoioError::unsupported(
-                "variant metadata string column exceeds Arrow Utf8 offset capacity",
-            )
-        })?;
-        self.values.extend_from_slice(value.as_bytes());
-        self.offsets.push(next_offset);
-        Ok(())
+        append_utf8_value(&mut self.offsets, &mut self.values, value)
     }
 
+    /// Return the number of logical rows in the column.
     pub fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
     }
 
+    /// Return true when the column contains no logical rows.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+impl<'a> Iterator for SampleMetadataRows<'a> {
+    type Item = SampleMetadataRow<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.buffers.len() {
+            return None;
+        }
+        let index = self.index;
+        self.index += 1;
+        Some(SampleMetadataRow {
+            fid: nullable_string_at(&self.buffers.fids, index),
+            iid: SampleMetadataStr(string_at(&self.buffers.iids, index)),
+            father: nullable_string_at(&self.buffers.fathers, index),
+            mother: nullable_string_at(&self.buffers.mothers, index),
+            sex: nullable_string_at(&self.buffers.sexes, index),
+            phenotype: nullable_string_at(&self.buffers.phenotypes, index),
+            source_sample_index: optional_usize_at(&self.buffers.source_sample_indices, index),
+            haplotype_index: optional_usize_at(&self.buffers.haplotype_indices, index),
+        })
+    }
+}
+
+fn string_at(column: &StringColumnBuffers, index: usize) -> &str {
+    let start = column.offsets[index] as usize;
+    let end = column.offsets[index + 1] as usize;
+    // SAFETY: StringColumnBuffers is populated only from `&str` values, and
+    // offsets are appended immediately after those valid UTF-8 bytes.
+    unsafe { std::str::from_utf8_unchecked(&column.values[start..end]) }
+}
+
+fn nullable_string_at(
+    column: &NullableStringColumnBuffers,
+    index: usize,
+) -> Option<SampleMetadataStr<'_>> {
+    column.validity[index].then(|| {
+        let start = column.offsets[index] as usize;
+        let end = column.offsets[index + 1] as usize;
+        // SAFETY: NullableStringColumnBuffers is populated only from `&str`
+        // values, and offsets are appended immediately after valid UTF-8 bytes.
+        SampleMetadataStr(unsafe { std::str::from_utf8_unchecked(&column.values[start..end]) })
+    })
+}
+
+fn optional_usize_at(values: &Option<Vec<Option<usize>>>, index: usize) -> Option<usize> {
+    values.as_ref().and_then(|values| values[index])
+}
+
+fn append_utf8_value(
+    offsets: &mut Vec<i32>,
+    values: &mut Vec<u8>,
+    value: &str,
+) -> Result<(), GenoioError> {
+    // Store values in Arrow Utf8 layout now so PyO3 can hand ownership to
+    // Arrow arrays without rebuilding strings row by row.
+    let next_offset = values.len().checked_add(value.len()).ok_or_else(|| {
+        GenoioError::unsupported("metadata string column exceeds addressable memory")
+    })?;
+    let next_offset = i32::try_from(next_offset).map_err(|_| {
+        GenoioError::unsupported("metadata string column exceeds Arrow Utf8 offset capacity")
+    })?;
+    values.extend_from_slice(value.as_bytes());
+    offsets.push(next_offset);
+    Ok(())
 }
 
 /// Variant metadata with public fields staged in Arrow-compatible column buffers.
@@ -285,7 +550,7 @@ impl VariantMetadataArrowBuffers {
 /// Complete source metadata with public variants already staged as column buffers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetadataArrowOutput {
-    pub samples: Vec<SampleRecord>,
+    pub samples: SampleMetadataArrowBuffers,
     pub variants: VariantMetadataArrowBuffers,
     pub capabilities: SourceCapabilities,
 }
@@ -359,6 +624,29 @@ mod tests {
             SampleMetadataColumns::from_records(vec![sample("s3", Some(9))], false);
         assert_eq!(columns_without_mapping.source_sample_indices, None);
         assert_eq!(columns_without_mapping.haplotype_indices, None);
+    }
+
+    #[test]
+    fn sample_metadata_arrow_buffers_preserve_nullable_strings_and_mapping_columns() {
+        let buffers = SampleMetadataArrowBuffers::from_records(
+            &[sample("s1", Some(2)), sample("s2", Some(7))],
+            true,
+        )
+        .expect("sample buffers should be built");
+
+        assert_eq!(buffers.len(), 2);
+        assert_eq!(buffers.fids.validity, vec![true, true]);
+        assert_eq!(buffers.iids.len(), 2);
+        assert_eq!(buffers.mothers.validity, vec![true, true]);
+        assert_eq!(buffers.phenotypes.validity, vec![false, false]);
+        assert_eq!(buffers.source_sample_indices, Some(vec![Some(2), Some(7)]));
+        assert_eq!(buffers.haplotype_indices, Some(vec![None, None]));
+
+        let buffers_without_mapping =
+            SampleMetadataArrowBuffers::from_records(&[sample("s3", Some(9))], false)
+                .expect("sample buffers should be built");
+        assert_eq!(buffers_without_mapping.source_sample_indices, None);
+        assert_eq!(buffers_without_mapping.haplotype_indices, None);
     }
 
     #[test]

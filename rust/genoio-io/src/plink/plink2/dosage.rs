@@ -9,7 +9,8 @@ use std::path::Path;
 
 use genoio_core::{
     attach_variant_stats, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    PartialFilterDecision, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
+    PartialFilterDecision, SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers,
+    VariantWindow,
 };
 
 use crate::error::Result;
@@ -131,11 +132,11 @@ pub fn read_plink2_dosage_dense_windowed_with_arrow_variants(
     let n_samples = selection.samples.len();
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,

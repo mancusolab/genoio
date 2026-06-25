@@ -85,6 +85,8 @@ fn phased_vcf_haplotype_dense_counts_a1_by_sample_haplotype_rows() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -107,7 +109,7 @@ fn phased_vcf_haplotype_dense_matrix_only_omits_metadata() {
         dense_values_sample_major(&haplotypes),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
     );
-    assert!(haplotypes.samples.is_empty());
+    assert!(haplotypes.samples.is_none());
     assert!(haplotypes.variants.is_none());
 }
 
@@ -140,6 +142,8 @@ fn compressed_vcf_haplotype_dense_uses_text_backend_semantics() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>(),
@@ -170,6 +174,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -178,6 +184,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -186,6 +194,8 @@ fn filtered_haplotype_samples_preserve_source_sample_index() {
     assert_eq!(
         haplotypes
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -268,6 +278,8 @@ fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
     assert_eq!(
         sparse
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>(),
@@ -380,7 +392,7 @@ fn haplotype_matrix_only_stat_filter_drops_unphased_genotype_before_separator_ch
 
     assert_eq!(haplotypes.n_samples, 4);
     assert_eq!(haplotypes.n_variants, 1);
-    assert!(haplotypes.samples.is_empty());
+    assert!(haplotypes.samples.is_none());
     assert!(haplotypes.variants.is_none());
     assert_eq!(
         dense_values_sample_major(&haplotypes),

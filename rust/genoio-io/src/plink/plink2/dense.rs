@@ -9,8 +9,8 @@ use std::path::Path;
 
 use genoio_core::{
     attach_variant_stats, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, GenotypeFilterPlan, PartialFilterDecision, VariantFilter,
-    VariantMetadataArrowBuffers, VariantWindow,
+    DenseSampleSelection, GenoioError, GenotypeFilterPlan, PartialFilterDecision,
+    SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -242,11 +242,11 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     let n_variants = output_variant_count;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -403,7 +403,7 @@ fn decode_plink2_dense_matrix_only_genotype_filter(
             0,
             Vec::new(),
             DenseLayout::SampleMajor,
-            Vec::new(),
+            None,
             None,
             diagnostics,
         )?;
@@ -505,7 +505,7 @@ fn decode_plink2_dense_matrix_only_genotype_filter(
         output_variant_count,
         values,
         DenseLayout::SampleMajor,
-        Vec::new(),
+        None,
         None,
         diagnostics,
     )?;
@@ -625,7 +625,7 @@ fn decode_plink2_dense_matrix_only_source_window_arrow(
         n_variants,
         values,
         DenseLayout::SampleMajor,
-        Vec::new(),
+        None,
         None,
         diagnostics,
     )
@@ -803,11 +803,11 @@ fn read_plink2_dense_source_window_arrow(
     diagnostics.candidate_variants = n_variants;
     diagnostics.retained_variants = n_variants;
 
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,

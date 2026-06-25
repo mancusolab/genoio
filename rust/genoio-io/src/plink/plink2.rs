@@ -7,7 +7,9 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, MetadataArrowOutput, SourceCapabilities, VariantFilter};
+use genoio_core::{
+    GenoioError, MetadataArrowOutput, SampleMetadataArrowBuffers, SourceCapabilities, VariantFilter,
+};
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
@@ -65,7 +67,7 @@ pub fn read_plink2_metadata_arrow(
     validate_plink2_dimensions(pgen, &header, samples.len(), variants.len())?;
 
     Ok(MetadataArrowOutput {
-        samples,
+        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })

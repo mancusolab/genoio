@@ -487,6 +487,8 @@ fn indexed_vcf_region_sample_filter_preserves_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),

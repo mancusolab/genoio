@@ -36,8 +36,9 @@ pub use filter::{
     PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats, VariantWindow,
 };
 pub use metadata::{
-    MetadataArrowOutput, MetadataOutput, SampleMetadataColumns, SampleRecord, StringColumnBuffers,
-    VariantMetadataArrowBuffers, VariantMetadataColumns, VariantRecord,
+    MetadataArrowOutput, MetadataOutput, NullableStringColumnBuffers, SampleMetadataArrowBuffers,
+    SampleMetadataColumns, SampleRecord, StringColumnBuffers, VariantMetadataArrowBuffers,
+    VariantMetadataColumns, VariantRecord,
 };
 pub use sparse::{
     append_sparse_column, append_sparse_value, finish_sparse_column,

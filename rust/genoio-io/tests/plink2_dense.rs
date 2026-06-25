@@ -295,6 +295,8 @@ fn plink2_dense_decodes_fixed_width_unphased_biallelic_hardcalls() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -319,6 +321,8 @@ fn plink2_dense_filters_samples_in_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -503,6 +507,8 @@ fn plink2_haplotype_dense_decodes_explicit_phased_hardcalls() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -511,6 +517,8 @@ fn plink2_haplotype_dense_decodes_explicit_phased_hardcalls() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -519,6 +527,8 @@ fn plink2_haplotype_dense_decodes_explicit_phased_hardcalls() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -558,6 +568,8 @@ fn plink2_haplotype_dense_sample_filter_uses_source_order_and_haplotype_order() 
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -566,6 +578,8 @@ fn plink2_haplotype_dense_sample_filter_uses_source_order_and_haplotype_order() 
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -574,6 +588,8 @@ fn plink2_haplotype_dense_sample_filter_uses_source_order_and_haplotype_order() 
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -675,11 +691,15 @@ fn plink2_haplotype_sparse_reconstructs_dense_hardcalls() {
     assert_eq!(
         sparse
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>(),
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>()
@@ -778,6 +798,8 @@ fn plink2_haplotype_dense_sample_filter_ignores_unselected_unphased_het() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1328,7 +1350,7 @@ fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
     .expect("matrix-only window should not parse malformed pvar");
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
-    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.samples.is_none());
     assert!(matrix_only.variants.is_none());
     assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 2.0]);
 
@@ -1366,7 +1388,7 @@ fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
     .expect("matrix-only window should not parse malformed psam");
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
-    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.samples.is_none());
     assert!(matrix_only.variants.is_none());
     assert_eq!(matrix_only.values, vec![1.0, 0.0, 1.0]);
 }
@@ -1469,7 +1491,7 @@ S4
         dense_missing_sample_major(&matrix_only),
         dense_missing_sample_major(&metadata_bearing)
     );
-    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.samples.is_none());
     assert!(matrix_only.variants.is_none());
 }
 
@@ -1723,6 +1745,8 @@ S4
     assert_eq!(
         filtered_window
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),

@@ -78,6 +78,8 @@ fn plink1_dense_decodes_variant_major_bed_to_sample_by_variant_matrix() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -95,7 +97,7 @@ fn plink1_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 3);
-    assert!(dense.samples.is_empty());
+    assert!(dense.samples.is_none());
     assert!(dense.variants.is_none());
     assert_values_with_nan(
         &dense.values,
@@ -152,6 +154,8 @@ fn plink1_dense_filters_samples_in_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),

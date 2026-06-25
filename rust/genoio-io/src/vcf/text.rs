@@ -14,9 +14,9 @@ use std::path::Path;
 
 use genoio_core::{
     DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, DenseSampleSelection, GenoioError,
-    MetadataArrowOutput, PartialFilterDecision, RegionPredicate, SourceCapabilities,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
-    VariantStats, VariantWindow,
+    MetadataArrowOutput, PartialFilterDecision, RegionPredicate, SampleMetadataArrowBuffers,
+    SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantMetadataArrowBuffers, VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -1018,11 +1018,11 @@ fn empty_dense_arrow_from_selection(
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len();
-    let samples = if metadata_return.samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        metadata_return.samples,
+        false,
+    )?;
     let variants = metadata_return
         .variants
         .then(|| VariantMetadataArrowBuffers::with_capacity(0));
@@ -1041,11 +1041,11 @@ fn empty_sparse_arrow_from_selection(
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len();
-    let samples = if metadata_return.samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        metadata_return.samples,
+        false,
+    )?;
     let variants = metadata_return
         .variants
         .then(|| VariantMetadataArrowBuffers::with_capacity(0));
@@ -1068,11 +1068,12 @@ fn empty_haplotype_dense_arrow_from_selection(
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len() * 2;
-    let samples = if metadata_return.samples {
-        haplotype_sample_records(&selection.samples, &selection.source_indices)
-    } else {
-        Vec::new()
-    };
+    let haplotype_samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        metadata_return.samples,
+        true,
+    )?;
     let variants = metadata_return
         .variants
         .then(|| VariantMetadataArrowBuffers::with_capacity(0));
@@ -1091,11 +1092,12 @@ fn empty_haplotype_sparse_arrow_from_selection(
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len() * 2;
-    let samples = if metadata_return.samples {
-        haplotype_sample_records(&selection.samples, &selection.source_indices)
-    } else {
-        Vec::new()
-    };
+    let haplotype_samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        metadata_return.samples,
+        true,
+    )?;
     let variants = metadata_return
         .variants
         .then(|| VariantMetadataArrowBuffers::with_capacity(0));
@@ -1142,7 +1144,7 @@ fn read_metadata_arrow_records<R: BufRead>(
     };
 
     Ok(MetadataArrowOutput {
-        samples,
+        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
         variants,
         capabilities,
     })
@@ -1281,11 +1283,11 @@ fn read_dense_records_with_metadata<R: BufRead>(
     }
 
     diagnostics.retained_variants = output_variant_count;
-    let samples = if metadata_return.samples {
-        selection.samples.clone()
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        metadata_return.samples,
+        false,
+    )?;
     output
         .finish_arrow_variants(
             output_variant_count,
@@ -1414,11 +1416,11 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
     }
 
     diagnostics.retained_variants = output_variant_count;
-    let samples = if metadata_return.samples {
-        selection.samples.clone()
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        metadata_return.samples,
+        false,
+    )?;
     output
         .finish_arrow_variants(
             output_variant_count,
@@ -1571,11 +1573,12 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
         output_variant_count += 1;
     }
 
-    let samples = if metadata_return.samples {
-        haplotype_sample_records(&samples, &source_indices)
-    } else {
-        Vec::new()
-    };
+    let haplotype_samples = haplotype_sample_records(&samples, &source_indices);
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        metadata_return.samples,
+        true,
+    )?;
     diagnostics.retained_variants = output_variant_count;
     output
         .finish_arrow_variants(

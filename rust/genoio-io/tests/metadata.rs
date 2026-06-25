@@ -296,12 +296,16 @@ F2 S3 0 0 0 2.0
         metadata
             .samples
             .iter()
-            .map(|sample| (sample.fid.as_deref(), sample.iid.as_str()))
+            .map(|sample| (sample.fid.map(|fid| fid.as_str()), sample.iid.as_str()))
             .collect::<Vec<_>>(),
         vec![(Some("F1"), "S1"), (Some("F1"), "S2"), (Some("F2"), "S3")]
     );
-    assert_eq!(metadata.samples[1].father.as_deref(), Some("S1"));
-    assert_eq!(metadata.samples[1].mother, None);
+    let second_sample = metadata.samples.iter().nth(1).expect("second sample");
+    assert_eq!(
+        second_sample.father.map(|father| father.as_str()),
+        Some("S1")
+    );
+    assert_eq!(second_sample.mother, None);
     assert_eq!(variant_a0(&metadata.variants, 0), "A");
     assert_eq!(variant_a1(&metadata.variants, 0), "G");
     assert_eq!(plink_io::string_at(&metadata.variants.source_a0s, 0), "A");

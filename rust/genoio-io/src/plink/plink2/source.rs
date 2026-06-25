@@ -10,8 +10,8 @@ use std::path::Path;
 
 use genoio_core::{
     select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrixArrowVariants, DenseLayout,
-    DenseSampleSelection, GenoioError, SampleRecord, SparseGenotypeMatrixArrowVariants,
-    VariantMetadataArrowBuffers, VariantWindow,
+    DenseSampleSelection, GenoioError, SampleMetadataArrowBuffers, SampleRecord,
+    SparseGenotypeMatrixArrowVariants, VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -99,7 +99,14 @@ pub(super) fn empty_dense_arrow_for_samples(
 ) -> Result<DenseGenotypeMatrixArrowVariants> {
     diagnostics.retained_variants = 0;
     let n_samples = samples.len();
-    let samples = if return_samples { samples } else { Vec::new() };
+    let include_haplotype_columns = samples
+        .iter()
+        .any(|sample| sample.haplotype_index.is_some());
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &samples,
+        return_samples,
+        include_haplotype_columns,
+    )?;
     let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
@@ -133,7 +140,14 @@ pub(super) fn empty_sparse_arrow_for_samples(
 ) -> Result<SparseGenotypeMatrixArrowVariants> {
     diagnostics.retained_variants = 0;
     let n_samples = samples.len();
-    let samples = if return_samples { samples } else { Vec::new() };
+    let include_haplotype_columns = samples
+        .iter()
+        .any(|sample| sample.haplotype_index.is_some());
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &samples,
+        return_samples,
+        include_haplotype_columns,
+    )?;
     let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
     SparseGenotypeMatrixArrowVariants::new(
         n_samples,

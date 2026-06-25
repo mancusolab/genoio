@@ -1,7 +1,8 @@
 // pattern: Functional Core
 
 use crate::{
-    DenseDiagnostics, GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord,
+    DenseDiagnostics, GenoioError, SampleMetadataArrowBuffers, SampleRecord,
+    VariantMetadataArrowBuffers, VariantRecord,
 };
 
 /// Sparse genotype matrix stored as SciPy-compatible CSC arrays.
@@ -83,7 +84,9 @@ pub struct SparseGenotypeMatrixArrowVariants {
     pub indptr: Vec<i32>,
     pub indices: Vec<i32>,
     pub data: Vec<f32>,
-    pub samples: Vec<SampleRecord>,
+    /// Requested sample metadata in Arrow-compatible buffers; `None` means it was omitted.
+    pub samples: Option<SampleMetadataArrowBuffers>,
+    /// Requested variant metadata in Arrow-compatible buffers; `None` means it was omitted.
     pub variants: Option<VariantMetadataArrowBuffers>,
     pub diagnostics: DenseDiagnostics,
 }
@@ -100,19 +103,21 @@ impl SparseGenotypeMatrixArrowVariants {
         indptr: Vec<i32>,
         indices: Vec<i32>,
         data: Vec<f32>,
-        samples: Vec<SampleRecord>,
+        samples: Option<SampleMetadataArrowBuffers>,
         variants: Option<VariantMetadataArrowBuffers>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
         validate_csc_contract(n_rows, n_cols, &indptr, &indices, &data)?;
-        if !samples.is_empty() && samples.len() != n_rows {
-            return Err(GenoioError::invalid_source(
-                "<sparse>",
-                format!(
-                    "sample metadata length {} does not match n_rows {n_rows}",
-                    samples.len()
-                ),
-            ));
+        if let Some(samples) = samples.as_ref() {
+            if samples.len() != n_rows {
+                return Err(GenoioError::invalid_source(
+                    "<sparse>",
+                    format!(
+                        "sample metadata length {} does not match n_rows {n_rows}",
+                        samples.len()
+                    ),
+                ));
+            }
         }
         if let Some(variants) = variants.as_ref() {
             if variants.len() != n_cols {

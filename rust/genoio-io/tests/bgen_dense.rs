@@ -1131,6 +1131,8 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1139,6 +1141,8 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -1147,6 +1151,8 @@ fn bgen_haplotype_dosage_dense_decodes_phased_expected_a1_rows() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -1211,6 +1217,8 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1219,6 +1227,8 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.source_sample_index)
             .collect::<Vec<_>>(),
@@ -1227,6 +1237,8 @@ fn bgen_haplotype_dosage_sample_filter_uses_source_order_and_haplotype_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.haplotype_index)
             .collect::<Vec<_>>(),
@@ -1456,6 +1468,8 @@ fn bgen_dosage_dense_empty_for_always_false_filter() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1626,7 +1640,7 @@ fn bgen_dosage_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 2);
     assert_eq!(dense.n_variants, 2);
-    assert!(dense.samples.is_empty());
+    assert!(dense.samples.is_none());
     assert!(dense.variants.is_none());
     assert_eq!(
         dense.values,
@@ -1696,7 +1710,7 @@ fn bgen_dosage_dense_matrix_only_preserves_variant_count_with_no_selected_sample
 
     assert_eq!(dense.n_samples, 0);
     assert_eq!(dense.n_variants, 2);
-    assert!(dense.samples.is_empty());
+    assert!(dense.samples.is_none());
     assert!(dense.variants.is_none());
     assert!(dense.values.is_empty());
     assert!(dense_missing_sample_major(&dense).is_empty());
@@ -1728,6 +1742,8 @@ fn bgen_dosage_dense_sample_filter_uses_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),
@@ -1774,6 +1790,8 @@ fn bgen_dosage_dense_phased_sample_filter_uses_source_order() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),

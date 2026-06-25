@@ -35,11 +35,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, StructArray};
-use arrow_buffer::{Buffer, OffsetBuffer, ScalarBuffer};
+use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use genoio_core::{
-    DenseLayout, DenseMissingPolicy, GenoioError, MetadataArrowOutput, SampleMetadataColumns,
-    StringColumnBuffers, VariantMetadataArrowBuffers,
+    DenseLayout, DenseMissingPolicy, GenoioError, MetadataArrowOutput, NullableStringColumnBuffers,
+    SampleMetadataArrowBuffers, StringColumnBuffers, VariantMetadataArrowBuffers,
 };
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
@@ -946,10 +946,7 @@ fn metadata_to_py(py: Python<'_>, output: MetadataArrowOutput) -> PyResult<Py<Py
         capabilities,
     } = output;
     let dict = PyDict::new(py);
-    dict.set_item(
-        "samples",
-        sample_records_to_arrow_frame(py, samples, false)?,
-    )?;
+    dict.set_item("samples", sample_arrow_buffers_to_py(py, samples)?)?;
     dict.set_item("variants", variant_arrow_buffers_to_py(py, variants)?)?;
     dict.set_item("capabilities", source_capabilities_to_py(py, capabilities)?)?;
     Ok(dict.unbind())
@@ -971,7 +968,7 @@ fn dense_matrix_to_py(
     output: genoio_core::DenseGenotypeMatrixArrowVariants,
     return_samples: bool,
     return_variants: bool,
-    include_haplotype_sample_columns: bool,
+    _include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
     let genoio_core::DenseGenotypeMatrixArrowVariants {
         n_samples,
@@ -988,10 +985,10 @@ fn dense_matrix_to_py(
     dict.set_item("shape", (n_samples, n_variants))?;
     dict.set_item("values_layout", dense_layout_to_py(layout))?;
     if return_samples {
-        dict.set_item(
-            "samples",
-            sample_records_to_arrow_frame(py, samples, include_haplotype_sample_columns)?,
-        )?;
+        let samples = samples.ok_or_else(|| {
+            RustInternalError::new_err("dense read omitted requested sample metadata")
+        })?;
+        dict.set_item("samples", sample_arrow_buffers_to_py(py, samples)?)?;
     }
     if return_variants {
         let variants = variants.ok_or_else(|| {
@@ -1031,7 +1028,7 @@ fn sparse_matrix_to_py(
     output: genoio_core::SparseGenotypeMatrixArrowVariants,
     return_samples: bool,
     return_variants: bool,
-    include_haplotype_sample_columns: bool,
+    _include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     // Core sparse buffers already use SciPy's int32 index width, so transfer
@@ -1041,10 +1038,10 @@ fn sparse_matrix_to_py(
     dict.set_item("data", f32_vec_to_numpy(py, output.data)?)?;
     dict.set_item("shape", (output.n_rows, output.n_cols))?;
     if return_samples {
-        dict.set_item(
-            "samples",
-            sample_records_to_arrow_frame(py, output.samples, include_haplotype_sample_columns)?,
-        )?;
+        let samples = output.samples.ok_or_else(|| {
+            RustInternalError::new_err("sparse read omitted requested sample metadata")
+        })?;
+        dict.set_item("samples", sample_arrow_buffers_to_py(py, samples)?)?;
     }
     if return_variants {
         let variants = output.variants.ok_or_else(|| {
@@ -1083,16 +1080,14 @@ where
     PyArray1::from_vec(py, values).into_any()
 }
 
-fn sample_records_to_arrow_frame(
+fn sample_arrow_buffers_to_py(
     py: Python<'_>,
-    samples: Vec<genoio_core::SampleRecord>,
-    include_haplotype_columns: bool,
+    samples: SampleMetadataArrowBuffers,
 ) -> PyResult<Py<ArrowMetadataFrame>> {
-    let columns = SampleMetadataColumns::from_records(samples, include_haplotype_columns);
     Py::new(
         py,
         ArrowMetadataFrame {
-            batch: sample_columns_to_arrow_batch(columns)?,
+            batch: sample_arrow_buffers_to_batch(samples)?,
         },
     )
 }
@@ -1109,7 +1104,9 @@ fn variant_arrow_buffers_to_py(
     )
 }
 
-fn sample_columns_to_arrow_batch(columns: SampleMetadataColumns) -> PyResult<RecordBatch> {
+fn sample_arrow_buffers_to_batch(samples: SampleMetadataArrowBuffers) -> PyResult<RecordBatch> {
+    // Consume Rust-owned column buffers directly into Arrow arrays. This is the
+    // phase-2 boundary: no SampleRecord rows are rebuilt on the Python side.
     let mut fields = vec![
         Field::new("fid", DataType::Utf8, true),
         Field::new("iid", DataType::Utf8, false),
@@ -1119,19 +1116,21 @@ fn sample_columns_to_arrow_batch(columns: SampleMetadataColumns) -> PyResult<Rec
         Field::new("phenotype", DataType::Utf8, true),
     ];
     let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter(columns.fids)) as ArrayRef,
-        Arc::new(StringArray::from_iter_values(columns.iids)) as ArrayRef,
-        Arc::new(StringArray::from_iter(columns.fathers)) as ArrayRef,
-        Arc::new(StringArray::from_iter(columns.mothers)) as ArrayRef,
-        Arc::new(StringArray::from_iter(columns.sexes)) as ArrayRef,
-        Arc::new(StringArray::from_iter(columns.phenotypes)) as ArrayRef,
+        Arc::new(nullable_string_array_from_buffers(samples.fids)) as ArrayRef,
+        Arc::new(string_array_from_buffers(samples.iids)) as ArrayRef,
+        Arc::new(nullable_string_array_from_buffers(samples.fathers)) as ArrayRef,
+        Arc::new(nullable_string_array_from_buffers(samples.mothers)) as ArrayRef,
+        Arc::new(nullable_string_array_from_buffers(samples.sexes)) as ArrayRef,
+        Arc::new(nullable_string_array_from_buffers(samples.phenotypes)) as ArrayRef,
     ];
 
-    if let Some(source_sample_indices) = columns.source_sample_indices {
+    if let Some(source_sample_indices) = samples.source_sample_indices {
+        // Mapping columns are present only for haplotype-expanded reads, where
+        // each public row needs to point back to its source sample and allele.
         fields.push(Field::new("source_sample_index", DataType::Int64, true));
         arrays.push(Arc::new(optional_usize_to_i64_array(source_sample_indices)?) as ArrayRef);
     }
-    if let Some(haplotype_indices) = columns.haplotype_indices {
+    if let Some(haplotype_indices) = samples.haplotype_indices {
         fields.push(Field::new("haplotype_index", DataType::Int64, true));
         arrays.push(Arc::new(optional_usize_to_i64_array(haplotype_indices)?) as ArrayRef);
     }
@@ -1166,6 +1165,16 @@ fn string_array_from_buffers(column: StringColumnBuffers) -> StringArray {
     // offsets beginning at 0. There are no nulls in the public VCF variant
     // metadata columns.
     unsafe { StringArray::new_unchecked(OffsetBuffer::new_unchecked(offsets), values, None) }
+}
+
+fn nullable_string_array_from_buffers(column: NullableStringColumnBuffers) -> StringArray {
+    let nulls = (!column.validity.iter().all(|&is_valid| is_valid))
+        .then(|| NullBuffer::new(BooleanBuffer::from(column.validity)));
+    let offsets = ScalarBuffer::from(column.offsets);
+    let values = Buffer::from_vec(column.values);
+    // SAFETY: NullableStringColumnBuffers uses the same append-only UTF-8 and
+    // offset invariants as StringColumnBuffers, with one validity bit per row.
+    unsafe { StringArray::new_unchecked(OffsetBuffer::new_unchecked(offsets), values, nulls) }
 }
 
 fn optional_usize_to_i64_array(values: Vec<Option<usize>>) -> PyResult<Int64Array> {

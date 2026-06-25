@@ -126,6 +126,8 @@ fn compressed_vcf_sparse_windowed_matches_existing_sparse_semantics() {
     assert_eq!(
         sparse
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),

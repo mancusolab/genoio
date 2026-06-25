@@ -12,8 +12,9 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
     select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrixArrowVariants, DenseLayout,
     DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataArrowOutput,
-    PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+    PartialFilterDecision, SampleMetadataArrowBuffers, SourceCapabilities,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
+    VariantWindow,
 };
 
 use crate::error::Result;
@@ -71,7 +72,7 @@ pub fn read_plink1_metadata_arrow(
     let variants = parse_bim_arrow(bim)?;
 
     Ok(MetadataArrowOutput {
-        samples,
+        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })
@@ -300,11 +301,11 @@ fn read_plink1_dense_with_variants_arrow(
     let n_variants = output_variant_count;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        context.selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &context.selection.samples,
+        return_samples,
+        false,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -400,11 +401,11 @@ fn read_plink1_dense_source_window_arrow(
     )?;
 
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -432,7 +433,7 @@ fn read_plink1_dense_matrix_only_genotype_filter_arrow(
             0,
             Vec::new(),
             DenseLayout::SampleMajor,
-            Vec::new(),
+            None,
             None,
             diagnostics,
         );
@@ -520,7 +521,7 @@ fn read_plink1_dense_matrix_only_genotype_filter_arrow(
         output_variant_count,
         values,
         DenseLayout::SampleMajor,
-        Vec::new(),
+        None,
         None,
         diagnostics,
     )
@@ -651,11 +652,11 @@ pub fn read_plink1_sparse_windowed_with_arrow_variants(
 
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     SparseGenotypeMatrixArrowVariants::new(
         n_samples,
         n_variants,
@@ -687,11 +688,11 @@ fn empty_plink1_dense_arrow(
     let all_samples = parse_fam(fam)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
     let n_samples = selection.samples.len();
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
@@ -723,11 +724,11 @@ fn empty_plink1_sparse_arrow(
     let all_samples = parse_fam(fam)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
     let n_samples = selection.samples.len();
-    let samples = if return_samples {
-        selection.samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &selection.samples,
+        return_samples,
+        false,
+    )?;
     let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;

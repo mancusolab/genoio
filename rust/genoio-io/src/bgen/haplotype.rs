@@ -9,8 +9,8 @@ use std::path::Path;
 
 use genoio_core::{
     select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleRecord, VariantFilter,
-    VariantMetadataArrowBuffers, VariantWindow,
+    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataArrowBuffers,
+    SampleRecord, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::dosage_filter::evaluate_dosage_filter;
@@ -31,7 +31,8 @@ fn empty_dense_arrow_for_samples(
 ) -> Result<DenseGenotypeMatrixArrowVariants> {
     diagnostics.retained_variants = 0;
     let n_samples = samples.len();
-    let samples = if return_samples { samples } else { Vec::new() };
+    let samples =
+        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, true)?;
     let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
@@ -182,11 +183,11 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        haplotype_samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -330,11 +331,11 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        haplotype_samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,

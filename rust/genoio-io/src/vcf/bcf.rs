@@ -16,8 +16,8 @@ use genoio_core::{
     flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele, reject_sparse_missing,
     select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
     DenseSampleSelection, GenoioError, MetadataArrowOutput, PartialFilterDecision,
-    SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantRecord, VariantStats, VariantWindow,
+    SampleMetadataArrowBuffers, SourceCapabilities, SparseGenotypeMatrixArrowVariants,
+    VariantFilter, VariantMetadataArrowBuffers, VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -86,7 +86,7 @@ pub(super) fn read_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
     };
 
     Ok(MetadataArrowOutput {
-        samples,
+        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
         variants,
         capabilities,
     })
@@ -195,7 +195,8 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
 
     let n_cols = indptr.len() - 1;
     diagnostics.retained_variants = n_cols;
-    let samples = if return_samples { samples } else { Vec::new() };
+    let samples =
+        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, false)?;
     SparseGenotypeMatrixArrowVariants::new(
         n_rows,
         n_cols,
@@ -328,11 +329,12 @@ pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
         variant_major_values.extend(decoded.values);
     }
 
-    let samples = if return_samples {
-        haplotype_sample_records(&selected_samples, &source_indices)
-    } else {
-        Vec::new()
-    };
+    let haplotype_samples = haplotype_sample_records(&selected_samples, &source_indices);
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     let n_samples = selected_samples.len() * 2;
     diagnostics.retained_variants = n_variants;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
@@ -365,11 +367,12 @@ pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
         mut diagnostics,
     } = selection;
 
-    let output_samples = if return_samples {
-        haplotype_sample_records(&selected_samples, &source_indices)
-    } else {
-        Vec::new()
-    };
+    let haplotype_samples = haplotype_sample_records(&selected_samples, &source_indices);
+    let output_samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     let n_rows = selected_samples.len() * 2;
     let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
@@ -644,7 +647,8 @@ fn read_dense_windowed_with_field_arrow_variants(
 
     let n_samples = samples.len();
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples { samples } else { Vec::new() };
+    let samples =
+        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, false)?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -1565,7 +1569,11 @@ mod tests {
         assert_eq!(dense.n_samples, 1);
         assert_eq!(dense.n_variants, 1);
         assert_eq!(dense.values, vec![1.0]);
-        assert_eq!(dense.samples[0].iid, "s2");
+        let samples = dense.samples.as_ref().expect("sample metadata");
+        assert_eq!(
+            samples.iter().next().expect("first sample").iid.as_str(),
+            "s2"
+        );
         let variant_metadata = variants(&dense.variants);
         assert_eq!(variant_id(variant_metadata, 0), "rs1");
         assert_eq!(variant_metadata.macs[0], Some(1));
@@ -1598,7 +1606,7 @@ mod tests {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
-        assert!(dense.samples.is_empty());
+        assert!(dense.samples.is_none());
         assert!(dense.variants.is_none());
         assert_eq!(dense.values, vec![0.0, 1.0]);
     }
@@ -1625,7 +1633,11 @@ mod tests {
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 2);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(dense.samples[0].iid, "s1");
+        let samples = dense.samples.as_ref().expect("sample metadata");
+        assert_eq!(
+            samples.iter().next().expect("first sample").iid.as_str(),
+            "s1"
+        );
         assert!(dense.variants.is_none());
         assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
     }
@@ -1681,7 +1693,7 @@ mod tests {
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
-        assert!(dense.samples.is_empty());
+        assert!(dense.samples.is_none());
         assert!(dense.variants.is_none());
         assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
     }
@@ -1737,7 +1749,7 @@ mod tests {
 
         assert_eq!(sparse.n_rows, 2);
         assert_eq!(sparse.n_cols, 1);
-        assert!(sparse.samples.is_empty());
+        assert!(sparse.samples.is_none());
         assert!(sparse.variants.is_none());
         assert_eq!(sparse.indptr, vec![0, 1]);
         assert_eq!(sparse.indices, vec![1]);
@@ -1766,9 +1778,13 @@ mod tests {
         assert_eq!(dense.n_variants, 2);
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(dense.samples[0].iid, "s1");
-        assert_eq!(dense.samples[0].haplotype_index, Some(0));
-        assert_eq!(dense.samples[1].haplotype_index, Some(1));
+        let samples = dense.samples.as_ref().expect("sample metadata");
+        let mut samples = samples.iter();
+        let first = samples.next().expect("first haplotype sample");
+        let second = samples.next().expect("second haplotype sample");
+        assert_eq!(first.iid.as_str(), "s1");
+        assert_eq!(first.haplotype_index, Some(0));
+        assert_eq!(second.haplotype_index, Some(1));
     }
 
     #[test]
@@ -1797,7 +1813,7 @@ mod tests {
 
         assert_eq!(dense.n_samples, 4);
         assert_eq!(dense.n_variants, 1);
-        assert!(dense.samples.is_empty());
+        assert!(dense.samples.is_none());
         assert!(dense.variants.is_none());
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
     }

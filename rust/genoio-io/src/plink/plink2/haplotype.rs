@@ -10,8 +10,8 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_value, attach_variant_stats, finish_sparse_column, reject_sparse_missing,
     DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, GenotypeFilterPlan,
-    PartialFilterDecision, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantWindow,
+    PartialFilterDecision, SampleMetadataArrowBuffers, SparseGenotypeMatrixArrowVariants,
+    VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -158,11 +158,11 @@ pub fn read_plink2_haplotypes_dense_windowed_with_arrow_variants(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        haplotype_samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -296,11 +296,11 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = if return_samples {
-        haplotype_samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     DenseGenotypeMatrixArrowVariants::new_with_layout(
         n_samples,
         n_variants,
@@ -444,11 +444,11 @@ pub fn read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
     let n_cols = output_variant_count;
     diagnostics.retained_variants = n_cols;
 
-    let samples = if return_samples {
-        haplotype_samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        return_samples,
+        true,
+    )?;
     SparseGenotypeMatrixArrowVariants::new(
         n_rows,
         n_cols,

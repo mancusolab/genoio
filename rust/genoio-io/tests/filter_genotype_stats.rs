@@ -279,7 +279,7 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
 
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
-    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.samples.is_none());
     assert!(matrix_only.variants.is_none());
     assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 0.7]);
     assert_eq!(
@@ -320,7 +320,7 @@ fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
 
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
-    assert!(matrix_only.samples.is_empty());
+    assert!(matrix_only.samples.is_none());
     assert!(matrix_only.variants.is_none());
     assert_eq!(matrix_only.values, vec![0.0, 1.0, 2.0]);
     assert_eq!(
@@ -387,6 +387,8 @@ fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
     assert_eq!(
         dense
             .samples
+            .as_ref()
+            .expect("sample metadata")
             .iter()
             .map(|sample| sample.iid.as_str())
             .collect::<Vec<_>>(),

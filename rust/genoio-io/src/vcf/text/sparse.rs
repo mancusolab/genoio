@@ -15,8 +15,8 @@ use genoio_core::{
     append_sparse_column, append_sparse_value, attach_variant_stats, finish_sparse_column,
     flip_values_to_minor_allele, flip_variant_metadata_to_minor_allele, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, RegionPredicate, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantRecord, VariantWindow,
+    PartialFilterDecision, RegionPredicate, SampleMetadataArrowBuffers,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantRecord, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -137,11 +137,11 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
 
     let n_variants = indptr.len().saturating_sub(1);
     diagnostics.retained_variants = n_variants;
-    let samples = if metadata_return.samples {
-        samples
-    } else {
-        Vec::new()
-    };
+    let samples = SampleMetadataArrowBuffers::optional_from_records(
+        &samples,
+        metadata_return.samples,
+        false,
+    )?;
     SparseGenotypeMatrixArrowVariants::new(
         n_samples,
         n_variants,
@@ -175,11 +175,12 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
         mut diagnostics,
     } = selection;
     let n_samples = samples.len() * 2;
-    let output_samples = if metadata_return.samples {
-        haplotype_sample_records(&samples, &source_indices)
-    } else {
-        Vec::new()
-    };
+    let haplotype_samples = haplotype_sample_records(&samples, &source_indices);
+    let output_samples = SampleMetadataArrowBuffers::optional_from_records(
+        &haplotype_samples,
+        metadata_return.samples,
+        true,
+    )?;
     let variant_capacity = variant_window.map_or(0, |window| window.len);
     let mut indptr = Vec::with_capacity(variant_capacity.saturating_add(1));
     indptr.push(0);

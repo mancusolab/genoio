@@ -3,7 +3,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::{GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord};
+use crate::{
+    GenoioError, SampleMetadataArrowBuffers, SampleRecord, VariantMetadataArrowBuffers,
+    VariantRecord,
+};
 
 /// Counts describing source selection and variant filtering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -160,7 +163,9 @@ pub struct DenseGenotypeMatrixArrowVariants {
     pub n_variants: usize,
     pub values: Vec<f32>,
     pub layout: DenseLayout,
-    pub samples: Vec<SampleRecord>,
+    /// Requested sample metadata in Arrow-compatible buffers; `None` means it was omitted.
+    pub samples: Option<SampleMetadataArrowBuffers>,
+    /// Requested variant metadata in Arrow-compatible buffers; `None` means it was omitted.
     pub variants: Option<VariantMetadataArrowBuffers>,
     pub diagnostics: DenseDiagnostics,
 }
@@ -172,19 +177,21 @@ impl DenseGenotypeMatrixArrowVariants {
         n_variants: usize,
         values: Vec<f32>,
         layout: DenseLayout,
-        samples: Vec<SampleRecord>,
+        samples: Option<SampleMetadataArrowBuffers>,
         variants: Option<VariantMetadataArrowBuffers>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
         validate_dense_values(n_samples, n_variants, values.len())?;
-        if !samples.is_empty() && samples.len() != n_samples {
-            return Err(GenoioError::invalid_source(
-                "<dense>",
-                format!(
-                    "sample metadata length {} does not match n_samples {n_samples}",
-                    samples.len()
-                ),
-            ));
+        if let Some(samples) = samples.as_ref() {
+            if samples.len() != n_samples {
+                return Err(GenoioError::invalid_source(
+                    "<dense>",
+                    format!(
+                        "sample metadata length {} does not match n_samples {n_samples}",
+                        samples.len()
+                    ),
+                ));
+            }
         }
         if let Some(variants) = variants.as_ref() {
             if variants.len() != n_variants {
