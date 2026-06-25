@@ -7,7 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import sparse as scipy_sparse
 
 SparseMatrixResult = scipy_sparse.csc_matrix | scipy_sparse.csr_matrix
@@ -100,7 +100,7 @@ def _frame_from_arrow_stream(payload: ArrowStreamExportable, columns: list[str])
 
 def dense_array_from_rust(
     *,
-    values: Sequence[float] | NDArray[Any],
+    values: ArrayLike,
     shape: tuple[int, int],
     dtype: np.dtype[Any],
     values_layout: str = "sample_major",
@@ -124,7 +124,10 @@ def dense_array_from_rust(
     Dense NumPy matrix with shape `shape`.
     """
     values_layout = _validate_dense_layout(values_layout)
-    values_array = np.asarray(values, dtype=dtype)
+    target_dtype = np.dtype(dtype)
+    values_array = np.asarray(values)
+    if values_array.dtype != target_dtype:
+        values_array = values_array.astype(target_dtype)
     return _reshape_dense_payload(values_array, shape, values_layout)
 
 
