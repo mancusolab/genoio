@@ -11,7 +11,7 @@ use std::path::Path;
 
 use genoio_core::{
     DenseDiagnostics, DenseMissingPolicy, DenseSampleSelection, GenoioError, SampleRecord,
-    VariantFilter, VariantRecord, VariantWindow,
+    VariantFilter, VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -21,7 +21,7 @@ use super::decode::{
     ProbabilityPayloadBuffers,
 };
 use super::header::{
-    read_bgen_samples, read_layout2_variant_identifying_data, read_layout2_variant_metadata,
+    read_bgen_samples, read_layout2_variant_identifying_data, read_layout2_variant_metadata_arrow,
     skip_layout2_variant_identifying_data, BgenHeader,
 };
 use super::index::{validate_index_record_consumed, BgenIndexRecord};
@@ -62,8 +62,10 @@ impl<'a> BgenReadSession<'a> {
         read_bgen_samples(&mut self.reader, self.bgen, sample, &self.header)
     }
 
-    pub(super) fn read_all_variant_metadata(&mut self) -> Result<Vec<VariantRecord>> {
-        read_layout2_variant_metadata(
+    pub(super) fn read_all_variant_metadata_arrow(
+        &mut self,
+    ) -> Result<VariantMetadataArrowBuffers> {
+        read_layout2_variant_metadata_arrow(
             &mut self.reader,
             self.bgen,
             self.header.variant_count,

@@ -12,8 +12,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
     select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrixArrowVariants, DenseLayout,
     DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataArrowOutput,
-    MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrixArrowVariants,
-    VariantFilter, VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+    PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -31,7 +31,7 @@ use bed::{
     read_plink1_variant_packed_sequential, seek_plink1_variant, validate_bed_payload_len,
     Plink1DecoderState,
 };
-use metadata::{parse_bim, parse_bim_source_window, parse_fam};
+use metadata::{parse_bim, parse_bim_arrow, parse_bim_source_window, parse_fam};
 
 fn can_skip_bim_for_matrix_only_genotype_filter(
     matrix_only: bool,
@@ -57,29 +57,24 @@ struct Plink1DenseContext<'a> {
     all_samples_selected: bool,
 }
 
-/// Read PLINK1 sample and variant metadata without decoding BED genotypes.
-pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
-    fs::metadata(bed).map_err(|source| GenoioError::Io {
-        path: bed.to_path_buf(),
-        source,
-    })?;
-    let samples = parse_fam(fam)?;
-    let variants = parse_bim(bim)?;
-
-    Ok(MetadataOutput {
-        samples,
-        variants,
-        capabilities: SourceCapabilities::genotype_only(),
-    })
-}
-
 /// Read PLINK1 metadata with variant metadata staged as Arrow-compatible buffers.
 pub fn read_plink1_metadata_arrow(
     bed: &Path,
     bim: &Path,
     fam: &Path,
 ) -> Result<MetadataArrowOutput> {
-    read_plink1_metadata(bed, bim, fam).and_then(MetadataArrowOutput::from_metadata)
+    fs::metadata(bed).map_err(|source| GenoioError::Io {
+        path: bed.to_path_buf(),
+        source,
+    })?;
+    let samples = parse_fam(fam)?;
+    let variants = parse_bim_arrow(bim)?;
+
+    Ok(MetadataArrowOutput {
+        samples,
+        variants,
+        capabilities: SourceCapabilities::genotype_only(),
+    })
 }
 
 #[expect(

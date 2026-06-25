@@ -83,57 +83,6 @@ pub struct SparseGenotypeMatrixArrowVariants {
 }
 
 impl SparseGenotypeMatrixArrowVariants {
-    /// Convert a legacy sparse matrix result into the columnar variant payload used by PyO3.
-    pub fn from_matrix(
-        matrix: SparseGenotypeMatrix,
-        return_variants: bool,
-    ) -> Result<Self, GenoioError> {
-        let variants = if return_variants {
-            Some(VariantMetadataArrowBuffers::from_records(&matrix.variants)?)
-        } else {
-            None
-        };
-        Self::new(
-            matrix.n_rows,
-            matrix.n_cols,
-            matrix.indptr,
-            matrix.indices,
-            matrix.data,
-            matrix.samples,
-            variants,
-            matrix.diagnostics,
-        )
-    }
-
-    /// Convert Arrow-buffered variant metadata back to the legacy row matrix shape.
-    pub fn into_matrix(self) -> Result<SparseGenotypeMatrix, GenoioError> {
-        let Self {
-            n_rows,
-            n_cols,
-            indptr,
-            indices,
-            data,
-            samples,
-            variants,
-            diagnostics,
-        } = self;
-        match variants {
-            Some(variants) => SparseGenotypeMatrix::new(
-                n_rows,
-                n_cols,
-                indptr,
-                indices,
-                data,
-                samples,
-                variants.into_records()?,
-                diagnostics,
-            ),
-            None => Err(GenoioError::internal_contract(
-                "sparse Arrow matrix cannot convert to row metadata without variant buffers",
-            )),
-        }
-    }
-
     /// Build a sparse matrix with optional sample metadata and optional Arrow variant metadata.
     #[expect(
         clippy::too_many_arguments,

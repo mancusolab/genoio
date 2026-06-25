@@ -160,37 +160,12 @@ impl StringColumnBuffers {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    fn value_at(&self, index: usize) -> Result<String, GenoioError> {
-        let start = *self.offsets.get(index).ok_or_else(|| {
-            GenoioError::internal_contract("variant metadata string offset is missing")
-        })?;
-        let end = *self.offsets.get(index + 1).ok_or_else(|| {
-            GenoioError::internal_contract("variant metadata string end offset is missing")
-        })?;
-        let start = usize::try_from(start).map_err(|_| {
-            GenoioError::internal_contract("variant metadata string offset is negative")
-        })?;
-        let end = usize::try_from(end).map_err(|_| {
-            GenoioError::internal_contract("variant metadata string offset is negative")
-        })?;
-        if start > end || end > self.values.len() {
-            return Err(GenoioError::internal_contract(
-                "variant metadata string offsets are out of bounds",
-            ));
-        }
-        String::from_utf8(self.values[start..end].to_vec()).map_err(|error| {
-            GenoioError::internal_contract(format!(
-                "variant metadata string buffer contains invalid UTF-8: {error}"
-            ))
-        })
-    }
 }
 
 /// Variant metadata with public fields staged in Arrow-compatible column buffers.
 ///
-/// Non-public fields are retained as columns so Rust APIs that still return
-/// row records can adapt from the columnar backend without reparsing variants.
+/// Non-public fields are retained as columns so format readers can attach
+/// genotype-derived statistics without leaving the columnar backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantMetadataArrowBuffers {
     pub chroms: StringColumnBuffers,
@@ -305,65 +280,6 @@ impl VariantMetadataArrowBuffers {
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }
-
-    /// Convert columnar variant metadata back to records for legacy Rust APIs.
-    pub fn into_records(self) -> Result<Vec<VariantRecord>, GenoioError> {
-        self.validate_column_lengths()?;
-        let mut records = Vec::with_capacity(self.len());
-        for index in 0..self.len() {
-            let pos = u32::try_from(self.positions[index]).map_err(|_| {
-                GenoioError::internal_contract("variant metadata position is outside the u32 range")
-            })?;
-            records.push(VariantRecord {
-                chrom: self.chroms.value_at(index)?,
-                pos,
-                id: self.ids.value_at(index)?,
-                a0: self.a0s.value_at(index)?,
-                a1: self.a1s.value_at(index)?,
-                ref_allele: self.ref_alleles[index].clone(),
-                alt_allele: self.alt_alleles[index].clone(),
-                source_a0: self.source_a0s.value_at(index)?,
-                source_a1: self.source_a1s.value_at(index)?,
-                flipped: self.flipped[index],
-                qual: self.quals[index],
-                af: self.afs[index],
-                maf: self.mafs[index],
-                mac: self.macs[index],
-                missing_rate: self.missing_rates[index],
-                n_called: self.n_called[index],
-            });
-        }
-        Ok(records)
-    }
-
-    fn validate_column_lengths(&self) -> Result<(), GenoioError> {
-        let len = self.len();
-        let named_lengths = [
-            ("chrom", self.chroms.len()),
-            ("id", self.ids.len()),
-            ("a0", self.a0s.len()),
-            ("a1", self.a1s.len()),
-            ("ref_allele", self.ref_alleles.len()),
-            ("alt_allele", self.alt_alleles.len()),
-            ("source_a0", self.source_a0s.len()),
-            ("source_a1", self.source_a1s.len()),
-            ("flipped", self.flipped.len()),
-            ("qual", self.quals.len()),
-            ("af", self.afs.len()),
-            ("maf", self.mafs.len()),
-            ("mac", self.macs.len()),
-            ("missing_rate", self.missing_rates.len()),
-            ("n_called", self.n_called.len()),
-        ];
-        for (name, column_len) in named_lengths {
-            if column_len != len {
-                return Err(GenoioError::internal_contract(format!(
-                    "variant metadata column {name} length {column_len} does not match positions length {len}"
-                )));
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Complete source metadata with public variants already staged as column buffers.
@@ -372,18 +288,6 @@ pub struct MetadataArrowOutput {
     pub samples: Vec<SampleRecord>,
     pub variants: VariantMetadataArrowBuffers,
     pub capabilities: SourceCapabilities,
-}
-
-impl MetadataArrowOutput {
-    /// Convert row-record metadata into the columnar payload used at the Python boundary.
-    pub fn from_metadata(metadata: MetadataOutput) -> Result<Self, GenoioError> {
-        let variants = VariantMetadataArrowBuffers::from_records(&metadata.variants)?;
-        Ok(Self {
-            samples: metadata.samples,
-            variants,
-            capabilities: metadata.capabilities,
-        })
-    }
 }
 
 /// Complete source metadata returned before or alongside matrix reads.
@@ -495,17 +399,5 @@ mod tests {
         assert_eq!(buffers.ids.values, b"rs1.");
         assert_eq!(buffers.a0s.values, b"AC");
         assert_eq!(buffers.a1s.values, b"GT");
-    }
-
-    #[test]
-    fn variant_metadata_arrow_buffers_round_trip_full_records() {
-        let variants = vec![variant("rs1", 10), variant("rs2", 20)];
-
-        let records = VariantMetadataArrowBuffers::from_records(&variants)
-            .unwrap()
-            .into_records()
-            .unwrap();
-
-        assert_eq!(records, variants);
     }
 }

@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use genoio_core::{GenoioError, SampleRecord, VariantRecord};
+use genoio_core::{GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord};
 
 use crate::Result;
 
@@ -286,22 +286,21 @@ fn sample_record(iid: String) -> SampleRecord {
     }
 }
 
-pub(super) fn read_layout2_variant_metadata(
+pub(super) fn read_layout2_variant_metadata_arrow(
     reader: &mut impl Read,
     path: &Path,
     variant_count: u32,
     sample_count: u32,
     compression: BgenCompression,
-) -> Result<Vec<VariantRecord>> {
-    let mut variants =
-        Vec::with_capacity(usize::try_from(variant_count).map_err(|_| {
-            GenoioError::invalid_source(path, "bgen variant count is out of range")
-        })?);
+) -> Result<VariantMetadataArrowBuffers> {
+    let mut variants = VariantMetadataArrowBuffers::with_capacity(
+        usize::try_from(variant_count)
+            .map_err(|_| GenoioError::invalid_source(path, "bgen variant count is out of range"))?,
+    );
 
     for _ in 0..variant_count {
-        let variant = read_layout2_variant_identifying_data(reader, path)?;
+        read_layout2_variant_identifying_data_arrow(reader, path, &mut variants)?;
         skip_layout2_probability_block(reader, path, sample_count, 2, compression)?;
-        variants.push(variant);
     }
 
     if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
@@ -359,6 +358,45 @@ pub(super) fn read_layout2_variant_identifying_data(
         missing_rate: None,
         n_called: None,
     })
+}
+
+fn read_layout2_variant_identifying_data_arrow(
+    reader: &mut impl Read,
+    path: &Path,
+    variants: &mut VariantMetadataArrowBuffers,
+) -> Result<()> {
+    let id = read_len_prefixed_string_u16(reader, path, "variant id")?;
+    let rsid = read_len_prefixed_string_u16(reader, path, "variant rsid")?;
+    let chrom = read_len_prefixed_string_u16(reader, path, "variant chromosome")?;
+    let pos = i64::from(read_u32_le(reader, path)?);
+    let allele_count = read_u16_le(reader, path)?;
+    if allele_count != 2 {
+        return Err(GenoioError::unsupported(
+            "unsupported bgen multiallelic variant metadata; only biallelic records are supported",
+        ));
+    }
+
+    let a0 = read_len_prefixed_string_u32(reader, path, "variant allele")?;
+    let a1 = read_len_prefixed_string_u32(reader, path, "variant allele")?;
+    let id = if rsid.is_empty() { id } else { rsid };
+
+    variants.chroms.append_value(&chrom)?;
+    variants.positions.push(pos);
+    variants.ids.append_value(&id)?;
+    variants.a0s.append_value(&a0)?;
+    variants.a1s.append_value(&a1)?;
+    variants.ref_alleles.push(Some(a0.clone()));
+    variants.alt_alleles.push(Some(a1.clone()));
+    variants.source_a0s.append_value(&a0)?;
+    variants.source_a1s.append_value(&a1)?;
+    variants.flipped.push(false);
+    variants.quals.push(None);
+    variants.afs.push(None);
+    variants.mafs.push(None);
+    variants.macs.push(None);
+    variants.missing_rates.push(None);
+    variants.n_called.push(None);
+    Ok(())
 }
 
 pub(super) fn skip_layout2_variant_identifying_data(

@@ -9,7 +9,9 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use genoio_core::{GenoioError, SampleRecord, VariantRecord, VariantWindow};
+use genoio_core::{
+    GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+};
 
 use crate::error::Result;
 use crate::plink::common::{optional_plink_value, PLINK2_MISSING_VALUES};
@@ -107,7 +109,7 @@ fn parse_psam_line(
     })
 }
 
-pub(super) fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
+pub(super) fn parse_pvar_arrow(path: &Path) -> Result<VariantMetadataArrowBuffers> {
     let mut reader = open_pvar_reader(path)?;
     let mut contents = String::new();
     reader
@@ -132,11 +134,12 @@ pub(super) fn parse_pvar(path: &Path) -> Result<Vec<VariantRecord>> {
     } else {
         infer_pvar_header(path, data_lines.first().map(|(_, line)| *line))?
     };
-    data_lines
-        .into_iter()
-        .skip(body_start)
-        .map(|(index, line)| parse_pvar_line(path, index + 1, &columns, line))
-        .collect()
+    let mut variants =
+        VariantMetadataArrowBuffers::with_capacity(data_lines.len().saturating_sub(body_start));
+    for (index, line) in data_lines.into_iter().skip(body_start) {
+        append_pvar_arrow_line(path, index + 1, &columns, line, &mut variants)?;
+    }
+    Ok(variants)
 }
 
 pub(super) fn parse_pvar_source_window(
@@ -199,6 +202,67 @@ pub(super) fn parse_pvar_source_window(
     }
 
     Ok(records)
+}
+
+fn append_pvar_arrow_line(
+    path: &Path,
+    line_number: usize,
+    columns: &PvarColumns,
+    line: &str,
+    variants: &mut VariantMetadataArrowBuffers,
+) -> Result<()> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let required = columns
+        .chrom
+        .max(columns.pos)
+        .max(columns.id)
+        .max(columns.ref_allele)
+        .max(columns.alt_allele)
+        .max(columns.qual.unwrap_or(0));
+    if fields.len() <= required {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!("pvar line {line_number} has too few fields"),
+        ));
+    }
+    let pos = fields[columns.pos].parse::<i64>().map_err(|error| {
+        GenoioError::invalid_source(
+            path,
+            format!("pvar line {line_number} has invalid position: {error}"),
+        )
+    })?;
+    let ref_allele = fields[columns.ref_allele];
+    let alt_allele = fields[columns.alt_allele];
+    let first_alt = alt_allele.split(',').next().unwrap_or("");
+    if first_alt.is_empty() {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!("pvar line {line_number} has empty ALT allele"),
+        ));
+    }
+    let qual = columns
+        .qual
+        .map(|index| parse_optional_qual(path, line_number, fields[index]))
+        .transpose()?
+        .flatten();
+
+    variants.chroms.append_value(fields[columns.chrom])?;
+    variants.positions.push(pos);
+    variants.ids.append_value(fields[columns.id])?;
+    variants.a0s.append_value(ref_allele)?;
+    variants.a1s.append_value(first_alt)?;
+    variants.ref_alleles.push(Some(ref_allele.to_string()));
+    variants.alt_alleles.push(Some(alt_allele.to_string()));
+    variants.source_a0s.append_value(ref_allele)?;
+    variants.source_a1s.append_value(first_alt)?;
+    variants.flipped.push(false);
+    variants.quals.push(qual);
+    variants.afs.push(None);
+    variants.mafs.push(None);
+    variants.macs.push(None);
+    variants.missing_rates.push(None);
+    variants.n_called.push(None);
+    Ok(())
 }
 
 pub(super) struct PvarRecordReader {

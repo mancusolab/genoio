@@ -20,6 +20,7 @@ use noodles_vcf::{
 
 mod common;
 
+use common::plink_arrow as plink_io;
 use common::unique_dir;
 use common::vcf_arrow::{variant_a0, variant_a1, variant_chrom, variant_ids};
 
@@ -288,8 +289,8 @@ F2 S3 0 0 0 2.0
 ",
     );
 
-    let metadata =
-        genoio_io::read_plink1_metadata(&bed, &bim, &fam).expect("plink1 metadata should parse");
+    let metadata = plink_io::read_plink1_metadata_arrow(&bed, &bim, &fam)
+        .expect("plink1 metadata should parse");
 
     assert_eq!(
         metadata
@@ -301,10 +302,10 @@ F2 S3 0 0 0 2.0
     );
     assert_eq!(metadata.samples[1].father.as_deref(), Some("S1"));
     assert_eq!(metadata.samples[1].mother, None);
-    assert_eq!(metadata.variants[0].a0, "A");
-    assert_eq!(metadata.variants[0].a1, "G");
-    assert_eq!(metadata.variants[0].source_a0, "A");
-    assert_eq!(metadata.variants[0].source_a1, "G");
+    assert_eq!(variant_a0(&metadata.variants, 0), "A");
+    assert_eq!(variant_a1(&metadata.variants, 0), "G");
+    assert_eq!(plink_io::string_at(&metadata.variants.source_a0s, 0), "A");
+    assert_eq!(plink_io::string_at(&metadata.variants.source_a1s, 0), "G");
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
     assert!(!metadata.capabilities.phased);
@@ -320,9 +321,9 @@ fn plink1_metadata_rejects_malformed_fam_and_bim_lines() {
 
     write_file(&bim, "1 rs1 0 10 G A\n");
     write_file(&fam, "F1 S1 0 0 1\n");
-    assert!(genoio_io::read_plink1_metadata(&bed, &bim, &fam).is_err());
+    assert!(plink_io::read_plink1_metadata_arrow(&bed, &bim, &fam).is_err());
 
     write_file(&bim, "1 rs1 0 10 G\n");
     write_file(&fam, "F1 S1 0 0 1 -9\n");
-    assert!(genoio_io::read_plink1_metadata(&bed, &bim, &fam).is_err());
+    assert!(plink_io::read_plink1_metadata_arrow(&bed, &bim, &fam).is_err());
 }

@@ -166,61 +166,6 @@ pub struct DenseGenotypeMatrixArrowVariants {
 }
 
 impl DenseGenotypeMatrixArrowVariants {
-    /// Convert a legacy dense matrix result into the columnar variant payload used by PyO3.
-    pub fn from_matrix(
-        matrix: DenseGenotypeMatrix,
-        return_variants: bool,
-    ) -> Result<Self, GenoioError> {
-        let variants = if return_variants {
-            Some(VariantMetadataArrowBuffers::from_records(&matrix.variants)?)
-        } else {
-            None
-        };
-        Self::new_with_layout(
-            matrix.n_samples,
-            matrix.n_variants,
-            matrix.values,
-            matrix.layout,
-            matrix.samples,
-            variants,
-            matrix.diagnostics,
-        )
-    }
-
-    /// Convert Arrow-buffered variant metadata back to the legacy row matrix shape.
-    pub fn into_matrix(self) -> Result<DenseGenotypeMatrix, GenoioError> {
-        let Self {
-            n_samples,
-            n_variants,
-            values,
-            layout,
-            samples,
-            variants,
-            diagnostics,
-        } = self;
-        match variants {
-            Some(variants) => DenseGenotypeMatrix::new_with_layout(
-                n_samples,
-                n_variants,
-                values,
-                layout,
-                samples,
-                variants.into_records()?,
-                diagnostics,
-            ),
-            None if samples.is_empty() => DenseGenotypeMatrix::new_matrix_only_with_layout(
-                n_samples,
-                n_variants,
-                values,
-                layout,
-                diagnostics,
-            ),
-            None => Err(GenoioError::internal_contract(
-                "dense Arrow matrix cannot convert to row metadata without variant buffers",
-            )),
-        }
-    }
-
     /// Build a dense matrix with optional sample metadata and optional Arrow variant metadata.
     pub fn new_with_layout(
         n_samples: usize,

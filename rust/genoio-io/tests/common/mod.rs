@@ -5,12 +5,14 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
+pub(crate) mod arrow;
+pub(crate) mod bgen_arrow;
 #[allow(
     dead_code,
     reason = "shared integration-test helpers are compiled per test target"
 )]
 pub(crate) mod dense;
-pub(crate) mod legacy;
+pub(crate) mod plink_arrow;
 pub(crate) mod vcf_arrow;
 
 pub struct TestDir {

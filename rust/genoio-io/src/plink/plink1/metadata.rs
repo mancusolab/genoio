@@ -8,7 +8,9 @@
 use std::fs;
 use std::path::Path;
 
-use genoio_core::{GenoioError, SampleRecord, VariantRecord, VariantWindow};
+use genoio_core::{
+    GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+};
 
 use crate::error::Result;
 
@@ -61,6 +63,25 @@ pub(super) fn parse_bim(path: &Path) -> Result<Vec<VariantRecord>> {
         .collect()
 }
 
+pub(super) fn parse_bim_arrow(path: &Path) -> Result<VariantMetadataArrowBuffers> {
+    let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let row_capacity = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let mut variants = VariantMetadataArrowBuffers::with_capacity(row_capacity);
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        append_bim_arrow_line(path, index + 1, line, &mut variants)?;
+    }
+    Ok(variants)
+}
+
 pub(super) fn parse_bim_source_window(
     path: &Path,
     window: VariantWindow,
@@ -95,6 +116,28 @@ pub(super) fn parse_bim_source_window(
         ));
     }
     Ok(records)
+}
+
+fn append_bim_arrow_line(
+    path: &Path,
+    line_number: usize,
+    line: &str,
+    variants: &mut VariantMetadataArrowBuffers,
+) -> Result<()> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 6 {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!("bim line {line_number} has fewer than six fields"),
+        ));
+    }
+    let pos = fields[3].parse::<i64>().map_err(|error| {
+        GenoioError::invalid_source(
+            path,
+            format!("bim line {line_number} has invalid position: {error}"),
+        )
+    })?;
+    variants.push(fields[0], pos, fields[1], fields[5], fields[4])
 }
 
 fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<VariantRecord> {

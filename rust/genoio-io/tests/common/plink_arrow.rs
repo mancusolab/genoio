@@ -4,13 +4,15 @@
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, SparseGenotypeMatrix, VariantFilter, VariantWindow,
+    DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, SparseGenotypeMatrixArrowVariants,
+    VariantFilter, VariantWindow,
 };
 
-pub(crate) use ::genoio_io::{
-    read_bgen_metadata, read_bgen_metadata_arrow, read_plink1_metadata, read_plink1_metadata_arrow,
-    read_plink2_metadata, read_plink2_metadata_arrow, Result,
+pub(crate) use super::arrow::{
+    dense_missing_sample_major_arrow, dense_values_sample_major_arrow, sparse_values_dense_arrow,
+    string_at, strings, variant_alt_allele, variant_id, variant_ids, variant_ref_allele, variants,
 };
+pub(crate) use ::genoio_io::{read_plink1_metadata_arrow, read_plink2_metadata_arrow, Result};
 
 pub(crate) fn read_plink1_dense(
     bed: &Path,
@@ -18,7 +20,7 @@ pub(crate) fn read_plink1_dense(
     fam: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     read_plink1_dense_windowed(
         bed,
         bim,
@@ -38,7 +40,7 @@ pub(crate) fn read_plink1_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink1_dense_windowed_with_arrow_variants(
         bed,
         bim,
@@ -49,8 +51,7 @@ pub(crate) fn read_plink1_dense_windowed(
         DenseMissingPolicy::Nan,
         !matrix_only,
         !matrix_only,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink1_sparse(
@@ -59,7 +60,7 @@ pub(crate) fn read_plink1_sparse(
     fam: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
+) -> Result<SparseGenotypeMatrixArrowVariants> {
     read_plink1_sparse_windowed(bed, bim, fam, requested_samples, variant_filter, None)
 }
 
@@ -70,7 +71,7 @@ pub(crate) fn read_plink1_sparse_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
+) -> Result<SparseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink1_sparse_windowed_with_arrow_variants(
         bed,
         bim,
@@ -80,8 +81,7 @@ pub(crate) fn read_plink1_sparse_windowed(
         variant_window,
         true,
         true,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink2_dense(
@@ -90,7 +90,7 @@ pub(crate) fn read_plink2_dense(
     psam: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     read_plink2_dense_windowed(
         pgen,
         pvar,
@@ -110,7 +110,7 @@ pub(crate) fn read_plink2_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink2_dense_windowed_with_arrow_variants(
         pgen,
         pvar,
@@ -121,8 +121,7 @@ pub(crate) fn read_plink2_dense_windowed(
         DenseMissingPolicy::Nan,
         !matrix_only,
         !matrix_only,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink2_dosage_dense_windowed(
@@ -133,7 +132,7 @@ pub(crate) fn read_plink2_dosage_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink2_dosage_dense_windowed_with_arrow_variants(
         pgen,
         pvar,
@@ -144,8 +143,7 @@ pub(crate) fn read_plink2_dosage_dense_windowed(
         DenseMissingPolicy::Nan,
         !matrix_only,
         !matrix_only,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink2_sparse(
@@ -154,7 +152,7 @@ pub(crate) fn read_plink2_sparse(
     psam: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
+) -> Result<SparseGenotypeMatrixArrowVariants> {
     read_plink2_sparse_windowed(pgen, pvar, psam, requested_samples, variant_filter, None)
 }
 
@@ -165,7 +163,7 @@ pub(crate) fn read_plink2_sparse_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
+) -> Result<SparseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink2_sparse_windowed_with_arrow_variants(
         pgen,
         pvar,
@@ -175,8 +173,7 @@ pub(crate) fn read_plink2_sparse_windowed(
         variant_window,
         true,
         true,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink2_haplotypes_dense_windowed(
@@ -187,7 +184,7 @@ pub(crate) fn read_plink2_haplotypes_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink2_haplotypes_dense_windowed_with_arrow_variants(
         pgen,
         pvar,
@@ -198,8 +195,7 @@ pub(crate) fn read_plink2_haplotypes_dense_windowed(
         DenseMissingPolicy::Nan,
         !matrix_only,
         !matrix_only,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink2_haplotypes_dosage_dense_windowed(
@@ -210,7 +206,7 @@ pub(crate) fn read_plink2_haplotypes_dosage_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
+) -> Result<DenseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
         pgen,
         pvar,
@@ -221,8 +217,7 @@ pub(crate) fn read_plink2_haplotypes_dosage_dense_windowed(
         DenseMissingPolicy::Nan,
         !matrix_only,
         !matrix_only,
-    )?
-    .into_matrix()
+    )
 }
 
 pub(crate) fn read_plink2_haplotypes_sparse_windowed(
@@ -232,7 +227,7 @@ pub(crate) fn read_plink2_haplotypes_sparse_windowed(
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
+) -> Result<SparseGenotypeMatrixArrowVariants> {
     ::genoio_io::read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
         pgen,
         pvar,
@@ -242,48 +237,5 @@ pub(crate) fn read_plink2_haplotypes_sparse_windowed(
         variant_window,
         true,
         true,
-    )?
-    .into_matrix()
-}
-
-pub(crate) fn read_bgen_dosage_dense_windowed(
-    bgen: &Path,
-    sample: Option<&Path>,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    ::genoio_io::read_bgen_dosage_dense_windowed_with_arrow_variants(
-        bgen,
-        sample,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        !matrix_only,
-        !matrix_only,
-    )?
-    .into_matrix()
-}
-
-pub(crate) fn read_bgen_haplotypes_dosage_dense_windowed(
-    bgen: &Path,
-    sample: Option<&Path>,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    ::genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
-        bgen,
-        sample,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        !matrix_only,
-        !matrix_only,
-    )?
-    .into_matrix()
+    )
 }

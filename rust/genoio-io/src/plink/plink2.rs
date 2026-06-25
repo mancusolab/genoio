@@ -7,9 +7,7 @@
 
 use std::path::Path;
 
-use genoio_core::{
-    GenoioError, MetadataArrowOutput, MetadataOutput, SourceCapabilities, VariantFilter,
-};
+use genoio_core::{GenoioError, MetadataArrowOutput, SourceCapabilities, VariantFilter};
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
@@ -41,7 +39,7 @@ pub use haplotype::{
 #[doc(inline)]
 pub use sparse::read_plink2_sparse_windowed_with_arrow_variants;
 
-use metadata::{parse_psam, parse_pvar};
+use metadata::{parse_psam, parse_pvar_arrow};
 use pgen::{read_supported_pgen_header, validate_plink2_dimensions};
 
 #[cfg(test)]
@@ -55,27 +53,22 @@ pub(super) fn require_genotype_decision_filter(
     })
 }
 
-/// Read PLINK2 sample and variant metadata without returning genotypes.
-pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<MetadataOutput> {
-    let header = read_supported_pgen_header(pgen)?;
-    let samples = parse_psam(psam)?;
-    let variants = parse_pvar(pvar)?;
-    validate_plink2_dimensions(pgen, &header, samples.len(), variants.len())?;
-
-    Ok(MetadataOutput {
-        samples,
-        variants,
-        capabilities: SourceCapabilities::genotype_only(),
-    })
-}
-
 /// Read PLINK2 metadata with variant metadata staged as Arrow-compatible buffers.
 pub fn read_plink2_metadata_arrow(
     pgen: &Path,
     pvar: &Path,
     psam: &Path,
 ) -> Result<MetadataArrowOutput> {
-    read_plink2_metadata(pgen, pvar, psam).and_then(MetadataArrowOutput::from_metadata)
+    let header = read_supported_pgen_header(pgen)?;
+    let samples = parse_psam(psam)?;
+    let variants = parse_pvar_arrow(pvar)?;
+    validate_plink2_dimensions(pgen, &header, samples.len(), variants.len())?;
+
+    Ok(MetadataArrowOutput {
+        samples,
+        variants,
+        capabilities: SourceCapabilities::genotype_only(),
+    })
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::legacy as legacy_io;
+use common::plink_arrow as plink_io;
 use common::unique_dir;
 use common::vcf_arrow as genoio_io;
 use common::vcf_arrow::{
@@ -38,17 +38,6 @@ fn write_vcf(path: &Path, body: &str) {
 {body}"
         ),
     );
-}
-
-fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
-    let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
-    for col in 0..sparse.n_cols {
-        for offset in sparse.indptr[col]..sparse.indptr[col + 1] {
-            let row = sparse.indices[offset];
-            dense[row * sparse.n_cols + col] = sparse.data[offset];
-        }
-    }
-    dense
 }
 
 fn write_plink_fixture(dir: &Path, bed_bytes: &[u8]) -> (PathBuf, PathBuf, PathBuf) {
@@ -151,12 +140,15 @@ fn plink1_sparse_reconstructs_dense_when_no_missing_calls() {
     let dir = unique_dir("plink1-sparse-parity");
     let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c]);
 
-    let dense = legacy_io::read_plink1_dense(&bed, &bim, &fam, None, None)
+    let dense = plink_io::read_plink1_dense(&bed, &bim, &fam, None, None)
         .expect("dense plink should decode");
-    let sparse = legacy_io::read_plink1_sparse(&bed, &bim, &fam, None, None)
+    let sparse = plink_io::read_plink1_sparse(&bed, &bim, &fam, None, None)
         .expect("sparse plink should decode");
 
-    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(
+        sparse_values_dense_arrow(&sparse),
+        dense_values_sample_major_arrow(&dense)
+    );
 }
 
 #[test]

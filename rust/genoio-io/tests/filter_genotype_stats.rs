@@ -7,8 +7,12 @@ const PGEN_DOSAGE_TOLERANCE: f32 = 2.0 / 32768.0;
 
 mod common;
 
-use common::dense::{assert_values_with_nan, dense_missing_sample_major};
-use common::legacy as legacy_io;
+use common::dense::assert_values_with_nan;
+use common::plink_arrow as plink_io;
+use common::plink_arrow::{
+    dense_missing_sample_major_arrow as dense_missing_sample_major_plink,
+    variant_ids as plink_variant_ids, variants as plink_variants,
+};
 use common::unique_dir;
 use common::vcf_arrow as genoio_io;
 use common::vcf_arrow::{
@@ -205,7 +209,7 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
     }))
     .expect("filter should parse");
 
-    let dense = legacy_io::read_plink2_dosage_dense_windowed(
+    let dense = plink_io::read_plink2_dosage_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -217,19 +221,21 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
     .expect("plink2 dosage should filter");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    let plink_variants = plink_variants(&dense.variants);
+    assert_eq!(variant_id(plink_variants, 0), "rs2");
     assert_values_with_nan(&dense.values[..2], &[0.0, f32::NAN]);
     assert_pgen_dosage_close(dense.values[2], 0.7);
-    assert_eq!(dense_missing_sample_major(&dense), vec![false, true, false]);
-    assert!(dense.variants[0]
-        .af
-        .is_some_and(|af| (af - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE));
-    assert!(dense.variants[0]
-        .maf
-        .is_some_and(|maf| (maf - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE));
-    assert_eq!(dense.variants[0].mac, None);
-    assert_eq!(dense.variants[0].missing_rate, Some(1.0 / 3.0));
-    assert_eq!(dense.variants[0].n_called, Some(2));
+    assert_eq!(
+        dense_missing_sample_major_plink(&dense),
+        vec![false, true, false]
+    );
+    assert!(plink_variants.afs[0].is_some_and(|af| { (af - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE }));
+    assert!(
+        plink_variants.mafs[0].is_some_and(|maf| { (maf - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE })
+    );
+    assert_eq!(plink_variants.macs[0], None);
+    assert_eq!(plink_variants.missing_rates[0], Some(1.0 / 3.0));
+    assert_eq!(plink_variants.n_called[0], Some(2));
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -334,37 +340,30 @@ fn filter_genotype_stats_plink2_match_expanded_stats_and_attach_metadata() {
     }))
     .expect("filter should parse");
 
-    let dense = legacy_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
+    let dense = plink_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
         .expect("plink2 should filter");
 
     assert_eq!(dense.n_variants, 3);
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2", "rs3"]
-    );
+    let plink_variants = plink_variants(&dense.variants);
+    assert_eq!(plink_variant_ids(plink_variants), vec!["rs1", "rs2", "rs3"]);
     assert_values_with_nan(
         &dense.values,
         &[0.0, 1.0, 2.0, f32::NAN, 0.0, 1.0, 2.0, 1.0, 0.0],
     );
-    assert_eq!(dense.variants[0].af, Some(0.5));
-    assert_eq!(dense.variants[0].maf, Some(0.5));
-    assert_eq!(dense.variants[0].mac, Some(2));
-    assert_eq!(dense.variants[0].missing_rate, Some(1.0 / 3.0));
-    assert_eq!(dense.variants[0].n_called, Some(2));
-    assert_eq!(dense.variants[1].af, Some(1.0 / 3.0));
-    assert_eq!(dense.variants[1].maf, Some(1.0 / 3.0));
-    assert_eq!(dense.variants[1].mac, Some(2));
-    assert_eq!(dense.variants[1].missing_rate, Some(0.0));
-    assert_eq!(dense.variants[1].n_called, Some(3));
-    assert_eq!(dense.variants[2].af, Some(0.5));
-    assert_eq!(dense.variants[2].maf, Some(0.5));
-    assert_eq!(dense.variants[2].mac, Some(3));
-    assert_eq!(dense.variants[2].missing_rate, Some(0.0));
-    assert_eq!(dense.variants[2].n_called, Some(3));
+    assert_eq!(
+        plink_variants.afs,
+        vec![Some(0.5), Some(1.0 / 3.0), Some(0.5)]
+    );
+    assert_eq!(
+        plink_variants.mafs,
+        vec![Some(0.5), Some(1.0 / 3.0), Some(0.5)]
+    );
+    assert_eq!(plink_variants.macs, vec![Some(2), Some(2), Some(3)]);
+    assert_eq!(
+        plink_variants.missing_rates,
+        vec![Some(1.0 / 3.0), Some(0.0), Some(0.0)]
+    );
+    assert_eq!(plink_variants.n_called, vec![Some(2), Some(3), Some(3)]);
     assert_eq!(dense.diagnostics.candidate_variants, 4);
     assert_eq!(dense.diagnostics.retained_variants, 3);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -382,7 +381,7 @@ fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
     }))
     .expect("filter should parse");
 
-    let dense = legacy_io::read_plink2_dense(&pgen, &pvar, &psam, Some(&keep), Some(&filter))
+    let dense = plink_io::read_plink2_dense(&pgen, &pvar, &psam, Some(&keep), Some(&filter))
         .expect("variable-width plink2 should filter");
 
     assert_eq!(
@@ -394,29 +393,18 @@ fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
         vec!["S2", "S4"]
     );
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    let plink_variants = plink_variants(&dense.variants);
+    assert_eq!(plink_variant_ids(plink_variants), vec!["rs1", "rs2"]);
     assert_values_with_nan(&dense.values, &[1.0, 1.0, f32::NAN, 2.0]);
     assert_eq!(
-        dense_missing_sample_major(&dense),
+        dense_missing_sample_major_plink(&dense),
         vec![false, false, true, false]
     );
-    assert_eq!(dense.variants[0].af, Some(0.5));
-    assert_eq!(dense.variants[0].maf, Some(0.5));
-    assert_eq!(dense.variants[0].mac, Some(1));
-    assert_eq!(dense.variants[0].missing_rate, Some(0.5));
-    assert_eq!(dense.variants[0].n_called, Some(1));
-    assert_eq!(dense.variants[1].af, Some(0.75));
-    assert_eq!(dense.variants[1].maf, Some(0.25));
-    assert_eq!(dense.variants[1].mac, Some(1));
-    assert_eq!(dense.variants[1].missing_rate, Some(0.0));
-    assert_eq!(dense.variants[1].n_called, Some(2));
+    assert_eq!(plink_variants.afs, vec![Some(0.5), Some(0.75)]);
+    assert_eq!(plink_variants.mafs, vec![Some(0.5), Some(0.25)]);
+    assert_eq!(plink_variants.macs, vec![Some(1), Some(1)]);
+    assert_eq!(plink_variants.missing_rates, vec![Some(0.5), Some(0.0)]);
+    assert_eq!(plink_variants.n_called, vec![Some(1), Some(2)]);
     assert_eq!(dense.diagnostics.candidate_variants, 5);
     assert_eq!(dense.diagnostics.retained_variants, 2);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 3);
@@ -433,22 +421,14 @@ fn filter_genotype_stats_plink2_sparse_keeps_dense_filter_semantics() {
     }))
     .expect("filter should parse");
 
-    let dense = legacy_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
+    let dense = plink_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
         .expect("dense plink2 should filter");
-    let sparse = legacy_io::read_plink2_sparse(&pgen, &pvar, &psam, None, Some(&filter))
+    let sparse = plink_io::read_plink2_sparse(&pgen, &pvar, &psam, None, Some(&filter))
         .expect("sparse plink2 should filter");
 
     assert_eq!(
-        sparse
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>()
+        plink_variant_ids(plink_variants(&sparse.variants)),
+        plink_variant_ids(plink_variants(&dense.variants))
     );
     assert_eq!(sparse.diagnostics.candidate_variants, 4);
     assert_eq!(sparse.diagnostics.retained_variants, 2);

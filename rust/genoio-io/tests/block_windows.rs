@@ -8,7 +8,7 @@ use genoio_core::{DenseLayout, VariantWindow};
 mod common;
 
 use common::dense::assert_values_with_nan;
-use common::legacy as legacy_io;
+use common::plink_arrow as plink_io;
 use common::unique_dir;
 use common::vcf_arrow as genoio_io;
 use common::vcf_arrow::{variant_ids, variants};
@@ -273,7 +273,7 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink1_dense_windowed(
+    let block = plink_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -284,14 +284,7 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
     )
     .expect("windowed plink should decode");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs2", "rs4"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs2", "rs4"]);
     assert_values_with_nan(&block.values, &[f32::NAN, 2.0, 0.0, 2.0]);
 }
 
@@ -300,7 +293,7 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
     let dir = unique_dir("plink1-source-window-stop");
     let (bed, bim, fam) = write_plink_source_window_stop_fixture(&dir);
 
-    let block = legacy_io::read_plink1_dense_windowed(
+    let block = plink_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -311,14 +304,7 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
     )
     .expect("unfiltered plink1 source window should stop before later malformed metadata");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs1"]);
     assert_values_with_nan(&block.values, &[2.0, f32::NAN]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
@@ -334,7 +320,7 @@ malformed
 ",
     );
 
-    let block = legacy_io::read_plink1_dense_windowed(
+    let block = plink_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -346,7 +332,7 @@ malformed
     .expect("matrix-only plink1 source window should not parse bim rows");
 
     assert_eq!(block.n_variants, 1);
-    assert!(block.variants.is_empty());
+    assert!(block.variants.is_none());
     assert_values_with_nan(&block.values, &[2.0, f32::NAN]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
@@ -362,7 +348,7 @@ fn plink1_dense_impossible_filter_returns_empty_without_parsing_bim_variants() {
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink1_dense_windowed(
+    let block = plink_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -394,7 +380,7 @@ malformed
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink1_dense_windowed(
+    let block = plink_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -406,7 +392,7 @@ malformed
     .expect("matrix-only genotype filter should not parse bim rows");
 
     assert_eq!(block.n_variants, 1);
-    assert!(block.variants.is_empty());
+    assert!(block.variants.is_none());
     assert_eq!(block.values, vec![0.0, 2.0]);
     assert_eq!(block.diagnostics.candidate_variants, 3);
 }
@@ -422,7 +408,7 @@ fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink2_dense_windowed(
+    let block = plink_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -433,14 +419,7 @@ fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
     )
     .expect("windowed filtered plink2 should stop before later malformed metadata");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs1"]);
     assert_eq!(block.values, vec![1.0, 0.0, 1.0]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
@@ -463,7 +442,7 @@ malformed
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink2_dense_windowed(
+    let block = plink_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -475,7 +454,7 @@ malformed
     .expect("matrix-only genotype filter should not parse pvar rows");
 
     assert_eq!(block.n_variants, 1);
-    assert!(block.variants.is_empty());
+    assert!(block.variants.is_none());
     assert_eq!(block.values, vec![1.0, 0.0, 1.0]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
@@ -513,7 +492,7 @@ S3
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink2_dense_windowed(
+    let block = plink_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -559,7 +538,7 @@ S3
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink2_dense_windowed(
+    let block = plink_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -586,7 +565,7 @@ fn plink2_sparse_filtered_window_stops_after_requested_retained_variants() {
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink2_sparse_windowed(
+    let block = plink_io::read_plink2_sparse_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -596,14 +575,7 @@ fn plink2_sparse_filtered_window_stops_after_requested_retained_variants() {
     )
     .expect("windowed sparse filtered plink2 should stop before later malformed metadata");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs1"]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 
@@ -618,7 +590,7 @@ fn plink2_dense_impossible_filter_returns_empty_without_parsing_pvar_variants() 
     }))
     .expect("filter should parse");
 
-    let block = legacy_io::read_plink2_dense_windowed(
+    let block = plink_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,

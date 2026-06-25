@@ -3,14 +3,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use genoio_core::VariantWindow;
+use genoio_core::{SparseGenotypeMatrixArrowVariants, VariantWindow};
 
 mod common;
 
-use common::dense::{
-    assert_values_with_nan, dense_missing_sample_major, dense_values_sample_major,
+use common::dense::assert_values_with_nan;
+use common::plink_arrow as genoio_io;
+use common::plink_arrow::{
+    dense_missing_sample_major_arrow as dense_missing_sample_major,
+    dense_values_sample_major_arrow as dense_values_sample_major, variant_alt_allele, variant_id,
+    variant_ids, variant_ref_allele, variants,
 };
-use common::legacy as genoio_io;
 use common::{unique_dir, TestDir};
 
 fn write_text(path: &Path, contents: &str) {
@@ -181,7 +184,7 @@ fn expected_pgen_haplotype_dosages(left: f32, right: f32) -> (f32, f32) {
     ((total + delta) * 0.5, (total - delta) * 0.5)
 }
 
-fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
+fn csc_to_dense(sparse: &SparseGenotypeMatrixArrowVariants) -> Vec<f32> {
     let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
     for col in 0..sparse.n_cols {
         for offset in sparse.indptr[col]..sparse.indptr[col + 1] {
@@ -295,9 +298,10 @@ fn plink2_dense_decodes_fixed_width_unphased_biallelic_hardcalls() {
             .collect::<Vec<_>>(),
         vec!["S1", "S2", "S3"]
     );
-    assert_eq!(dense.variants[0].ref_allele.as_deref(), Some("A"));
-    assert_eq!(dense.variants[0].alt_allele.as_deref(), Some("G"));
-    assert_eq!(dense.variants[0].qual, Some(30.0));
+    let variant_metadata = variants(&dense.variants);
+    assert_eq!(variant_ref_allele(variant_metadata, 0), Some("A"));
+    assert_eq!(variant_alt_allele(variant_metadata, 0), Some("G"));
+    assert_eq!(variant_metadata.quals[0], Some(30.0));
 }
 
 #[test]
@@ -613,7 +617,7 @@ fn plink2_haplotype_dense_ld_compressed_window_matches_full_read_slice() {
     .expect("window beginning at LD-compressed phased hardcall should decode");
 
     assert_eq!(block.n_variants, 1);
-    assert_eq!(block.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&block.variants), 0), "rs2");
     let full_values = dense_values_sample_major(&full);
     let full_missing = dense_missing_sample_major(&full);
     assert_values_with_nan(
@@ -678,14 +682,7 @@ fn plink2_haplotype_sparse_reconstructs_dense_hardcalls() {
             .map(|sample| (sample.iid.as_str(), sample.haplotype_index))
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        sparse
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -746,8 +743,8 @@ fn plink2_haplotype_sparse_ld_compressed_window_matches_dense_slice() {
     )
     .expect("sparse LD-compressed explicit phased hardcall pgen should decode");
 
-    assert_eq!(sparse.variants[0].id, "rs2");
-    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(variant_id(variants(&sparse.variants), 0), "rs2");
+    assert_eq!(csc_to_dense(&sparse), dense_values_sample_major(&dense));
 }
 
 #[test]
@@ -1018,15 +1015,14 @@ fn plink2_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() 
 
     assert_eq!(dense.n_samples, 6);
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    let variant_metadata = variants(&dense.variants);
+    assert_eq!(variant_id(variant_metadata, 0), "rs2");
     assert_eq!(
         dense.values,
         vec![v2_s1_l, v2_s1_r, v2_s2_l, v2_s2_r, v2_s3_l, v2_s3_r]
     );
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
-    assert!(dense.variants[0]
-        .af
-        .is_some_and(|af| (af - 0.1).abs() <= 2.0 / 32768.0));
+    assert!(variant_metadata.afs[0].is_some_and(|af| (af - 0.1).abs() <= 2.0 / 32768.0));
 }
 
 #[test]
@@ -1059,7 +1055,7 @@ fn plink2_haplotype_dosage_ld_compressed_window_matches_full_read_slice() {
     .expect("window beginning at LD-compressed phased dosage should decode");
 
     assert_eq!(block.n_variants, 1);
-    assert_eq!(block.variants[0].id, "rs2");
+    assert_eq!(variant_id(variants(&block.variants), 0), "rs2");
     let full_values = dense_values_sample_major(&full);
     let full_missing = dense_missing_sample_major(&full);
     assert_eq!(
@@ -1172,7 +1168,7 @@ S3
     .expect("metadata-bearing window should not parse later pvar records");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs1");
     assert_values_with_nan(&dense.values, &[0.0, f32::NAN, 2.0]);
 
     let matrix_only = genoio_io::read_plink2_dense_windowed(
@@ -1186,7 +1182,7 @@ S3
     )
     .expect("matrix-only first window may skip later pvar records");
     assert_eq!(matrix_only.n_variants, 1);
-    assert!(matrix_only.variants.is_empty());
+    assert!(matrix_only.variants.is_none());
     assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 2.0]);
 }
 
@@ -1220,13 +1216,13 @@ S3
         genoio_io::read_plink2_dense_windowed(&pgen, &pvar, &psam, None, None, Some(window), false)
             .expect("metadata dense window should not require later pvar records");
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs1");
 
     let sparse =
         genoio_io::read_plink2_sparse_windowed(&pgen, &pvar, &psam, None, None, Some(window))
             .expect("metadata sparse window should not require later pvar records");
     assert_eq!(sparse.n_cols, 1);
-    assert_eq!(sparse.variants[0].id, "rs1");
+    assert_eq!(variant_id(variants(&sparse.variants), 0), "rs1");
 }
 
 #[test]
@@ -1248,14 +1244,7 @@ fn plink2_dense_window_aligns_variant_metadata_with_source_window() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs2", "rs3"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs2", "rs3"]);
     assert_eq!(dense.values, vec![1.0, 2.0, 0.0, 1.0, 1.0, 0.0]);
     assert_eq!(
         dense_missing_sample_major(&dense),
@@ -1302,7 +1291,7 @@ S4
     .expect("first window should not validate later pgen records");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs1");
+    assert_eq!(variant_id(variants(&dense.variants), 0), "rs1");
     assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
 }
 
@@ -1338,7 +1327,7 @@ fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.samples.is_empty());
-    assert!(matrix_only.variants.is_empty());
+    assert!(matrix_only.variants.is_none());
     assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 2.0]);
 
     write_text(
@@ -1376,7 +1365,7 @@ fn plink2_dense_matrix_only_window_skips_malformed_metadata() {
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.samples.is_empty());
-    assert!(matrix_only.variants.is_empty());
+    assert!(matrix_only.variants.is_none());
     assert_eq!(matrix_only.values, vec![1.0, 0.0, 1.0]);
 }
 
@@ -1479,7 +1468,7 @@ S4
         dense_missing_sample_major(&metadata_bearing)
     );
     assert!(matrix_only.samples.is_empty());
-    assert!(matrix_only.variants.is_empty());
+    assert!(matrix_only.variants.is_none());
 }
 
 #[test]
@@ -1626,20 +1615,9 @@ S3
     );
     assert_values_with_nan(&matrix_only.values, &expected_values);
     assert_eq!(dense_missing_sample_major(&matrix_only), expected_missing);
-    assert_eq!(
-        metadata_bearing
-            .variants
-            .first()
-            .map(|variant| variant.id.as_str()),
-        Some("rs2")
-    );
-    assert_eq!(
-        metadata_bearing
-            .variants
-            .last()
-            .map(|variant| variant.id.as_str()),
-        Some("rs67")
-    );
+    let variant_ids = variant_ids(variants(&metadata_bearing.variants));
+    assert_eq!(variant_ids.first().copied(), Some("rs2"));
+    assert_eq!(variant_ids.last().copied(), Some("rs67"));
 }
 
 #[test]
@@ -1972,7 +1950,7 @@ fn plink2_metadata_reads_psam_and_pvar() {
     let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
 
     let metadata =
-        genoio_io::read_plink2_metadata(&pgen, &pvar, &psam).expect("metadata should decode");
+        genoio_io::read_plink2_metadata_arrow(&pgen, &pvar, &psam).expect("metadata should decode");
 
     assert_eq!(metadata.samples.len(), 3);
     assert_eq!(metadata.variants.len(), 3);
@@ -1992,9 +1970,9 @@ fn plink2_metadata_reads_zstd_compressed_pvar() {
     fs::write(&pvar_zst, compressed).expect("compressed pvar fixture should be written");
     fs::remove_file(&pvar).expect("uncompressed pvar fixture should be removed");
 
-    let metadata =
-        genoio_io::read_plink2_metadata(&pgen, &pvar_zst, &psam).expect("metadata should decode");
+    let metadata = genoio_io::read_plink2_metadata_arrow(&pgen, &pvar_zst, &psam)
+        .expect("metadata should decode");
 
     assert_eq!(metadata.variants.len(), 3);
-    assert_eq!(metadata.variants[0].id, "rs1");
+    assert_eq!(variant_id(&metadata.variants, 0), "rs1");
 }
