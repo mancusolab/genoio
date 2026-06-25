@@ -39,3 +39,19 @@ def test_plink1_arrow_backend_does_not_wrap_row_matrices():
 
     assert "dense_matrix_to_arrow_variants" not in source
     assert "sparse_matrix_to_arrow_variants" not in source
+
+
+def test_plink2_hardcall_arrow_backend_does_not_wrap_row_matrices():
+    source = Path("rust/genoio-io/src/plink/plink2.rs").read_text()
+
+    dense_wrapper = re.compile(
+        r"pub fn read_plink2_dense_windowed_with_arrow_variants[\s\S]*?"
+        r"dense_matrix_to_arrow_variants"
+    )
+    sparse_wrapper = re.compile(
+        r"pub fn read_plink2_sparse_windowed_with_arrow_variants[\s\S]*?"
+        r"sparse_matrix_to_arrow_variants"
+    )
+
+    assert dense_wrapper.search(source) is None
+    assert sparse_wrapper.search(source) is None

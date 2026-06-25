@@ -9,8 +9,10 @@ use std::fs;
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseSampleSelection,
-    GenoioError, SampleRecord, SparseGenotypeMatrix, VariantWindow,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix,
+    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseSampleSelection, GenoioError, SampleRecord,
+    SparseGenotypeMatrix, SparseGenotypeMatrixArrowVariants, VariantMetadataArrowBuffers,
+    VariantWindow,
 };
 
 use crate::error::Result;
@@ -110,10 +112,38 @@ pub(super) fn empty_dense_for_samples(
     )
 }
 
-pub(super) fn empty_sparse_for_selection(
+pub(super) fn empty_dense_arrow_for_samples(
+    samples: Vec<SampleRecord>,
+    mut diagnostics: DenseDiagnostics,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<DenseGenotypeMatrixArrowVariants> {
+    diagnostics.retained_variants = 0;
+    let n_samples = samples.len();
+    let samples = if return_samples { samples } else { Vec::new() };
+    let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
+    DenseGenotypeMatrixArrowVariants::new_with_layout(
+        n_samples,
+        0,
+        Vec::new(),
+        DenseLayout::SampleMajor,
+        samples,
+        variants,
+        diagnostics,
+    )
+}
+
+pub(super) fn empty_sparse_arrow_for_selection(
     selection: DenseSampleSelection,
-) -> Result<SparseGenotypeMatrix> {
-    empty_sparse_for_samples(selection.samples, selection.diagnostics)
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    empty_sparse_arrow_for_samples(
+        selection.samples,
+        selection.diagnostics,
+        return_samples,
+        return_variants,
+    )
 }
 
 pub(super) fn empty_sparse_for_samples(
@@ -129,6 +159,28 @@ pub(super) fn empty_sparse_for_samples(
         Vec::new(),
         samples,
         Vec::new(),
+        diagnostics,
+    )
+}
+
+pub(super) fn empty_sparse_arrow_for_samples(
+    samples: Vec<SampleRecord>,
+    mut diagnostics: DenseDiagnostics,
+    return_samples: bool,
+    return_variants: bool,
+) -> Result<SparseGenotypeMatrixArrowVariants> {
+    diagnostics.retained_variants = 0;
+    let n_samples = samples.len();
+    let samples = if return_samples { samples } else { Vec::new() };
+    let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
+    SparseGenotypeMatrixArrowVariants::new(
+        n_samples,
+        0,
+        vec![0],
+        Vec::new(),
+        Vec::new(),
+        samples,
+        variants,
         diagnostics,
     )
 }
