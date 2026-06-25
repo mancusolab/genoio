@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 import re
 from pathlib import Path
 
@@ -102,3 +104,30 @@ def test_bcf_arrow_backend_does_not_wrap_row_matrices():
 
     assert "dense_matrix_to_arrow_variants" not in source
     assert "sparse_matrix_to_arrow_variants" not in source
+
+
+def test_plink_metadata_paths_are_streamed():
+    plink1_metadata = Path("rust/genoio-io/src/plink/plink1/metadata.rs").read_text()
+    plink2_metadata = Path("rust/genoio-io/src/plink/plink2/metadata.rs").read_text()
+
+    assert "fs::read_to_string" not in plink1_metadata
+    assert "fs::read_to_string" not in plink2_metadata
+    assert ".read_to_string(&mut contents)" not in plink2_metadata
+    assert "data_lines = contents" not in plink2_metadata
+
+
+def test_plink1_matrix_reads_do_not_materialize_full_bim_rows():
+    source = Path("rust/genoio-io/src/plink/plink1.rs").read_text()
+
+    assert "parse_bim(" not in source
+
+
+def test_plink2_source_windows_do_not_synthesize_dummy_variant_records():
+    dense = Path("rust/genoio-io/src/plink/plink2/dense.rs").read_text()
+    sparse = Path("rust/genoio-io/src/plink/plink2/sparse.rs").read_text()
+
+    for source in [dense, sparse]:
+        assert "chrom: String::new()" not in source
+        assert "id: String::new()" not in source
+        assert "a0: String::new()" not in source
+        assert "a1: String::new()" not in source

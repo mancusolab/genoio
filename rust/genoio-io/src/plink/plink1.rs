@@ -13,8 +13,7 @@ use genoio_core::{
     select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrixArrowVariants, DenseLayout,
     DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataArrowOutput,
     PartialFilterDecision, SampleMetadataArrowBuffers, SourceCapabilities,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
-    VariantWindow,
+    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -32,7 +31,9 @@ use bed::{
     read_plink1_variant_packed_sequential, seek_plink1_variant, validate_bed_payload_len,
     Plink1DecoderState,
 };
-use metadata::{parse_bim, parse_bim_arrow, parse_bim_source_window, parse_fam};
+use metadata::{
+    count_bim_records, parse_bim_arrow, parse_bim_source_window_arrow, parse_fam, BimRecordReader,
+};
 
 fn can_skip_bim_for_matrix_only_genotype_filter(
     matrix_only: bool,
@@ -152,8 +153,8 @@ pub fn read_plink1_dense_windowed_with_arrow_variants(
             missing_policy,
         );
     }
-    let source_variants = parse_bim(bim)?;
-    let n_source_variants = source_variants.len();
+    let n_source_variants = count_bim_records(bim)?;
+    let source_variants = BimRecordReader::new(bim)?;
     let diagnostics = selection.diagnostics.clone();
     let context = Plink1DenseContext {
         bed,
@@ -182,7 +183,7 @@ pub fn read_plink1_dense_windowed_with_arrow_variants(
 )]
 fn read_plink1_dense_with_variants_arrow(
     mut context: Plink1DenseContext<'_>,
-    source_variants: Vec<VariantRecord>,
+    mut source_variants: BimRecordReader,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
@@ -220,7 +221,13 @@ fn read_plink1_dense_with_variants_arrow(
         GenotypeFilterPlan::Generic,
         VariantFilter::genotype_filter_plan,
     );
-    for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
+    while let Some((variant_index, mut variant)) = source_variants.next_record()? {
+        if variant_index >= context.n_source_variants {
+            return Err(GenoioError::invalid_source(
+                context.bed,
+                "bim variant count exceeds bed variant count",
+            ));
+        }
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });
@@ -343,12 +350,11 @@ fn read_plink1_dense_source_window_arrow(
         .saturating_sub(window.start)
         .min(window.len);
     let variants = if return_variants {
-        let source_variants = parse_bim_source_window(bim, window, n_variants)?;
-        let mut buffers = VariantMetadataArrowBuffers::with_capacity(source_variants.len());
-        for variant in source_variants {
-            buffers.push_record(&variant)?;
-        }
-        Some(buffers)
+        Some(parse_bim_source_window_arrow(
+            bim,
+            window.start,
+            n_variants,
+        )?)
     } else {
         fs::metadata(bim).map_err(|source| GenoioError::Io {
             path: bim.to_path_buf(),
@@ -555,12 +561,12 @@ pub fn read_plink1_sparse_windowed_with_arrow_variants(
     let mut bed_file = open_bed_file(bed)?;
 
     let all_samples = parse_fam(fam)?;
-    let source_variants = parse_bim(bim)?;
+    let n_source_variants = count_bim_records(bim)?;
+    let mut source_variants = BimRecordReader::new(bim)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
     let all_samples_selected = requested_samples.is_none();
     let mut diagnostics = selection.diagnostics;
     let n_source_samples = all_samples.len();
-    let n_source_variants = source_variants.len();
     let bytes_per_variant = n_source_samples.div_ceil(4);
     validate_bed_payload_len(
         bed,
@@ -588,7 +594,13 @@ pub fn read_plink1_sparse_windowed_with_arrow_variants(
         GenotypeFilterPlan::Generic,
         VariantFilter::genotype_filter_plan,
     );
-    for (variant_index, mut variant) in source_variants.into_iter().enumerate() {
+    while let Some((variant_index, mut variant)) = source_variants.next_record()? {
+        if variant_index >= n_source_variants {
+            return Err(GenoioError::invalid_source(
+                bed,
+                "bim variant count exceeds bed variant count",
+            ));
+        }
         let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
             filter.partial_decision(&variant)
         });

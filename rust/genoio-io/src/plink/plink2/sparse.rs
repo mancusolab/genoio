@@ -28,6 +28,12 @@ use super::source::{
     empty_sparse_arrow_for_selection, require_pvar, variant_output_capacity, Plink2ReadContext,
 };
 
+/// Source-window row that may omit metadata for matrix-only reads.
+struct SourceWindowVariant {
+    source_index: usize,
+    variant: Option<VariantRecord>,
+}
+
 #[inline]
 fn append_decoded_sparse_column(
     decoder_state: &mut PgenDecoderState,
@@ -39,6 +45,31 @@ fn append_decoded_sparse_column(
     reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
     flip_values_to_minor_allele(&mut decoder_state.values, variant);
     append_sparse_column(indptr, indices, data, &decoder_state.values)
+}
+
+#[inline]
+fn append_decoded_sparse_column_without_variant_metadata(
+    decoder_state: &mut PgenDecoderState,
+    indptr: &mut Vec<i32>,
+    indices: &mut Vec<i32>,
+    data: &mut Vec<f32>,
+) -> Result<()> {
+    reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
+    // Matrix-only source windows must preserve sparse minor-allele orientation
+    // without mutating metadata that the caller did not request.
+    flip_values_to_minor_allele_without_metadata(&mut decoder_state.values);
+    append_sparse_column(indptr, indices, data, &decoder_state.values)
+}
+
+fn flip_values_to_minor_allele_without_metadata(values: &mut [f32]) {
+    let a1_count = values.iter().sum::<f32>();
+    let a0_count = 2.0 * values.len() as f32 - a1_count;
+    if a1_count <= a0_count {
+        return;
+    }
+    for value in values {
+        *value = 2.0 - *value;
+    }
 }
 
 #[expect(
@@ -224,33 +255,20 @@ fn read_plink2_sparse_source_window_arrow(
         .variant_ct
         .saturating_sub(window.start)
         .min(window.len);
-    let window_variants = if return_variants {
+    let window_variants: Vec<SourceWindowVariant> = if return_variants {
         parse_pvar_source_window(pvar, window, header.variant_ct)?
+            .into_iter()
+            .map(|(source_index, variant)| SourceWindowVariant {
+                source_index,
+                variant: Some(variant),
+            })
+            .collect()
     } else {
         require_pvar(pvar)?;
         (window.start..window.start + n_variants)
-            .map(|source_index| {
-                (
-                    source_index,
-                    VariantRecord {
-                        chrom: String::new(),
-                        pos: 0,
-                        id: String::new(),
-                        a0: String::new(),
-                        a1: String::new(),
-                        ref_allele: None,
-                        alt_allele: None,
-                        source_a0: String::new(),
-                        source_a1: String::new(),
-                        flipped: false,
-                        qual: None,
-                        af: None,
-                        maf: None,
-                        mac: None,
-                        missing_rate: None,
-                        n_called: None,
-                    },
-                )
+            .map(|source_index| SourceWindowVariant {
+                source_index,
+                variant: None,
             })
             .collect()
     };
@@ -271,24 +289,33 @@ fn read_plink2_sparse_source_window_arrow(
         | PgenLayout::FixedWidthDosage
         | PgenLayout::FixedWidthPhasedDosage => {
             // Fixed-width records can be decoded by direct source index.
-            for (variant_index, mut variant) in window_variants {
+            for source_variant in window_variants {
                 read_plink2_variant_values(
                     pgen,
                     &mut file,
                     &header,
-                    variant_index,
+                    source_variant.source_index,
                     &selection.source_indices,
                     &mut decoder_state,
                 )?;
-                append_decoded_sparse_column(
-                    &mut decoder_state,
-                    &mut variant,
-                    &mut indptr,
-                    &mut indices,
-                    &mut data,
-                )?;
-                if let Some(variants) = variants.as_mut() {
-                    variants.push_record(&variant)?;
+                if let Some(mut variant) = source_variant.variant {
+                    append_decoded_sparse_column(
+                        &mut decoder_state,
+                        &mut variant,
+                        &mut indptr,
+                        &mut indices,
+                        &mut data,
+                    )?;
+                    if let Some(variants) = variants.as_mut() {
+                        variants.push_record(&variant)?;
+                    }
+                } else {
+                    append_decoded_sparse_column_without_variant_metadata(
+                        &mut decoder_state,
+                        &mut indptr,
+                        &mut indices,
+                        &mut data,
+                    )?;
                 }
             }
         }
@@ -308,18 +335,27 @@ fn read_plink2_sparse_source_window_arrow(
                 )?;
                 if window_iter
                     .peek()
-                    .is_some_and(|(source_index, _)| *source_index == variant_index)
+                    .is_some_and(|source_variant| source_variant.source_index == variant_index)
                 {
-                    if let Some((_, mut variant)) = window_iter.next() {
-                        append_decoded_sparse_column(
-                            &mut decoder_state,
-                            &mut variant,
-                            &mut indptr,
-                            &mut indices,
-                            &mut data,
-                        )?;
-                        if let Some(variants) = variants.as_mut() {
-                            variants.push_record(&variant)?;
+                    if let Some(source_variant) = window_iter.next() {
+                        if let Some(mut variant) = source_variant.variant {
+                            append_decoded_sparse_column(
+                                &mut decoder_state,
+                                &mut variant,
+                                &mut indptr,
+                                &mut indices,
+                                &mut data,
+                            )?;
+                            if let Some(variants) = variants.as_mut() {
+                                variants.push_record(&variant)?;
+                            }
+                        } else {
+                            append_decoded_sparse_column_without_variant_metadata(
+                                &mut decoder_state,
+                                &mut indptr,
+                                &mut indices,
+                                &mut data,
+                            )?;
                         }
                     }
                 }

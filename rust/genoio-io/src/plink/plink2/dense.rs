@@ -10,7 +10,8 @@ use std::path::Path;
 use genoio_core::{
     attach_variant_stats, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
     DenseSampleSelection, GenoioError, GenotypeFilterPlan, PartialFilterDecision,
-    SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
+    SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
+    VariantWindow,
 };
 
 use crate::error::Result;
@@ -32,6 +33,12 @@ use super::source::{
     empty_dense_arrow_for_samples, matrix_only_source_window_diagnostics, require_pvar,
     select_samples_for_header, variant_output_capacity, Plink2ReadContext,
 };
+
+/// Source-window row that may omit metadata for matrix-only reads.
+struct SourceWindowVariant {
+    source_index: usize,
+    variant: Option<VariantRecord>,
+}
 
 fn can_skip_pvar_for_matrix_only_genotype_filter(
     matrix_only: bool,
@@ -656,33 +663,20 @@ fn read_plink2_dense_source_window_arrow(
         .variant_ct
         .saturating_sub(window.start)
         .min(window.len);
-    let window_variants = if return_variants {
+    let window_variants: Vec<SourceWindowVariant> = if return_variants {
         parse_pvar_source_window(pvar, window, header.variant_ct)?
+            .into_iter()
+            .map(|(source_index, variant)| SourceWindowVariant {
+                source_index,
+                variant: Some(variant),
+            })
+            .collect()
     } else {
         require_pvar(pvar)?;
         (window.start..window.start + n_variants)
-            .map(|source_index| {
-                (
-                    source_index,
-                    genoio_core::VariantRecord {
-                        chrom: String::new(),
-                        pos: 0,
-                        id: String::new(),
-                        a0: String::new(),
-                        a1: String::new(),
-                        ref_allele: None,
-                        alt_allele: None,
-                        source_a0: String::new(),
-                        source_a1: String::new(),
-                        flipped: false,
-                        qual: None,
-                        af: None,
-                        maf: None,
-                        mac: None,
-                        missing_rate: None,
-                        n_called: None,
-                    },
-                )
+            .map(|source_index| SourceWindowVariant {
+                source_index,
+                variant: None,
             })
             .collect()
     };
@@ -704,19 +698,26 @@ fn read_plink2_dense_source_window_arrow(
         PgenLayout::FixedWidth
         | PgenLayout::FixedWidthDosage
         | PgenLayout::FixedWidthPhasedDosage => {
-            if let Some((first_variant_index, _)) = window_variants.first() {
-                seek_fixed_width_variant_record(pgen, &mut file, &header, *first_variant_index)?;
+            if let Some(first_variant) = window_variants.first() {
+                seek_fixed_width_variant_record(
+                    pgen,
+                    &mut file,
+                    &header,
+                    first_variant.source_index,
+                )?;
             }
-            for (source_variant_index, variant) in window_variants {
-                debug_assert!(source_variant_index < header.variant_ct);
+            for source_variant in window_variants {
+                debug_assert!(source_variant.source_index < header.variant_ct);
                 read_fixed_width_variant_packed_sequential(
                     pgen,
                     &mut file,
                     &header,
                     &mut decoder_state,
                 )?;
-                if let Some(variants) = variants.as_mut() {
-                    variants.push_record(&variant)?;
+                if let (Some(variants), Some(variant)) =
+                    (variants.as_mut(), source_variant.variant.as_ref())
+                {
+                    variants.push_record(variant)?;
                 }
                 packed_batch.push(&decoder_state.packed);
                 if packed_batch.is_full() {
@@ -759,11 +760,13 @@ fn read_plink2_dense_source_window_arrow(
                 )?;
                 if window_iter
                     .peek()
-                    .is_some_and(|(source_index, _)| *source_index == variant_index)
+                    .is_some_and(|source_variant| source_variant.source_index == variant_index)
                 {
-                    if let Some((_, variant)) = window_iter.next() {
-                        if let Some(variants) = variants.as_mut() {
-                            variants.push_record(&variant)?;
+                    if let Some(source_variant) = window_iter.next() {
+                        if let (Some(variants), Some(variant)) =
+                            (variants.as_mut(), source_variant.variant.as_ref())
+                        {
+                            variants.push_record(variant)?;
                         }
                         packed_batch.push(&decoder_state.packed);
                         if packed_batch.is_full() {
