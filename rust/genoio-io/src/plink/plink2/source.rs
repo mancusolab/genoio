@@ -9,14 +9,12 @@ use std::fs;
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix,
-    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseSampleSelection, GenoioError, SampleRecord,
-    SparseGenotypeMatrix, SparseGenotypeMatrixArrowVariants, VariantMetadataArrowBuffers,
-    VariantWindow,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrixArrowVariants, DenseLayout,
+    DenseSampleSelection, GenoioError, SampleRecord, SparseGenotypeMatrixArrowVariants,
+    VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
-use crate::matrix::{finish_dense_matrix, DenseMatrixParts};
 
 use super::metadata::parse_psam;
 use super::pgen::{
@@ -93,25 +91,6 @@ pub(super) fn variant_output_capacity(
     })
 }
 
-pub(super) fn empty_dense_for_samples(
-    samples: Vec<SampleRecord>,
-    mut diagnostics: DenseDiagnostics,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    diagnostics.retained_variants = 0;
-    finish_dense_matrix(
-        DenseMatrixParts {
-            n_samples: samples.len(),
-            n_variants: 0,
-            values: Vec::new(),
-            samples,
-            variants: Vec::new(),
-            diagnostics,
-        },
-        matrix_only,
-    )
-}
-
 pub(super) fn empty_dense_arrow_for_samples(
     samples: Vec<SampleRecord>,
     mut diagnostics: DenseDiagnostics,
@@ -143,23 +122,6 @@ pub(super) fn empty_sparse_arrow_for_selection(
         selection.diagnostics,
         return_samples,
         return_variants,
-    )
-}
-
-pub(super) fn empty_sparse_for_samples(
-    samples: Vec<SampleRecord>,
-    mut diagnostics: DenseDiagnostics,
-) -> Result<SparseGenotypeMatrix> {
-    diagnostics.retained_variants = 0;
-    SparseGenotypeMatrix::new(
-        samples.len(),
-        0,
-        vec![0],
-        Vec::new(),
-        Vec::new(),
-        samples,
-        Vec::new(),
-        diagnostics,
     )
 }
 

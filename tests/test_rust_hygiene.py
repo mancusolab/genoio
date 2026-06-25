@@ -55,3 +55,30 @@ def test_plink2_hardcall_arrow_backend_does_not_wrap_row_matrices():
 
     assert dense_wrapper.search(source) is None
     assert sparse_wrapper.search(source) is None
+
+
+def test_plink2_non_hardcall_arrow_backend_does_not_wrap_row_matrices():
+    source = Path("rust/genoio-io/src/plink/plink2.rs").read_text()
+
+    wrapped_entry_points = [
+        (
+            "read_plink2_dosage_dense_windowed_with_arrow_variants",
+            "dense_matrix_to_arrow_variants",
+        ),
+        (
+            "read_plink2_haplotypes_dense_windowed_with_arrow_variants",
+            "dense_matrix_to_arrow_variants",
+        ),
+        (
+            "read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants",
+            "dense_matrix_to_arrow_variants",
+        ),
+        (
+            "read_plink2_haplotypes_sparse_windowed_with_arrow_variants",
+            "sparse_matrix_to_arrow_variants",
+        ),
+    ]
+
+    for function_name, conversion_helper in wrapped_entry_points:
+        wrapper = re.compile(rf"pub fn {function_name}[\s\S]*?{conversion_helper}")
+        assert wrapper.search(source) is None
