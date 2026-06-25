@@ -58,10 +58,7 @@ mod record;
 mod source;
 mod sparse;
 
-pub(in crate::vcf) use self::record::{
-    append_public_variant_metadata_from_noodles_variant_record,
-    variant_record_from_noodles_variant_record,
-};
+pub(in crate::vcf) use self::record::append_public_variant_metadata_from_noodles_variant_record;
 
 pub(super) const VCF_TEXT_BUFFER_SIZE: usize = 1 << 20;
 const VCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;

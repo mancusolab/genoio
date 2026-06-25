@@ -7,9 +7,7 @@
 
 use std::path::Path;
 
-use genoio_core::{
-    GenoioError, RegionPredicate, VariantMetadataArrowBuffers, VariantMetadataView, VariantRecord,
-};
+use genoio_core::{GenoioError, RegionPredicate, VariantMetadataArrowBuffers, VariantMetadataView};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
@@ -61,68 +59,6 @@ impl VariantMetadataView for TextVariantView<'_> {
     fn qual(&self) -> Option<f32> {
         self.qual
     }
-}
-
-/// Convert a noodles VCF/BCF record into genoio's metadata shape.
-pub(in crate::vcf) fn variant_record_from_noodles_variant_record<R>(
-    path: &Path,
-    header: &noodles::Header,
-    record: &R,
-) -> Result<VariantRecord>
-where
-    R: noodles::variant::Record + ?Sized,
-{
-    let chrom = record
-        .reference_sequence_name(header)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf chrom error: {error}")))?
-        .to_string();
-    if chrom.is_empty() {
-        return Err(GenoioError::invalid_source(
-            path,
-            "vcf record is missing a chromosome id",
-        ));
-    }
-
-    let pos = record
-        .variant_start()
-        .transpose()
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf position error: {error}")))?
-        .ok_or_else(|| GenoioError::invalid_source(path, "vcf record position is missing"))?;
-    let pos = u32::try_from(pos.get())
-        .map_err(|_| GenoioError::invalid_source(path, "vcf record position is out of range"))?;
-
-    let ref_allele = reference_bases_string(path, record)?;
-    let alt_values = alternate_bases_strings(path, record)?;
-    let first_alt = alt_values.first().cloned().ok_or_else(|| {
-        GenoioError::invalid_source(
-            path,
-            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
-        )
-    })?;
-    let alt_allele = alt_values.join(",");
-
-    Ok(VariantRecord {
-        chrom,
-        pos,
-        id: first_trait_record_id(record),
-        a0: ref_allele.clone(),
-        a1: first_alt.clone(),
-        ref_allele: Some(ref_allele.clone()),
-        alt_allele: Some(alt_allele),
-        source_a0: ref_allele,
-        source_a1: first_alt,
-        flipped: false,
-        qual: record
-            .quality_score()
-            .transpose()
-            .map_err(|error| GenoioError::invalid_source(path, format!("vcf qual error: {error}")))?
-            .and_then(finite_qual),
-        af: None,
-        maf: None,
-        mac: None,
-        missing_rate: None,
-        n_called: None,
-    })
 }
 
 pub(in crate::vcf) fn append_public_variant_metadata_from_noodles_variant_record<R>(
@@ -271,20 +207,6 @@ where
     String::from_utf8(bases).map_err(|error| {
         GenoioError::invalid_source(path, format!("vcf reference allele is not UTF-8: {error}"))
     })
-}
-
-fn alternate_bases_strings<R>(path: &Path, record: &R) -> Result<Vec<String>>
-where
-    R: noodles::variant::Record + ?Sized,
-{
-    let alternate_bases = record.alternate_bases();
-    let mut values = Vec::with_capacity(alternate_bases.len());
-    for result in alternate_bases.iter() {
-        values.push(result.map(str::to_string).map_err(|error| {
-            GenoioError::invalid_source(path, format!("vcf alternate allele error: {error}"))
-        })?);
-    }
-    Ok(values)
 }
 
 fn first_alternate_base_string<R>(path: &Path, record: &R) -> Result<Option<String>>
