@@ -61,15 +61,7 @@ pub(super) fn sample_id_width(sample_ct: usize) -> usize {
     }
 }
 
-pub(super) fn packed_difflist_value(
-    record: &[u8],
-    start: usize,
-    index: usize,
-    with_values: bool,
-) -> u8 {
-    if !with_values {
-        return 0;
-    }
+pub(super) fn packed_difflist_value(record: &[u8], start: usize, index: usize) -> u8 {
     (record[start + index / 4] >> ((index % 4) * 2)) & 0b11
 }
 

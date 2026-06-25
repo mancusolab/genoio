@@ -131,3 +131,15 @@ def test_plink2_source_windows_do_not_synthesize_dummy_variant_records():
         assert "id: String::new()" not in source
         assert "a0: String::new()" not in source
         assert "a1: String::new()" not in source
+
+
+def test_pgen_difflist_decoder_does_not_allocate_entry_vectors():
+    sources = [
+        Path("rust/genoio-io/src/plink/plink2/pgen/main_track.rs").read_text(),
+        Path("rust/genoio-io/src/plink/plink2/pgen/dosage_track.rs").read_text(),
+    ]
+
+    for source in sources:
+        assert "let mut first_ids = Vec::" not in source
+        assert "let mut entries = Vec::" not in source
+        assert "Result<Vec<(usize, u8)>>" not in source

@@ -98,9 +98,7 @@ fn decode_one_bit_record_with_cursor(
         }
     }
     let mut cursor = 1 + bitarray_len;
-    for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
-        packed.set(sample_index, category);
-    }
+    apply_difflist_entries(path, record, &mut cursor, sample_ct, packed)?;
     Ok(cursor)
 }
 
@@ -114,9 +112,7 @@ fn decode_difflist_record_with_cursor(
     packed.resize(sample_ct);
     packed.clear_to(base_category);
     let mut cursor = 0;
-    for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
-        packed.set(sample_index, category);
-    }
+    apply_difflist_entries(path, record, &mut cursor, sample_ct, packed)?;
     Ok(cursor)
 }
 
@@ -172,9 +168,7 @@ fn decode_ld_compressed_record_with_cursor(
     }
     packed.copy_from(previous_non_ld_packed);
     let mut cursor = 0;
-    for (sample_index, category) in decode_difflist(path, record, &mut cursor, sample_ct, true)? {
-        packed.set(sample_index, category);
-    }
+    apply_difflist_entries(path, record, &mut cursor, sample_ct, packed)?;
     if inverted {
         packed.invert_0_2();
     }
@@ -191,16 +185,28 @@ pub(super) fn decode_difflist_record(
     decode_difflist_record_with_cursor(path, record, sample_ct, base_category, packed).map(|_| ())
 }
 
-fn decode_difflist(
+fn apply_difflist_entries(
     path: &Path,
     record: &[u8],
     cursor: &mut usize,
     sample_ct: usize,
-    with_values: bool,
-) -> Result<Vec<(usize, u8)>> {
+    packed: &mut PackedGenotypes,
+) -> Result<()> {
+    visit_difflist_entries(path, record, cursor, sample_ct, |sample_index, category| {
+        packed.set(sample_index, category);
+    })
+}
+
+fn visit_difflist_entries(
+    path: &Path,
+    record: &[u8],
+    cursor: &mut usize,
+    sample_ct: usize,
+    mut visit: impl FnMut(usize, u8),
+) -> Result<()> {
     let list_len = read_base128_varint(path, record, cursor)?;
     if list_len == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     if list_len > sample_ct {
         return Err(GenoioError::invalid_source(
@@ -210,47 +216,48 @@ fn decode_difflist(
     }
     let group_ct = list_len.div_ceil(64);
     let sample_id_width = sample_id_width(sample_ct);
-    let mut first_ids = Vec::with_capacity(group_ct);
-    for _ in 0..group_ct {
-        first_ids.push(read_fixed_width_sample_id(
-            path,
-            record,
-            cursor,
-            sample_id_width,
-        )?);
-    }
+    // PGEN stores first IDs for every group before packed values and deltas.
+    // Keep only offsets into the record so decoding does not allocate per row.
+    let first_ids_start = *cursor;
+    let first_ids_len = group_ct.checked_mul(sample_id_width).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen difflist sample id range is out of range")
+    })?;
+    ensure_record_bytes(path, record, *cursor, first_ids_len)?;
+    *cursor += first_ids_len;
     ensure_record_bytes(path, record, *cursor, group_ct.saturating_sub(1))?;
     *cursor += group_ct.saturating_sub(1);
 
     let packed_values_start = *cursor;
-    if with_values {
-        ensure_record_bytes(path, record, *cursor, list_len.div_ceil(4))?;
-        *cursor += list_len.div_ceil(4);
-    }
+    ensure_record_bytes(path, record, *cursor, list_len.div_ceil(4))?;
+    *cursor += list_len.div_ceil(4);
 
-    let mut entries = Vec::with_capacity(list_len);
     let mut previous_sample_id = None;
-    for (group_index, first_id) in first_ids.into_iter().enumerate() {
+    let mut entry_index = 0_usize;
+    for group_index in 0..group_ct {
         let group_len = (list_len - group_index * 64).min(64);
-        let mut sample_id = first_id;
+        let mut first_id_cursor = first_ids_start + group_index * sample_id_width;
+        let mut sample_id =
+            read_fixed_width_sample_id(path, record, &mut first_id_cursor, sample_id_width)?;
         validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
-        entries.push((
+        visit(
             sample_id,
-            packed_difflist_value(record, packed_values_start, entries.len(), with_values),
-        ));
+            packed_difflist_value(record, packed_values_start, entry_index),
+        );
+        entry_index += 1;
         for _ in 1..group_len {
             let delta = read_base128_varint(path, record, cursor)?;
             sample_id = sample_id.checked_add(delta).ok_or_else(|| {
                 GenoioError::invalid_source(path, "pgen difflist sample id is out of range")
             })?;
             validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
-            entries.push((
+            visit(
                 sample_id,
-                packed_difflist_value(record, packed_values_start, entries.len(), with_values),
-            ));
+                packed_difflist_value(record, packed_values_start, entry_index),
+            );
+            entry_index += 1;
         }
     }
-    Ok(entries)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -310,6 +317,23 @@ mod tests {
     }
 
     #[test]
+    fn difflist_record_decodes_entries_across_group_boundary() {
+        let path = Path::new("test.pgen");
+        let mut record = vec![65, 0, 64, 0];
+        record.extend(std::iter::repeat_n(0b01_01_01_01, 16));
+        record.push(0b01);
+        record.extend(std::iter::repeat_n(1, 63));
+        let mut packed = PackedGenotypes::default();
+
+        decode_difflist_record(path, &record, 130, 0, &mut packed)
+            .expect("multi-group difflist record should decode");
+
+        let categories = decoded_categories(&packed);
+        assert!(categories[..65].iter().all(|category| *category == 1));
+        assert!(categories[65..].iter().all(|category| *category == 0));
+    }
+
+    #[test]
     fn difflist_record_rejects_duplicate_and_out_of_range_sample_ids() {
         let path = Path::new("test.pgen");
         let mut packed = PackedGenotypes::default();
@@ -321,6 +345,20 @@ mod tests {
         let out_of_range = decode_difflist_record(path, &[1, 4, 0], 4, 0, &mut packed)
             .expect_err("out-of-range difflist sample id should fail");
         assert_error_contains(out_of_range, "outside sample count");
+    }
+
+    #[test]
+    fn difflist_record_rejects_non_increasing_group_boundary() {
+        let path = Path::new("test.pgen");
+        let mut record = vec![65, 0, 63, 0];
+        record.extend(std::iter::repeat_n(0, 17));
+        record.extend(std::iter::repeat_n(1, 63));
+        let mut packed = PackedGenotypes::default();
+
+        let error = decode_difflist_record(path, &record, 130, 0, &mut packed)
+            .expect_err("non-increasing group boundary should fail");
+
+        assert_error_contains(error, "strictly increasing");
     }
 
     #[test]
