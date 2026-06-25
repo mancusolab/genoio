@@ -14,8 +14,8 @@ use genoio_core::DenseLayout;
 mod common;
 
 use common::unique_dir;
-use common::vcf_arrow as genoio_io;
-use common::vcf_arrow::{sparse_values_dense_arrow, variant_ids, variants};
+use common::vcf_output as genoio_io;
+use common::vcf_output::{sparse_values_dense_output, variant_ids, variants};
 
 fn write_vcf(path: &Path) {
     fs::write(
@@ -180,7 +180,7 @@ fn indexed_vcf_region_sparse_uses_permissive_text_backend() {
         .expect("indexed sparse VCF should decode through permissive text backend");
 
     assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs20"]);
-    assert_eq!(sparse_values_dense_arrow(&sparse), vec![1.0, 0.0]);
+    assert_eq!(sparse_values_dense_output(&sparse), vec![1.0, 0.0]);
     assert!(variants(&sparse.variants).flipped[0]);
 }
 
@@ -213,7 +213,7 @@ fn indexed_vcf_region_haplotypes_use_permissive_text_backend() {
 
     assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs20"]);
     assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
-    assert_eq!(sparse_values_dense_arrow(&sparse), dense.values);
+    assert_eq!(sparse_values_dense_output(&sparse), dense.values);
 }
 
 #[test]
@@ -383,10 +383,10 @@ fn threaded_indexed_vcf_region_uses_permissive_text_backend_for_all_outputs() {
     );
     assert_eq!(dense.values, vec![1.0, 1.0]);
     assert_eq!(dosage.values, vec![1.0, 1.0]);
-    assert_eq!(sparse_values_dense_arrow(&sparse), dense.values);
+    assert_eq!(sparse_values_dense_output(&sparse), dense.values);
     assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
     assert_eq!(
-        sparse_values_dense_arrow(&sparse_haplotypes),
+        sparse_values_dense_output(&sparse_haplotypes),
         haplotypes.values
     );
 }

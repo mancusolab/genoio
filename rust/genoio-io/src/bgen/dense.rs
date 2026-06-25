@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataArrowBuffers,
-    VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataBuffers, VariantFilter,
+    VariantMetadataBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -27,18 +27,17 @@ use super::filter::{apply_genotype_filter_result, decode_and_evaluate_dosage_fil
 use super::index::{indexed_region_records, BgenIndexRecord};
 use super::session::{BgenIndexedReadContext, BgenReadSession, BgenVariantCursor};
 
-fn empty_dense_arrow_for_samples(
+fn empty_dense_output_for_samples(
     samples: Vec<genoio_core::SampleRecord>,
     mut diagnostics: genoio_core::DenseDiagnostics,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     diagnostics.retained_variants = 0;
     let n_samples = samples.len();
-    let samples =
-        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, false)?;
-    let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, false)?;
+    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         0,
         Vec::new(),
@@ -51,9 +50,9 @@ fn empty_dense_arrow_for_samples(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Arrow facade mirrors dense dosage read options plus metadata return choices"
+    reason = "output facade mirrors dense dosage read options plus metadata return choices"
 )]
-pub fn read_bgen_dosage_dense_windowed_with_arrow_variants(
+pub fn read_bgen_dosage_dense_windowed(
     bgen: &Path,
     sample: Option<&Path>,
     requested_samples: Option<&[String]>,
@@ -62,7 +61,7 @@ pub fn read_bgen_dosage_dense_windowed_with_arrow_variants(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let matrix_only = !return_samples && !return_variants;
     let mut session = BgenReadSession::open(bgen)?;
     let all_samples = session.read_samples(sample)?;
@@ -70,7 +69,7 @@ pub fn read_bgen_dosage_dense_windowed_with_arrow_variants(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         diagnostics.retained_variants = 0;
-        return empty_dense_arrow_for_samples(
+        return empty_dense_output_for_samples(
             selection.samples,
             diagnostics,
             return_samples,
@@ -112,8 +111,8 @@ pub fn read_bgen_dosage_dense_windowed_with_arrow_variants(
     });
     let n_samples = selection.samples.len();
     let mut values = sample_major_buffer(n_samples, output_variant_capacity)?;
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut decode_buffers = DosageDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
@@ -193,12 +192,9 @@ pub fn read_bgen_dosage_dense_windowed_with_arrow_variants(
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &selection.samples,
-        return_samples,
-        false,
-    )?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         values,
@@ -215,7 +211,7 @@ fn read_bgen_dosage_dense_matrix_only_unfiltered(
     mut diagnostics: genoio_core::DenseDiagnostics,
     variant_window: Option<VariantWindow>,
     missing_policy: DenseMissingPolicy,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     session.seek_to_variants()?;
 
     let header_variant_count = usize::try_from(session.header.variant_count).map_err(|_| {
@@ -275,7 +271,7 @@ fn read_bgen_dosage_dense_matrix_only_unfiltered(
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         values,
@@ -357,7 +353,7 @@ fn write_dosage_slot(
 fn read_bgen_dosage_dense_indexed(
     context: BgenIndexedReadContext<'_>,
     index_records: &[BgenIndexRecord],
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let BgenIndexedReadContext {
         session,
         selection,
@@ -375,8 +371,8 @@ fn read_bgen_dosage_dense_indexed(
     });
     let n_samples = selection.samples.len();
     let mut values = sample_major_buffer(n_samples, output_variant_capacity)?;
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut decode_buffers = DosageDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
     let mut output_variant_count = 0_usize;
@@ -464,12 +460,9 @@ fn read_bgen_dosage_dense_indexed(
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &selection.samples,
-        return_samples,
-        false,
-    )?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         values,

@@ -1,6 +1,6 @@
 use genoio_core::{
-    append_sparse_column, DenseDiagnostics, SampleRecord, SparseGenotypeMatrix,
-    SparseGenotypeMatrixArrowVariants, VariantRecord,
+    append_sparse_column, DenseDiagnostics, SampleMetadataBuffers, SampleRecord,
+    SparseGenotypeMatrix, VariantMetadataBuffers, VariantRecord,
 };
 
 fn sample(id: &str) -> SampleRecord {
@@ -48,8 +48,8 @@ fn sparse_contract_rejects_malformed_csc_arrays() {
         vec![0, 2],
         vec![0],
         vec![1.0],
-        samples.clone(),
-        variants.clone(),
+        Some(SampleMetadataBuffers::from_records(&samples, false).unwrap()),
+        Some(VariantMetadataBuffers::from_records(&variants).unwrap()),
         DenseDiagnostics::default(),
     );
     assert!(bad_terminal_pointer
@@ -63,8 +63,8 @@ fn sparse_contract_rejects_malformed_csc_arrays() {
         vec![0, 1],
         vec![2],
         vec![1.0],
-        samples,
-        variants,
+        Some(SampleMetadataBuffers::from_records(&samples, false).unwrap()),
+        Some(VariantMetadataBuffers::from_records(&variants).unwrap()),
         DenseDiagnostics::default(),
     );
     assert!(out_of_bounds_row
@@ -83,8 +83,8 @@ fn sparse_contract_accepts_valid_empty_columns() {
         indptr,
         indices,
         vec![2.0],
-        vec![sample("S1"), sample("S2")],
-        vec![variant("rs1"), variant("rs2")],
+        Some(SampleMetadataBuffers::from_records(&[sample("S1"), sample("S2")], false).unwrap()),
+        Some(VariantMetadataBuffers::from_records(&[variant("rs1"), variant("rs2")]).unwrap()),
         DenseDiagnostics::default(),
     )
     .expect("valid sparse matrix should pass");
@@ -97,8 +97,8 @@ fn sparse_contract_accepts_valid_empty_columns() {
 }
 
 #[test]
-fn sparse_arrow_contract_rejects_negative_indices() {
-    let negative_pointer = SparseGenotypeMatrixArrowVariants::new(
+fn sparse_contract_rejects_negative_indices() {
+    let negative_pointer = SparseGenotypeMatrix::new(
         2,
         1,
         vec![0, -1],
@@ -113,7 +113,7 @@ fn sparse_arrow_contract_rejects_negative_indices() {
         .to_string()
         .contains("must be nonnegative"));
 
-    let negative_row = SparseGenotypeMatrixArrowVariants::new(
+    let negative_row = SparseGenotypeMatrix::new(
         2,
         1,
         vec![0, 1],
@@ -130,8 +130,8 @@ fn sparse_arrow_contract_rejects_negative_indices() {
 }
 
 #[test]
-fn sparse_arrow_contract_rejects_dimensions_outside_i32_index_range() {
-    let too_many_rows = SparseGenotypeMatrixArrowVariants::new(
+fn sparse_contract_rejects_dimensions_outside_i32_index_range() {
+    let too_many_rows = SparseGenotypeMatrix::new(
         i32::MAX as usize + 1,
         0,
         vec![0],
@@ -146,7 +146,7 @@ fn sparse_arrow_contract_rejects_dimensions_outside_i32_index_range() {
         .to_string()
         .contains("exceeds sparse int32 index range"));
 
-    let too_many_columns = SparseGenotypeMatrixArrowVariants::new(
+    let too_many_columns = SparseGenotypeMatrix::new(
         0,
         i32::MAX as usize,
         vec![0],

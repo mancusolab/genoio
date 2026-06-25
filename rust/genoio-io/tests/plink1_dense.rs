@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 mod common;
 
 use common::dense::assert_values_with_nan;
-use common::plink_arrow as genoio_io;
-use common::plink_arrow::dense_missing_sample_major_arrow as dense_missing_sample_major;
+use common::plink_output as genoio_io;
+use common::plink_output::dense_missing_sample_major_output as dense_missing_sample_major;
 use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {

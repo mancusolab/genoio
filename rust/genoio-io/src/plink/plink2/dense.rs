@@ -8,10 +8,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
+    attach_variant_stats, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
     DenseSampleSelection, GenoioError, GenotypeFilterPlan, PartialFilterDecision,
-    SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
-    VariantWindow,
+    SampleMetadataBuffers, VariantFilter, VariantMetadataBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -30,7 +29,7 @@ use super::pgen::{
 };
 use super::require_genotype_decision_filter;
 use super::source::{
-    empty_dense_arrow_for_samples, matrix_only_source_window_diagnostics, require_pvar,
+    empty_dense_output_for_samples, matrix_only_source_window_diagnostics, require_pvar,
     select_samples_for_header, variant_output_capacity, Plink2ReadContext,
 };
 
@@ -56,9 +55,9 @@ fn can_skip_pvar_for_matrix_only_genotype_filter(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Arrow facade mirrors dense read options plus metadata return choices"
+    reason = "output facade mirrors dense read options plus metadata return choices"
 )]
-pub fn read_plink2_dense_windowed_with_arrow_variants(
+pub fn read_plink2_dense_windowed(
     pgen: &Path,
     pvar: &Path,
     psam: &Path,
@@ -68,7 +67,7 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let matrix_only = !return_samples && !return_variants;
     // With no variant filter, retained order is identical to source order.
     // This lets block reads avoid full PVAR parsing and full variable-width
@@ -76,7 +75,7 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     // retained-window membership depends on evaluating earlier variants.
     if let (None, Some(window)) = (variant_filter, variant_window) {
         if matrix_only {
-            return read_plink2_dense_matrix_only_source_window_arrow(
+            return read_plink2_dense_matrix_only_source_window(
                 pgen,
                 psam,
                 requested_samples,
@@ -84,7 +83,7 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
                 missing_policy,
             );
         }
-        return read_plink2_dense_source_window_arrow(
+        return read_plink2_dense_source_window(
             pgen,
             pvar,
             psam,
@@ -103,7 +102,7 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
         // prefix PGEN headers so retained-block reads do not pay the full
         // variable-width header parse before decoding the first block.
         require_pvar(pvar)?;
-        return read_plink2_dense_matrix_only_genotype_filter_arrow(
+        return read_plink2_dense_matrix_only_genotype_filter(
             pgen,
             psam,
             requested_samples,
@@ -121,7 +120,7 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         require_pvar(pvar)?;
-        return empty_dense_arrow_for_samples(
+        return empty_dense_output_for_samples(
             selection.samples,
             diagnostics,
             return_samples,
@@ -133,8 +132,8 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
 
     let output_variant_capacity = variant_output_capacity(&header, variant_window);
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let n_samples = selection.samples.len();
     let mut values = vec![0.0; n_samples * output_variant_capacity];
     let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
@@ -249,12 +248,9 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     let n_variants = output_variant_count;
     shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
     diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &selection.samples,
-        return_samples,
-        false,
-    )?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         values,
@@ -265,13 +261,13 @@ pub fn read_plink2_dense_windowed_with_arrow_variants(
     )
 }
 
-fn read_plink2_dense_matrix_only_source_window_arrow(
+fn read_plink2_dense_matrix_only_source_window(
     pgen: &Path,
     psam: &Path,
     requested_samples: Option<&[String]>,
     window: VariantWindow,
     missing_policy: DenseMissingPolicy,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let decode_variant_ct = window
         .start
         .checked_add(window.len)
@@ -289,7 +285,7 @@ fn read_plink2_dense_matrix_only_source_window_arrow(
     let n_variants = window.len.min(header.variant_ct - window.start);
     if let Some(requested_samples) = requested_samples {
         let selection = select_samples_for_header(pgen, psam, Some(requested_samples), &header)?;
-        return decode_plink2_dense_matrix_only_source_window_arrow(
+        return decode_plink2_dense_matrix_only_source_window(
             pgen,
             &header,
             window,
@@ -305,7 +301,7 @@ fn read_plink2_dense_matrix_only_source_window_arrow(
     let source_indices = (0..n_samples).collect::<Vec<_>>();
     let diagnostics = matrix_only_source_window_diagnostics(n_samples, n_variants);
 
-    decode_plink2_dense_matrix_only_source_window_arrow(
+    decode_plink2_dense_matrix_only_source_window(
         pgen,
         &header,
         window,
@@ -317,14 +313,14 @@ fn read_plink2_dense_matrix_only_source_window_arrow(
     )
 }
 
-fn read_plink2_dense_matrix_only_genotype_filter_arrow(
+fn read_plink2_dense_matrix_only_genotype_filter(
     pgen: &Path,
     psam: &Path,
     requested_samples: Option<&[String]>,
     filter: &VariantFilter,
     window: VariantWindow,
     missing_policy: DenseMissingPolicy,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let mut decode_variant_ct = initial_genotype_filter_prefix_len(pgen, window)?;
     loop {
         let Plink2ReadContext {
@@ -352,7 +348,7 @@ fn read_plink2_dense_matrix_only_genotype_filter_arrow(
 }
 
 struct MatrixOnlyGenotypeFilterRead {
-    matrix: DenseGenotypeMatrixArrowVariants,
+    matrix: DenseGenotypeMatrix,
     window_satisfied: bool,
 }
 
@@ -405,7 +401,7 @@ fn decode_plink2_dense_matrix_only_genotype_filter(
     if output_variant_capacity == 0 {
         let mut diagnostics = selection.diagnostics;
         diagnostics.retained_variants = 0;
-        let matrix = DenseGenotypeMatrixArrowVariants::new_with_layout(
+        let matrix = DenseGenotypeMatrix::new_with_layout(
             n_samples,
             0,
             Vec::new(),
@@ -507,7 +503,7 @@ fn decode_plink2_dense_matrix_only_genotype_filter(
     );
     diagnostics.retained_variants = output_variant_count;
 
-    let matrix = DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let matrix = DenseGenotypeMatrix::new_with_layout(
         n_samples,
         output_variant_count,
         values,
@@ -526,7 +522,7 @@ fn decode_plink2_dense_matrix_only_genotype_filter(
     clippy::too_many_arguments,
     reason = "source-window path keeps decoded context and output diagnostics explicit"
 )]
-fn decode_plink2_dense_matrix_only_source_window_arrow(
+fn decode_plink2_dense_matrix_only_source_window(
     pgen: &Path,
     header: &PgenHeader,
     window: VariantWindow,
@@ -535,7 +531,7 @@ fn decode_plink2_dense_matrix_only_source_window_arrow(
     n_samples: usize,
     missing_policy: DenseMissingPolicy,
     mut diagnostics: genoio_core::DenseDiagnostics,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let mut file = open_pgen_payload(pgen)?;
     let mut decoder_state = PgenDecoderState::new(header.sample_ct, n_samples);
     let mut values = vec![0.0; n_samples * n_variants];
@@ -627,7 +623,7 @@ fn decode_plink2_dense_matrix_only_source_window_arrow(
     diagnostics.candidate_variants = n_variants;
     diagnostics.retained_variants = n_variants;
 
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         values,
@@ -642,7 +638,7 @@ fn decode_plink2_dense_matrix_only_source_window_arrow(
     clippy::too_many_arguments,
     reason = "source-window reader keeps companion files and metadata controls explicit"
 )]
-fn read_plink2_dense_source_window_arrow(
+fn read_plink2_dense_source_window(
     pgen: &Path,
     pvar: &Path,
     psam: &Path,
@@ -651,7 +647,7 @@ fn read_plink2_dense_source_window_arrow(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let decode_variant_ct = window.start.saturating_add(window.len);
     let Plink2ReadContext {
         header,
@@ -685,7 +681,7 @@ fn read_plink2_dense_source_window_arrow(
 
     let n_samples = selection.samples.len();
     let mut variants =
-        return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(window_variants.len()));
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(window_variants.len()));
     let mut values = vec![0.0; n_samples * n_variants];
     let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
     let mut batch_start = 0_usize;
@@ -806,12 +802,9 @@ fn read_plink2_dense_source_window_arrow(
     diagnostics.candidate_variants = n_variants;
     diagnostics.retained_variants = n_variants;
 
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &selection.samples,
-        return_samples,
-        false,
-    )?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         values,

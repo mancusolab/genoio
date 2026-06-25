@@ -6,9 +6,9 @@ use std::io::Write;
 mod common;
 
 use common::unique_dir;
-use common::vcf_arrow as genoio_io;
-use common::vcf_arrow::{
-    dense_values_sample_major_arrow as dense_values_sample_major, sparse_values_dense_arrow,
+use common::vcf_output as genoio_io;
+use common::vcf_output::{
+    dense_values_sample_major_output as dense_values_sample_major, sparse_values_dense_output,
     variant_a0, variant_a1, variant_ids, variants,
 };
 
@@ -215,7 +215,7 @@ fn phased_vcf_haplotype_sparse_reconstructs_dense_values() {
     assert_eq!(sparse.n_rows, 4);
     assert_eq!(sparse.n_cols, 2);
     assert_eq!(
-        sparse_values_dense_arrow(&sparse),
+        sparse_values_dense_output(&sparse),
         vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
     );
 }

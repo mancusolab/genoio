@@ -5,15 +5,15 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-pub(crate) mod arrow;
-pub(crate) mod bgen_arrow;
+pub(crate) mod bgen_output;
 #[allow(
     dead_code,
     reason = "shared integration-test helpers are compiled per test target"
 )]
 pub(crate) mod dense;
-pub(crate) mod plink_arrow;
-pub(crate) mod vcf_arrow;
+pub(crate) mod output;
+pub(crate) mod plink_output;
+pub(crate) mod vcf_output;
 
 pub struct TestDir {
     inner: TempDir,

@@ -3,15 +3,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use genoio_core::{SparseGenotypeMatrixArrowVariants, VariantWindow};
+use genoio_core::{SparseGenotypeMatrix, VariantWindow};
 
 mod common;
 
 use common::dense::assert_values_with_nan;
-use common::plink_arrow as genoio_io;
-use common::plink_arrow::{
-    dense_missing_sample_major_arrow as dense_missing_sample_major,
-    dense_values_sample_major_arrow as dense_values_sample_major, variant_alt_allele, variant_id,
+use common::plink_output as genoio_io;
+use common::plink_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major,
+    dense_values_sample_major_output as dense_values_sample_major, variant_alt_allele, variant_id,
     variant_ids, variant_ref_allele, variants,
 };
 use common::{unique_dir, TestDir};
@@ -184,7 +184,7 @@ fn expected_pgen_haplotype_dosages(left: f32, right: f32) -> (f32, f32) {
     ((total + delta) * 0.5, (total - delta) * 0.5)
 }
 
-fn csc_to_dense(sparse: &SparseGenotypeMatrixArrowVariants) -> Vec<f32> {
+fn csc_to_dense(sparse: &SparseGenotypeMatrix) -> Vec<f32> {
     let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
     for col in 0..sparse.n_cols {
         let start = usize::try_from(sparse.indptr[col]).expect("sparse pointer is nonnegative");
@@ -1976,7 +1976,7 @@ fn plink2_metadata_reads_psam_and_pvar() {
     let (pgen, pvar, psam) = write_plink2_fixture(&dir, &pgen_bytes);
 
     let metadata =
-        genoio_io::read_plink2_metadata_arrow(&pgen, &pvar, &psam).expect("metadata should decode");
+        genoio_io::read_plink2_metadata(&pgen, &pvar, &psam).expect("metadata should decode");
 
     assert_eq!(metadata.samples.len(), 3);
     assert_eq!(metadata.variants.len(), 3);
@@ -1996,8 +1996,8 @@ fn plink2_metadata_reads_zstd_compressed_pvar() {
     fs::write(&pvar_zst, compressed).expect("compressed pvar fixture should be written");
     fs::remove_file(&pvar).expect("uncompressed pvar fixture should be removed");
 
-    let metadata = genoio_io::read_plink2_metadata_arrow(&pgen, &pvar_zst, &psam)
-        .expect("metadata should decode");
+    let metadata =
+        genoio_io::read_plink2_metadata(&pgen, &pvar_zst, &psam).expect("metadata should decode");
 
     assert_eq!(metadata.variants.len(), 3);
     assert_eq!(variant_id(&metadata.variants, 0), "rs1");

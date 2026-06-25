@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, RegionPredicate, VariantMetadataArrowBuffers, VariantMetadataView};
+use genoio_core::{GenoioError, RegionPredicate, VariantMetadataBuffers, VariantMetadataView};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
@@ -65,7 +65,7 @@ pub(in crate::vcf) fn append_public_variant_metadata_from_noodles_variant_record
     path: &Path,
     header: &noodles::Header,
     record: &R,
-    variants: &mut VariantMetadataArrowBuffers,
+    variants: &mut VariantMetadataBuffers,
 ) -> Result<()>
 where
     R: noodles::variant::Record + ?Sized,
@@ -150,7 +150,7 @@ pub(super) fn text_variant_view_from_text_record<'a>(
 pub(super) fn append_public_variant_metadata_from_text_record(
     path: &Path,
     record: &noodles::Record,
-    variants: &mut VariantMetadataArrowBuffers,
+    variants: &mut VariantMetadataBuffers,
 ) -> Result<()> {
     let view = text_variant_view_from_text_record(path, record)?;
     append_public_variant_metadata_from_text_view(&view, variants)
@@ -158,7 +158,7 @@ pub(super) fn append_public_variant_metadata_from_text_record(
 
 pub(super) fn append_public_variant_metadata_from_text_view(
     variant: &TextVariantView<'_>,
-    variants: &mut VariantMetadataArrowBuffers,
+    variants: &mut VariantMetadataBuffers,
 ) -> Result<()> {
     // Metadata-only text reads share the same borrowed append path as matrix
     // reads so REF/ALT/id handling stays consistent.
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn text_variant_view_borrows_fields_for_filtering_and_arrow_append() {
+    fn text_variant_view_borrows_fields_for_filtering_and_metadata_append() {
         let record = read_text_record("chr1\t42\trs1;rs2\tA\tG,T\t30\tPASS\t.\tGT\t0/1\n");
         let view = text_variant_view_from_text_record(Path::new("fixture.vcf"), &record)
             .expect("view should borrow text record metadata");
@@ -296,10 +296,10 @@ mod tests {
             "right": {"op": "predicate", "name": "qual", "params": {"min": 20.0}}
         }))
         .expect("filter should parse");
-        let mut variants = VariantMetadataArrowBuffers::with_capacity(1);
+        let mut variants = VariantMetadataBuffers::with_capacity(1);
 
         append_public_variant_metadata_from_text_view(&view, &mut variants)
-            .expect("borrowed view should append to Arrow buffers");
+            .expect("borrowed view should append to metadata buffers");
 
         assert_eq!(filter.metadata_decision_view(&view), Some(true));
         assert!(skip_variant_for_region(

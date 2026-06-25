@@ -20,9 +20,9 @@ use noodles_vcf::{
 
 mod common;
 
-use common::plink_arrow as plink_io;
+use common::plink_output as plink_io;
 use common::unique_dir;
-use common::vcf_arrow::{variant_a0, variant_a1, variant_chrom, variant_ids};
+use common::vcf_output::{variant_a0, variant_a1, variant_chrom, variant_ids};
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -111,8 +111,7 @@ fn vcf_metadata_preserves_header_sample_and_variant_order() {
 ",
     );
 
-    let metadata =
-        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
+    let metadata = genoio_io::read_vcf_public_metadata(&path).expect("vcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -143,8 +142,7 @@ fn bcf_metadata_preserves_samples_variants_and_capabilities() {
     let path = dir.join("tiny.bcf");
     write_bcf_file(&path);
 
-    let metadata =
-        genoio_io::read_vcf_public_metadata_arrow(&path).expect("bcf metadata should parse");
+    let metadata = genoio_io::read_vcf_public_metadata(&path).expect("bcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -165,13 +163,12 @@ fn bcf_metadata_preserves_samples_variants_and_capabilities() {
 }
 
 #[test]
-fn bcf_public_metadata_arrow_preserves_samples_variants_and_capabilities() {
-    let dir = unique_dir("bcf-metadata-arrow");
+fn bcf_public_metadata_preserves_samples_variants_and_capabilities() {
+    let dir = unique_dir("bcf-metadata-output");
     let path = dir.join("tiny.bcf");
     write_bcf_file(&path);
 
-    let metadata =
-        genoio_io::read_vcf_public_metadata_arrow(&path).expect("bcf Arrow metadata should parse");
+    let metadata = genoio_io::read_vcf_public_metadata(&path).expect("bcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -203,8 +200,7 @@ fn vcf_haplotype_capability_requires_phased_genotype_evidence() {
 ",
     );
 
-    let metadata =
-        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
+    let metadata = genoio_io::read_vcf_public_metadata(&path).expect("vcf metadata should parse");
 
     assert!(metadata.capabilities.supports_geno);
     assert!(metadata.capabilities.supports_haplo);
@@ -226,8 +222,7 @@ fn vcf_haplotype_capability_is_detected_from_records_not_extension() {
 ",
     );
 
-    let metadata =
-        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
+    let metadata = genoio_io::read_vcf_public_metadata(&path).expect("vcf metadata should parse");
 
     assert!(metadata.capabilities.supports_geno);
     assert!(metadata.capabilities.supports_haplo);
@@ -248,8 +243,7 @@ fn compressed_vcf_metadata_uses_permissive_header_and_preserves_multiallelic_rec
 ",
     );
 
-    let metadata =
-        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
+    let metadata = genoio_io::read_vcf_public_metadata(&path).expect("vcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -289,8 +283,8 @@ F2 S3 0 0 0 2.0
 ",
     );
 
-    let metadata = plink_io::read_plink1_metadata_arrow(&bed, &bim, &fam)
-        .expect("plink1 metadata should parse");
+    let metadata =
+        plink_io::read_plink1_metadata(&bed, &bim, &fam).expect("plink1 metadata should parse");
 
     assert_eq!(
         metadata
@@ -325,9 +319,9 @@ fn plink1_metadata_rejects_malformed_fam_and_bim_lines() {
 
     write_file(&bim, "1 rs1 0 10 G A\n");
     write_file(&fam, "F1 S1 0 0 1\n");
-    assert!(plink_io::read_plink1_metadata_arrow(&bed, &bim, &fam).is_err());
+    assert!(plink_io::read_plink1_metadata(&bed, &bim, &fam).is_err());
 
     write_file(&bim, "1 rs1 0 10 G\n");
     write_file(&fam, "F1 S1 0 0 1 -9\n");
-    assert!(plink_io::read_plink1_metadata_arrow(&bed, &bim, &fam).is_err());
+    assert!(plink_io::read_plink1_metadata(&bed, &bim, &fam).is_err());
 }

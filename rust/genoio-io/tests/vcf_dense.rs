@@ -8,10 +8,10 @@ mod common;
 
 use common::dense::assert_values_with_nan;
 use common::unique_dir;
-use common::vcf_arrow as genoio_io;
-use common::vcf_arrow::{
-    dense_missing_sample_major_arrow as dense_missing_sample_major,
-    dense_values_sample_major_arrow as dense_values_sample_major, variant_ids, variants,
+use common::vcf_output as genoio_io;
+use common::vcf_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major,
+    dense_values_sample_major_output as dense_values_sample_major, variant_ids, variants,
 };
 
 fn write_file(path: &Path, contents: &str) {
@@ -535,41 +535,13 @@ fn vcf_dense_marks_missing_gt_calls() {
 
 #[test]
 fn vcf_dense_contract_validates_shape_and_metadata_lengths() {
-    let sample = genoio_core::SampleRecord {
-        fid: None,
-        iid: "S1".to_string(),
-        father: None,
-        mother: None,
-        sex: None,
-        phenotype: None,
-        source_sample_index: None,
-        haplotype_index: None,
-    };
-    let variant = genoio_core::VariantRecord {
-        chrom: "1".to_string(),
-        pos: 10,
-        id: "rs1".to_string(),
-        a0: "A".to_string(),
-        a1: "G".to_string(),
-        ref_allele: Some("A".to_string()),
-        alt_allele: Some("G".to_string()),
-        source_a0: "A".to_string(),
-        source_a1: "G".to_string(),
-        flipped: false,
-        qual: None,
-        af: None,
-        maf: None,
-        mac: None,
-        missing_rate: None,
-        n_called: None,
-    };
-
-    let result = genoio_core::DenseGenotypeMatrix::new(
+    let result = genoio_core::DenseGenotypeMatrix::new_with_layout(
         1,
         2,
         vec![0.0],
-        vec![sample],
-        vec![variant],
+        genoio_core::DenseLayout::SampleMajor,
+        None,
+        None,
         genoio_core::DenseDiagnostics::default(),
     );
 

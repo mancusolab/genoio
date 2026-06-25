@@ -8,15 +8,15 @@ const PGEN_DOSAGE_TOLERANCE: f32 = 2.0 / 32768.0;
 mod common;
 
 use common::dense::assert_values_with_nan;
-use common::plink_arrow as plink_io;
-use common::plink_arrow::{
-    dense_missing_sample_major_arrow as dense_missing_sample_major_plink,
+use common::plink_output as plink_io;
+use common::plink_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major_plink,
     variant_ids as plink_variant_ids, variants as plink_variants,
 };
 use common::unique_dir;
-use common::vcf_arrow as genoio_io;
-use common::vcf_arrow::{
-    dense_missing_sample_major_arrow as dense_missing_sample_major_vcf, variant_id, variants,
+use common::vcf_output as genoio_io;
+use common::vcf_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major_vcf, variant_id, variants,
 };
 
 fn write_vcf(path: &Path) {

@@ -9,9 +9,8 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
-    GenotypeFilterPlan, PartialFilterDecision, SampleMetadataArrowBuffers,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
-    VariantWindow,
+    GenotypeFilterPlan, PartialFilterDecision, SampleMetadataBuffers, SparseGenotypeMatrix,
+    VariantFilter, VariantMetadataBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -25,7 +24,7 @@ use super::pgen::{
 };
 use super::require_genotype_decision_filter;
 use super::source::{
-    empty_sparse_arrow_for_selection, require_pvar, variant_output_capacity, Plink2ReadContext,
+    empty_sparse_output_for_selection, require_pvar, variant_output_capacity, Plink2ReadContext,
 };
 
 /// Source-window row that may omit metadata for matrix-only reads.
@@ -74,9 +73,9 @@ fn flip_values_to_minor_allele_without_metadata(values: &mut [f32]) {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Arrow facade mirrors sparse read options plus metadata return choices"
+    reason = "output facade mirrors sparse read options plus metadata return choices"
 )]
-pub fn read_plink2_sparse_windowed_with_arrow_variants(
+pub fn read_plink2_sparse_windowed(
     pgen: &Path,
     pvar: &Path,
     psam: &Path,
@@ -85,11 +84,11 @@ pub fn read_plink2_sparse_windowed_with_arrow_variants(
     variant_window: Option<VariantWindow>,
     return_samples: bool,
     return_variants: bool,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     // See the dense fast path: unfiltered windows can be interpreted directly
     // in source coordinates, but filtered windows cannot.
     if let (None, Some(window)) = (variant_filter, variant_window) {
-        return read_plink2_sparse_source_window_arrow(
+        return read_plink2_sparse_source_window(
             pgen,
             pvar,
             psam,
@@ -108,7 +107,7 @@ pub fn read_plink2_sparse_windowed_with_arrow_variants(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         require_pvar(pvar)?;
-        return empty_sparse_arrow_for_selection(selection, return_samples, return_variants);
+        return empty_sparse_output_for_selection(selection, return_samples, return_variants);
     }
     let mut pvar_reader = PvarRecordReader::new(pvar)?;
     let mut file = open_pgen_payload(pgen)?;
@@ -120,8 +119,8 @@ pub fn read_plink2_sparse_windowed_with_arrow_variants(
     indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut output_variant_count = 0_usize;
     let mut retention = RetainedVariantState::new(variant_window);
     let mut stopped_after_window = false;
@@ -218,12 +217,9 @@ pub fn read_plink2_sparse_windowed_with_arrow_variants(
 
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &selection.samples,
-        return_samples,
-        false,
-    )?;
-    SparseGenotypeMatrixArrowVariants::new(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
+    SparseGenotypeMatrix::new(
         n_samples,
         n_variants,
         indptr,
@@ -235,7 +231,7 @@ pub fn read_plink2_sparse_windowed_with_arrow_variants(
     )
 }
 
-fn read_plink2_sparse_source_window_arrow(
+fn read_plink2_sparse_source_window(
     pgen: &Path,
     pvar: &Path,
     psam: &Path,
@@ -243,7 +239,7 @@ fn read_plink2_sparse_source_window_arrow(
     window: VariantWindow,
     return_samples: bool,
     return_variants: bool,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     let decode_variant_ct = window.start.saturating_add(window.len);
     let Plink2ReadContext {
         header,
@@ -281,8 +277,8 @@ fn read_plink2_sparse_source_window_arrow(
     indptr.push(0);
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
 
     match header.layout {
         PgenLayout::FixedWidth
@@ -366,12 +362,9 @@ fn read_plink2_sparse_source_window_arrow(
     let n_variants = indptr.len().saturating_sub(1);
     diagnostics.candidate_variants = n_variants;
     diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &selection.samples,
-        return_samples,
-        false,
-    )?;
-    SparseGenotypeMatrixArrowVariants::new(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
+    SparseGenotypeMatrix::new(
         n_samples,
         n_variants,
         indptr,

@@ -65,7 +65,7 @@ fn run() -> Result<(), String> {
         let start = Instant::now();
         let summary = match args.scenario {
             Scenario::Dense => {
-                let matrix = genoio_io::read_vcf_dense_windowed_with_threads_and_arrow_variants(
+                let matrix = genoio_io::read_vcf_dense_windowed_with_threads(
                     &args.path,
                     args.samples.as_deref(),
                     filter_ref,
@@ -79,22 +79,21 @@ fn run() -> Result<(), String> {
                 dense_profile_summary(matrix.n_samples, matrix.n_variants, &matrix.values)
             }
             Scenario::Dosage => {
-                let matrix =
-                    genoio_io::read_vcf_dosage_dense_windowed_with_threads_and_arrow_variants(
-                        &args.path,
-                        args.samples.as_deref(),
-                        filter_ref,
-                        window,
-                        DenseMissingPolicy::Nan,
-                        false,
-                        false,
-                        args.threads,
-                    )
-                    .map_err(|error| format!("failed to read VCF dosage: {error}"))?;
+                let matrix = genoio_io::read_vcf_dosage_dense_windowed_with_threads(
+                    &args.path,
+                    args.samples.as_deref(),
+                    filter_ref,
+                    window,
+                    DenseMissingPolicy::Nan,
+                    false,
+                    false,
+                    args.threads,
+                )
+                .map_err(|error| format!("failed to read VCF dosage: {error}"))?;
                 dense_profile_summary(matrix.n_samples, matrix.n_variants, &matrix.values)
             }
             Scenario::Sparse => {
-                let matrix = genoio_io::read_vcf_sparse_windowed_with_threads_and_arrow_variants(
+                let matrix = genoio_io::read_vcf_sparse_windowed_with_threads(
                     &args.path,
                     args.samples.as_deref(),
                     filter_ref,
@@ -112,32 +111,30 @@ fn run() -> Result<(), String> {
                 }
             }
             Scenario::HaploDense => {
-                let matrix =
-                    genoio_io::read_vcf_haplotypes_dense_windowed_with_threads_and_arrow_variants(
-                        &args.path,
-                        args.samples.as_deref(),
-                        filter_ref,
-                        window,
-                        DenseMissingPolicy::Nan,
-                        false,
-                        false,
-                        args.threads,
-                    )
-                    .map_err(|error| format!("failed to read dense haplotype VCF: {error}"))?;
+                let matrix = genoio_io::read_vcf_haplotypes_dense_windowed_with_threads(
+                    &args.path,
+                    args.samples.as_deref(),
+                    filter_ref,
+                    window,
+                    DenseMissingPolicy::Nan,
+                    false,
+                    false,
+                    args.threads,
+                )
+                .map_err(|error| format!("failed to read dense haplotype VCF: {error}"))?;
                 dense_profile_summary(matrix.n_samples, matrix.n_variants, &matrix.values)
             }
             Scenario::HaploSparse => {
-                let matrix =
-                    genoio_io::read_vcf_haplotypes_sparse_windowed_with_threads_and_arrow_variants(
-                        &args.path,
-                        args.samples.as_deref(),
-                        filter_ref,
-                        window,
-                        false,
-                        false,
-                        args.threads,
-                    )
-                    .map_err(|error| format!("failed to read sparse haplotype VCF: {error}"))?;
+                let matrix = genoio_io::read_vcf_haplotypes_sparse_windowed_with_threads(
+                    &args.path,
+                    args.samples.as_deref(),
+                    filter_ref,
+                    window,
+                    false,
+                    false,
+                    args.threads,
+                )
+                .map_err(|error| format!("failed to read sparse haplotype VCF: {error}"))?;
                 ProfileSummary {
                     rows: matrix.n_rows,
                     cols: matrix.n_cols,

@@ -38,8 +38,8 @@ use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, StructArray};
 use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use genoio_core::{
-    DenseLayout, DenseMissingPolicy, GenoioError, MetadataArrowOutput, NullableStringColumnBuffers,
-    SampleMetadataArrowBuffers, StringColumnBuffers, VariantMetadataArrowBuffers,
+    DenseLayout, DenseMissingPolicy, GenoioError, MetadataOutput, NullableStringColumnBuffers,
+    SampleMetadataBuffers, StringColumnBuffers, VariantMetadataBuffers,
 };
 use numpy::{Element, PyArray1};
 use pyo3::exceptions::PyException;
@@ -519,19 +519,17 @@ fn validate_read_support_impl(
     }
 }
 
-fn read_source_metadata(source: &SourceMembers) -> Result<MetadataArrowOutput, GenoioError> {
+fn read_source_metadata(source: &SourceMembers) -> Result<MetadataOutput, GenoioError> {
     match source {
         SourceMembers::Vcf { path } | SourceMembers::Bcf { path } => {
-            genoio_io::read_vcf_public_metadata_arrow(path)
+            genoio_io::read_vcf_public_metadata(path)
         }
-        SourceMembers::Plink1 { bed, bim, fam } => {
-            genoio_io::read_plink1_metadata_arrow(bed, bim, fam)
-        }
+        SourceMembers::Plink1 { bed, bim, fam } => genoio_io::read_plink1_metadata(bed, bim, fam),
         SourceMembers::Plink2 { pgen, pvar, psam } => {
-            genoio_io::read_plink2_metadata_arrow(pgen, pvar, psam)
+            genoio_io::read_plink2_metadata(pgen, pvar, psam)
         }
         SourceMembers::Bgen { bgen, sample } => {
-            genoio_io::read_bgen_metadata_arrow(bgen, sample.as_deref())
+            genoio_io::read_bgen_metadata(bgen, sample.as_deref())
         }
     }
 }
@@ -540,14 +538,14 @@ fn read_dense_matrix_for_py(
     source: &SourceMembers,
     kind: MatrixKind,
     options: &ReadOptions,
-) -> Result<genoio_core::DenseGenotypeMatrixArrowVariants, GenoioError> {
+) -> Result<genoio_core::DenseGenotypeMatrix, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, false)?;
     match (source, kind, options.dosage) {
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_vcf_dense_windowed(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
@@ -560,7 +558,7 @@ fn read_dense_matrix_for_py(
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Genotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_vcf_dosage_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_vcf_dosage_dense_windowed(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
@@ -573,7 +571,7 @@ fn read_dense_matrix_for_py(
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_haplotypes_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_vcf_haplotypes_dense_windowed(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
@@ -583,7 +581,7 @@ fn read_dense_matrix_for_py(
             options.return_variants,
         ),
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_plink1_dense_windowed_with_arrow_variants(
+            genoio_io::read_plink1_dense_windowed(
                 bed,
                 bim,
                 fam,
@@ -599,7 +597,7 @@ fn read_dense_matrix_for_py(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_plink2_dense_windowed(
             pgen,
             pvar,
             psam,
@@ -614,7 +612,7 @@ fn read_dense_matrix_for_py(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_dosage_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_plink2_dosage_dense_windowed(
             pgen,
             pvar,
             psam,
@@ -629,7 +627,7 @@ fn read_dense_matrix_for_py(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_haplotypes_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_plink2_haplotypes_dense_windowed(
             pgen,
             pvar,
             psam,
@@ -644,7 +642,7 @@ fn read_dense_matrix_for_py(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Dosage,
-        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
+        ) => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
             pgen,
             pvar,
             psam,
@@ -656,7 +654,7 @@ fn read_dense_matrix_for_py(
             options.return_variants,
         ),
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Genotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_dosage_dense_windowed_with_arrow_variants(
+            genoio_io::read_bgen_dosage_dense_windowed(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
@@ -668,7 +666,7 @@ fn read_dense_matrix_for_py(
             )
         }
         (SourceMembers::Bgen { bgen, sample }, MatrixKind::Haplotype, DosageSource::Dosage) => {
-            genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
+            genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
                 bgen,
                 sample.as_deref(),
                 options.requested_samples.as_deref(),
@@ -689,14 +687,14 @@ fn read_sparse_matrix_for_py(
     source: &SourceMembers,
     kind: MatrixKind,
     options: &ReadOptions,
-) -> Result<genoio_core::SparseGenotypeMatrixArrowVariants, GenoioError> {
+) -> Result<genoio_core::SparseGenotypeMatrix, GenoioError> {
     validate_read_support_impl(source.format(), kind, options.dosage, true)?;
     match (source, kind, options.dosage) {
         (
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_sparse_windowed_with_arrow_variants(
+        ) => genoio_io::read_vcf_sparse_windowed(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
@@ -708,7 +706,7 @@ fn read_sparse_matrix_for_py(
             SourceMembers::Vcf { path } | SourceMembers::Bcf { path },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_vcf_haplotypes_sparse_windowed_with_arrow_variants(
+        ) => genoio_io::read_vcf_haplotypes_sparse_windowed(
             path,
             options.requested_samples.as_deref(),
             options.variant_filter.as_ref(),
@@ -717,7 +715,7 @@ fn read_sparse_matrix_for_py(
             options.return_variants,
         ),
         (SourceMembers::Plink1 { bed, bim, fam }, MatrixKind::Genotype, DosageSource::Hardcall) => {
-            genoio_io::read_plink1_sparse_windowed_with_arrow_variants(
+            genoio_io::read_plink1_sparse_windowed(
                 bed,
                 bim,
                 fam,
@@ -732,7 +730,7 @@ fn read_sparse_matrix_for_py(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Genotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_sparse_windowed_with_arrow_variants(
+        ) => genoio_io::read_plink2_sparse_windowed(
             pgen,
             pvar,
             psam,
@@ -746,7 +744,7 @@ fn read_sparse_matrix_for_py(
             SourceMembers::Plink2 { pgen, pvar, psam },
             MatrixKind::Haplotype,
             DosageSource::Hardcall,
-        ) => genoio_io::read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
+        ) => genoio_io::read_plink2_haplotypes_sparse_windowed(
             pgen,
             pvar,
             psam,
@@ -939,8 +937,8 @@ fn bool_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
     value.extract::<bool>()
 }
 
-fn metadata_to_py(py: Python<'_>, output: MetadataArrowOutput) -> PyResult<Py<PyDict>> {
-    let MetadataArrowOutput {
+fn metadata_to_py(py: Python<'_>, output: MetadataOutput) -> PyResult<Py<PyDict>> {
+    let MetadataOutput {
         samples,
         variants,
         capabilities,
@@ -965,12 +963,12 @@ fn source_capabilities_to_py(
 
 fn dense_matrix_to_py(
     py: Python<'_>,
-    output: genoio_core::DenseGenotypeMatrixArrowVariants,
+    output: genoio_core::DenseGenotypeMatrix,
     return_samples: bool,
     return_variants: bool,
     _include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
-    let genoio_core::DenseGenotypeMatrixArrowVariants {
+    let genoio_core::DenseGenotypeMatrix {
         n_samples,
         n_variants,
         values,
@@ -1025,7 +1023,7 @@ fn dense_layout_to_py(layout: DenseLayout) -> &'static str {
 
 fn sparse_matrix_to_py(
     py: Python<'_>,
-    output: genoio_core::SparseGenotypeMatrixArrowVariants,
+    output: genoio_core::SparseGenotypeMatrix,
     return_samples: bool,
     return_variants: bool,
     _include_haplotype_sample_columns: bool,
@@ -1082,7 +1080,7 @@ where
 
 fn sample_arrow_buffers_to_py(
     py: Python<'_>,
-    samples: SampleMetadataArrowBuffers,
+    samples: SampleMetadataBuffers,
 ) -> PyResult<Py<ArrowMetadataFrame>> {
     Py::new(
         py,
@@ -1094,7 +1092,7 @@ fn sample_arrow_buffers_to_py(
 
 fn variant_arrow_buffers_to_py(
     py: Python<'_>,
-    variants: VariantMetadataArrowBuffers,
+    variants: VariantMetadataBuffers,
 ) -> PyResult<Py<ArrowMetadataFrame>> {
     Py::new(
         py,
@@ -1104,7 +1102,7 @@ fn variant_arrow_buffers_to_py(
     )
 }
 
-fn sample_arrow_buffers_to_batch(samples: SampleMetadataArrowBuffers) -> PyResult<RecordBatch> {
+fn sample_arrow_buffers_to_batch(samples: SampleMetadataBuffers) -> PyResult<RecordBatch> {
     // Consume Rust-owned column buffers directly into Arrow arrays. This is the
     // phase-2 boundary: no SampleRecord rows are rebuilt on the Python side.
     let mut fields = vec![
@@ -1138,7 +1136,7 @@ fn sample_arrow_buffers_to_batch(samples: SampleMetadataArrowBuffers) -> PyResul
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(arrow_error_to_py)
 }
 
-fn variant_arrow_buffers_to_batch(variants: VariantMetadataArrowBuffers) -> PyResult<RecordBatch> {
+fn variant_arrow_buffers_to_batch(variants: VariantMetadataBuffers) -> PyResult<RecordBatch> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("pos", DataType::Int64, false),

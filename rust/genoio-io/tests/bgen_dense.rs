@@ -12,9 +12,9 @@ use serde_json::json;
 
 mod common;
 
-use common::bgen_arrow as genoio_io;
-use common::bgen_arrow::{
-    dense_missing_sample_major_arrow as dense_missing_sample_major, string_at, variant_a0,
+use common::bgen_output as genoio_io;
+use common::bgen_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major, string_at, variant_a0,
     variant_a1, variant_alt_allele, variant_chrom, variant_id, variant_ids, variant_ref_allele,
     variants,
 };
@@ -2116,7 +2116,7 @@ fn bgen_metadata_reads_header_with_free_data_before_flags() {
         .expect("probability block should write");
     fs::write(&bgen, contents).expect("bgen fixture should be written");
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("bgen metadata with header free data should parse");
 
     assert_eq!(
@@ -2136,8 +2136,7 @@ fn bgen_metadata_reads_embedded_sample_ids_and_variant_rows() {
     let bgen = dir.join("tiny.bgen");
     write_two_sample_two_variant_bgen(&bgen);
 
-    let metadata =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect("bgen metadata should parse");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None).expect("bgen metadata should parse");
 
     assert_eq!(
         metadata
@@ -2186,7 +2185,7 @@ fn bgen_metadata_reads_companion_sample_ids_when_not_embedded() {
     write_sample_file(&sample, &["sample_a sample_a 0", "sample_b sample_b 0"]);
 
     let metadata =
-        genoio_io::read_bgen_metadata_arrow(&bgen, Some(&sample)).expect("metadata should parse");
+        genoio_io::read_bgen_metadata(&bgen, Some(&sample)).expect("metadata should parse");
 
     assert_eq!(
         metadata
@@ -2207,7 +2206,7 @@ fn bgen_metadata_rejects_companion_sample_count_mismatch() {
     write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
     write_sample_file(&sample, &["sample_a sample_a 0"]);
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, Some(&sample))
+    let error = genoio_io::read_bgen_metadata(&bgen, Some(&sample))
         .expect_err("sample count mismatch should fail");
 
     assert_genoio_error_contains(error, "sample count");
@@ -2221,7 +2220,7 @@ fn bgen_metadata_rejects_duplicate_companion_sample_ids() {
     write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
     write_sample_file(&sample, &["sample_a sample_a 0", "sample_a sample_a 0"]);
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, Some(&sample))
+    let error = genoio_io::read_bgen_metadata(&bgen, Some(&sample))
         .expect_err("duplicate sample ids should fail");
 
     assert_genoio_error_contains(error, "duplicate sample identifier");
@@ -2233,8 +2232,8 @@ fn bgen_metadata_rejects_missing_companion_path_when_sample_ids_not_embedded() {
     let bgen = dir.join("tiny.bgen");
     write_two_sample_two_variant_bgen_without_sample_ids(&bgen);
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("missing sample IDs should fail");
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("missing sample IDs should fail");
 
     assert_genoio_error_contains(error, "companion sample path");
 }
@@ -2252,8 +2251,7 @@ fn bgen_metadata_rejects_wrong_magic_bytes() {
     contents.extend_from_slice(&FLAG_LAYOUT2.to_le_bytes());
     fs::write(&bgen, contents).expect("bgen fixture should be written");
 
-    let error =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect_err("wrong magic should fail");
+    let error = genoio_io::read_bgen_metadata(&bgen, None).expect_err("wrong magic should fail");
 
     assert_genoio_error_contains(error, "magic");
 }
@@ -2272,7 +2270,7 @@ fn bgen_metadata_rejects_header_length_greater_than_offset() {
     contents.extend_from_slice(&FLAG_LAYOUT2.to_le_bytes());
     fs::write(&bgen, contents).expect("bgen fixture should be written");
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("header length greater than offset should fail");
 
     assert_genoio_error_contains(error, "header length exceeds variant data offset");
@@ -2289,7 +2287,7 @@ fn bgen_metadata_rejects_truncated_sample_identifier_block() {
     contents.extend_from_slice(&4_u16.to_le_bytes());
     fs::write(&bgen, contents).expect("bgen fixture should be written");
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("truncated sample identifier block should fail");
 
     assert_genoio_error_contains(error, "failed to fill whole buffer");
@@ -2308,7 +2306,7 @@ fn bgen_metadata_rejects_sample_identifier_block_declared_shorter_than_content()
     contents.extend_from_slice(&sample_block);
     fs::write(&bgen, contents).expect("bgen fixture should be written");
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("short declared sample block length should fail");
 
     assert_genoio_error_contains(error, "failed to fill whole buffer");
@@ -2333,7 +2331,7 @@ fn bgen_metadata_rejects_sample_identifier_block_declared_longer_than_content() 
         .expect("probability block should write");
     fs::write(&bgen, contents).expect("bgen fixture should be written");
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("long declared sample block length should fail");
 
     assert_genoio_error_contains(error, "sample identifiers block length");
@@ -2352,7 +2350,7 @@ fn bgen_metadata_rejects_truncated_variant_identifying_data() {
             .expect("partial variant id should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("truncated variant identifying data should fail");
 
     assert_genoio_error_contains(error, "failed to fill whole buffer");
@@ -2369,7 +2367,7 @@ fn bgen_metadata_uses_variant_id_when_rsid_is_empty() {
             .expect("probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None).expect("metadata should parse");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None).expect("metadata should parse");
 
     assert_eq!(variant_id(&metadata.variants, 0), "var1");
 }
@@ -2390,7 +2388,7 @@ fn bgen_metadata_skips_compressed_probability_blocks_before_next_variant() {
     });
 
     let metadata =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect("compressed metadata should parse");
+        genoio_io::read_bgen_metadata(&bgen, None).expect("compressed metadata should parse");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1", "rs2"]);
 }
@@ -2406,8 +2404,8 @@ fn bgen_metadata_rejects_multiallelic_variants() {
             .expect("probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("multiallelic BGEN should fail");
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("multiallelic BGEN should fail");
 
     assert_genoio_error_contains(error, "multiallelic");
 }
@@ -2434,7 +2432,7 @@ fn bgen_metadata_skips_invalid_phase_value_probability_blocks() {
         .expect("invalid-phase probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2490,7 +2488,7 @@ fn bgen_metadata_skips_variable_ploidy_layout2_probability_blocks() {
         .expect("variable-ploidy probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2518,7 +2516,7 @@ fn bgen_metadata_skips_non_diploid_sample_ploidy_bytes() {
         .expect("non-diploid probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2535,8 +2533,7 @@ fn bgen_metadata_allows_missing_diploid_sample_ploidy_bytes() {
             .expect("missing probability block should write");
     });
 
-    let metadata =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect("missing calls should parse");
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None).expect("missing calls should parse");
 
     assert_eq!(metadata.variants.len(), 1);
 }
@@ -2563,7 +2560,7 @@ fn bgen_metadata_skips_zero_bit_depth_probability_blocks() {
         .expect("zero-bit-depth probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2591,7 +2588,7 @@ fn bgen_metadata_skips_too_large_bit_depth_probability_blocks() {
         .expect("too-large-bit-depth probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2619,7 +2616,7 @@ fn bgen_metadata_skips_truncated_packed_probability_bytes() {
         .expect("truncated probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2636,7 +2633,7 @@ fn bgen_metadata_skips_zlib_decompressed_length_mismatch() {
             .expect("compressed probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2665,7 +2662,7 @@ fn bgen_metadata_skips_probability_block_sample_count_mismatch() {
         .expect("sample-count-mismatched probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip probability payload bytes");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2695,7 +2692,7 @@ fn bgen_metadata_skips_zlib_compressed_invalid_phase_value_probability_blocks() 
         .expect("compressed invalid-phase probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2725,7 +2722,7 @@ fn bgen_metadata_skips_zlib_compressed_variable_ploidy_probability_blocks() {
         .expect("compressed variable-ploidy probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2755,7 +2752,7 @@ fn bgen_metadata_skips_zlib_compressed_non_diploid_sample_ploidy_bytes() {
         .expect("compressed non-diploid probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2785,7 +2782,7 @@ fn bgen_metadata_skips_zstd_compressed_invalid_phase_value_probability_blocks() 
         .expect("compressed invalid-phase probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2815,7 +2812,7 @@ fn bgen_metadata_skips_zstd_compressed_variable_ploidy_probability_blocks() {
         .expect("compressed variable-ploidy probability block should write");
     });
 
-    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let metadata = genoio_io::read_bgen_metadata(&bgen, None)
         .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
     assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
@@ -2833,7 +2830,7 @@ fn bgen_metadata_rejects_truncated_compressed_probability_payload_bytes() {
             .expect("short C should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+    let error = genoio_io::read_bgen_metadata(&bgen, None)
         .expect_err("declared compressed payload bytes should be present");
 
     assert_genoio_error_contains(error, "failed to read source");
@@ -2845,8 +2842,8 @@ fn bgen_metadata_rejects_unsupported_compression_flag() {
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_RESERVED_COMPRESSION, 0, |_| {});
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("reserved compression should fail");
+    let error =
+        genoio_io::read_bgen_metadata(&bgen, None).expect_err("reserved compression should fail");
 
     assert_genoio_error_contains(error, "compression");
 }

@@ -26,8 +26,7 @@ pub mod sparse;
 pub use capabilities::SourceCapabilities;
 pub use dense::{
     select_samples_source_order, transpose_variant_major_to_sample_major, DenseDiagnostics,
-    DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, DenseSampleSelection,
 };
 pub use error::GenoioError;
 pub use filter::{
@@ -37,15 +36,14 @@ pub use filter::{
     VariantWindow,
 };
 pub use metadata::{
-    MetadataArrowOutput, MetadataOutput, NullableStringColumnBuffers, SampleMetadataArrowBuffers,
-    SampleMetadataColumns, SampleRecord, StringColumnBuffers, VariantMetadataArrowBuffers,
-    VariantMetadataColumns, VariantRecord,
+    MetadataOutput, NullableStringColumnBuffers, SampleMetadataBuffers, SampleRecord,
+    StringColumnBuffers, VariantMetadataBuffers, VariantRecord,
 };
 pub use sparse::{
     append_sparse_column, append_sparse_value, finish_sparse_column,
     flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,
-    should_flip_haplotype_to_minor_allele, SparseGenotypeMatrix, SparseGenotypeMatrixArrowVariants,
+    should_flip_haplotype_to_minor_allele, SparseGenotypeMatrix,
 };
 
 /// Python package and Rust workspace package name.

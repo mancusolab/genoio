@@ -8,10 +8,10 @@ use genoio_core::{DenseLayout, VariantWindow};
 mod common;
 
 use common::dense::assert_values_with_nan;
-use common::plink_arrow as plink_io;
+use common::plink_output as plink_io;
 use common::unique_dir;
-use common::vcf_arrow as genoio_io;
-use common::vcf_arrow::{variant_ids, variants};
+use common::vcf_output as genoio_io;
+use common::vcf_output::{variant_ids, variants};
 
 fn write_text(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");

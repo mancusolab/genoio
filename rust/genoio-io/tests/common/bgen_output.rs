@@ -3,15 +3,13 @@
 
 use std::path::Path;
 
-use genoio_core::{
-    DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, VariantFilter, VariantWindow,
-};
+use genoio_core::{DenseGenotypeMatrix, DenseMissingPolicy, VariantFilter, VariantWindow};
 
-pub(crate) use super::arrow::{
-    dense_missing_sample_major_arrow, string_at, variant_a0, variant_a1, variant_alt_allele,
+pub(crate) use super::output::{
+    dense_missing_sample_major_output, string_at, variant_a0, variant_a1, variant_alt_allele,
     variant_chrom, variant_id, variant_ids, variant_ref_allele, variants,
 };
-pub(crate) use ::genoio_io::{read_bgen_metadata_arrow, Result};
+pub(crate) use ::genoio_io::{read_bgen_metadata, Result};
 
 pub(crate) fn read_bgen_dosage_dense_windowed(
     bgen: &Path,
@@ -20,8 +18,8 @@ pub(crate) fn read_bgen_dosage_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
-    ::genoio_io::read_bgen_dosage_dense_windowed_with_arrow_variants(
+) -> Result<DenseGenotypeMatrix> {
+    ::genoio_io::read_bgen_dosage_dense_windowed(
         bgen,
         sample,
         requested_samples,
@@ -40,8 +38,8 @@ pub(crate) fn read_bgen_haplotypes_dosage_dense_windowed(
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     matrix_only: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
-    ::genoio_io::read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
+) -> Result<DenseGenotypeMatrix> {
+    ::genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
         bgen,
         sample,
         requested_samples,

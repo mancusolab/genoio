@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use genoio_core::{
-    GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+    GenoioError, SampleRecord, VariantMetadataBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -113,11 +113,11 @@ fn parse_psam_line(
     })
 }
 
-pub(super) fn parse_pvar_arrow(path: &Path) -> Result<VariantMetadataArrowBuffers> {
-    let mut variants = VariantMetadataArrowBuffers::with_capacity(0);
+pub(super) fn parse_pvar_metadata(path: &Path) -> Result<VariantMetadataBuffers> {
+    let mut variants = VariantMetadataBuffers::with_capacity(0);
     let mut reader = PvarLineReader::new(path)?;
     while let Some(line) = reader.next_line()? {
-        append_pvar_arrow_line(
+        append_pvar_metadata_line(
             path,
             line.line_number,
             &line.columns,
@@ -162,12 +162,12 @@ pub(super) fn parse_pvar_source_window(
     Ok(records)
 }
 
-fn append_pvar_arrow_line(
+fn append_pvar_metadata_line(
     path: &Path,
     line_number: usize,
     columns: &PvarColumns,
     line: &str,
-    variants: &mut VariantMetadataArrowBuffers,
+    variants: &mut VariantMetadataBuffers,
 ) -> Result<()> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     let required = columns

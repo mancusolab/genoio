@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::plink_arrow as plink_io;
+use common::plink_output as plink_io;
 use common::unique_dir;
-use common::vcf_arrow as genoio_io;
-use common::vcf_arrow::{
-    dense_values_sample_major_arrow, sparse_values_dense_arrow, variant_a0, variant_a1,
+use common::vcf_output as genoio_io;
+use common::vcf_output::{
+    dense_values_sample_major_output, sparse_values_dense_output, variant_a0, variant_a1,
     variant_ids, variants,
 };
 
@@ -81,8 +81,8 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
     assert_eq!(sparse.n_rows, dense.n_samples);
     assert_eq!(sparse.n_cols, dense.n_variants);
     assert_eq!(
-        sparse_values_dense_arrow(&sparse),
-        dense_values_sample_major_arrow(&dense)
+        sparse_values_dense_output(&sparse),
+        dense_values_sample_major_output(&dense)
     );
 }
 
@@ -148,8 +148,8 @@ fn plink1_sparse_reconstructs_dense_when_no_missing_calls() {
         .expect("sparse plink should decode");
 
     assert_eq!(
-        sparse_values_dense_arrow(&sparse),
-        dense_values_sample_major_arrow(&dense)
+        sparse_values_dense_output(&sparse),
+        dense_values_sample_major_output(&dense)
     );
 }
 
@@ -185,7 +185,7 @@ fn sparse_reads_flip_common_minor_allele_columns_by_default() {
     let sparse = genoio_io::read_vcf_sparse(&path, None, None).expect("sparse vcf should decode");
 
     assert_eq!(dense.values, vec![2.0, 2.0, 1.0]);
-    assert_eq!(sparse_values_dense_arrow(&sparse), vec![0.0, 0.0, 1.0]);
+    assert_eq!(sparse_values_dense_output(&sparse), vec![0.0, 0.0, 1.0]);
     let sparse_variants = variants(&sparse.variants);
     assert!(sparse_variants.flipped[0]);
     assert_eq!(variant_a0(sparse_variants, 0), "G");

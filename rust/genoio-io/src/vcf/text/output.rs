@@ -6,8 +6,8 @@
 //! transpose.
 
 use genoio_core::{
-    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, GenoioError,
-    SampleMetadataArrowBuffers, VariantFilter, VariantMetadataArrowBuffers,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, GenoioError, SampleMetadataBuffers,
+    VariantFilter, VariantMetadataBuffers,
 };
 
 use crate::error::Result;
@@ -155,13 +155,13 @@ impl TextDenseOutput {
         }
     }
 
-    pub(super) fn finish_arrow_variants(
+    pub(super) fn finish(
         self,
         n_variants: usize,
-        samples: Option<SampleMetadataArrowBuffers>,
-        variants: Option<VariantMetadataArrowBuffers>,
+        samples: Option<SampleMetadataBuffers>,
+        variants: Option<VariantMetadataBuffers>,
         diagnostics: genoio_core::DenseDiagnostics,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+    ) -> Result<DenseGenotypeMatrix> {
         match self {
             Self::SampleMajor {
                 n_samples,
@@ -170,7 +170,7 @@ impl TextDenseOutput {
                 ..
             } => {
                 shrink_sample_major_width(&mut values, n_samples, row_width, n_variants);
-                DenseGenotypeMatrixArrowVariants::new_with_layout(
+                DenseGenotypeMatrix::new_with_layout(
                     n_samples,
                     n_variants,
                     values,
@@ -182,7 +182,7 @@ impl TextDenseOutput {
             }
             Self::VariantMajor {
                 n_samples, values, ..
-            } => DenseGenotypeMatrixArrowVariants::new_with_layout(
+            } => DenseGenotypeMatrix::new_with_layout(
                 n_samples,
                 n_variants,
                 values,
@@ -222,7 +222,7 @@ mod tests {
             .write_variant_no_missing_direct(0, &[0.0, 1.0, 2.0])
             .expect("direct write should append variant-major values");
         let matrix = output
-            .finish_arrow_variants(1, None, None, genoio_core::DenseDiagnostics::default())
+            .finish(1, None, None, genoio_core::DenseDiagnostics::default())
             .expect("matrix should finish");
 
         assert_eq!(matrix.values, vec![0.0, 1.0, 2.0]);

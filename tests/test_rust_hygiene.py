@@ -30,28 +30,46 @@ def test_text_vcf_backend_has_no_row_variant_sink():
 def test_pyo3_adapter_does_not_normalize_row_matrices():
     source = Path("rust/genoio-py/src/lib.rs").read_text()
 
-    assert "DenseGenotypeMatrixArrowVariants::from_matrix" not in source
-    assert "SparseGenotypeMatrixArrowVariants::from_matrix" not in source
+    assert "::from_matrix" not in source
     assert "fn read_dense_matrix(" not in source
     assert "fn read_sparse_matrix(" not in source
 
 
-def test_plink1_arrow_backend_does_not_wrap_row_matrices():
+def test_rust_backends_do_not_use_migration_output_names():
+    sources = "\n".join(
+        path.read_text()
+        for root in [
+            Path("rust/genoio-core/src"),
+            Path("rust/genoio-io/src"),
+            Path("rust/genoio-py/src"),
+        ]
+        for path in root.rglob("*.rs")
+    )
+
+    assert "ArrowVariants" not in sources
+    assert "arrow_variants" not in sources
+    assert "with_arrow_variants" not in sources
+    assert "MetadataArrowOutput" not in sources
+    assert "SampleMetadataArrowBuffers" not in sources
+    assert "VariantMetadataArrowBuffers" not in sources
+
+
+def test_plink1_output_backend_does_not_wrap_row_matrices():
     source = Path("rust/genoio-io/src/plink/plink1.rs").read_text()
 
     assert "dense_matrix_to_arrow_variants" not in source
     assert "sparse_matrix_to_arrow_variants" not in source
 
 
-def test_plink2_hardcall_arrow_backend_does_not_wrap_row_matrices():
+def test_plink2_hardcall_output_backend_does_not_wrap_row_matrices():
     source = Path("rust/genoio-io/src/plink/plink2.rs").read_text()
 
     dense_wrapper = re.compile(
-        r"pub fn read_plink2_dense_windowed_with_arrow_variants[\s\S]*?"
+        r"pub fn read_plink2_dense_windowed[\s\S]*?"
         r"dense_matrix_to_arrow_variants"
     )
     sparse_wrapper = re.compile(
-        r"pub fn read_plink2_sparse_windowed_with_arrow_variants[\s\S]*?"
+        r"pub fn read_plink2_sparse_windowed[\s\S]*?"
         r"sparse_matrix_to_arrow_variants"
     )
 
@@ -59,24 +77,24 @@ def test_plink2_hardcall_arrow_backend_does_not_wrap_row_matrices():
     assert sparse_wrapper.search(source) is None
 
 
-def test_plink2_non_hardcall_arrow_backend_does_not_wrap_row_matrices():
+def test_plink2_non_hardcall_output_backend_does_not_wrap_row_matrices():
     source = Path("rust/genoio-io/src/plink/plink2.rs").read_text()
 
     wrapped_entry_points = [
         (
-            "read_plink2_dosage_dense_windowed_with_arrow_variants",
+            "read_plink2_dosage_dense_windowed",
             "dense_matrix_to_arrow_variants",
         ),
         (
-            "read_plink2_haplotypes_dense_windowed_with_arrow_variants",
+            "read_plink2_haplotypes_dense_windowed",
             "dense_matrix_to_arrow_variants",
         ),
         (
-            "read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants",
+            "read_plink2_haplotypes_dosage_dense_windowed",
             "dense_matrix_to_arrow_variants",
         ),
         (
-            "read_plink2_haplotypes_sparse_windowed_with_arrow_variants",
+            "read_plink2_haplotypes_sparse_windowed",
             "sparse_matrix_to_arrow_variants",
         ),
     ]
@@ -86,12 +104,12 @@ def test_plink2_non_hardcall_arrow_backend_does_not_wrap_row_matrices():
         assert wrapper.search(source) is None
 
 
-def test_bgen_arrow_backend_does_not_wrap_row_matrices():
+def test_bgen_output_backend_does_not_wrap_row_matrices():
     source = Path("rust/genoio-io/src/bgen.rs").read_text()
 
     wrapped_entry_points = [
-        "read_bgen_dosage_dense_windowed_with_arrow_variants",
-        "read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants",
+        "read_bgen_dosage_dense_windowed",
+        "read_bgen_haplotypes_dosage_dense_windowed",
     ]
 
     for function_name in wrapped_entry_points:
@@ -109,7 +127,7 @@ def test_bgen_metadata_and_zstd_paths_avoid_decode_hot_spot_allocations():
     assert "skip_layout2_probability_payload_raw" in header_source
 
 
-def test_bcf_arrow_backend_does_not_wrap_row_matrices():
+def test_bcf_output_backend_does_not_wrap_row_matrices():
     source = Path("rust/genoio-io/src/vcf.rs").read_text()
 
     assert "dense_matrix_to_arrow_variants" not in source

@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Lines};
 use std::path::Path;
 
-use genoio_core::{GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord};
+use genoio_core::{GenoioError, SampleRecord, VariantMetadataBuffers, VariantRecord};
 
 use crate::error::Result;
 
@@ -51,8 +51,8 @@ fn parse_fam_line(path: &Path, line_number: usize, line: &str) -> Result<SampleR
     })
 }
 
-pub(super) fn parse_bim_arrow(path: &Path) -> Result<VariantMetadataArrowBuffers> {
-    let mut variants = VariantMetadataArrowBuffers::with_capacity(0);
+pub(super) fn parse_bim_metadata(path: &Path) -> Result<VariantMetadataBuffers> {
+    let mut variants = VariantMetadataBuffers::with_capacity(0);
     let mut reader = BimRecordReader::new(path)?;
     while let Some((_, variant)) = reader.next_record()? {
         variants.push_record(&variant)?;
@@ -60,12 +60,12 @@ pub(super) fn parse_bim_arrow(path: &Path) -> Result<VariantMetadataArrowBuffers
     Ok(variants)
 }
 
-pub(super) fn parse_bim_source_window_arrow(
+pub(super) fn parse_bim_source_window(
     path: &Path,
     start: usize,
     expected_records: usize,
-) -> Result<VariantMetadataArrowBuffers> {
-    let mut variants = VariantMetadataArrowBuffers::with_capacity(expected_records);
+) -> Result<VariantMetadataBuffers> {
+    let mut variants = VariantMetadataBuffers::with_capacity(expected_records);
     let end = start.saturating_add(expected_records);
     let mut reader = BimRecordReader::new(path)?;
     while let Some((source_index, variant)) = reader.next_record()? {

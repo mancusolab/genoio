@@ -14,8 +14,8 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, append_sparse_value, finish_sparse_column, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, RegionPredicate, SampleMetadataArrowBuffers,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantWindow,
+    PartialFilterDecision, RegionPredicate, SampleMetadataBuffers, SparseGenotypeMatrix,
+    VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -35,13 +35,13 @@ use super::{
 };
 
 pub(super) enum TextSparseReadOutput {
-    Arrow(SparseGenotypeMatrixArrowVariants),
+    Output(SparseGenotypeMatrix),
 }
 
 impl TextSparseReadOutput {
-    pub(super) fn into_arrow(self) -> SparseGenotypeMatrixArrowVariants {
+    pub(super) fn into_output(self) -> SparseGenotypeMatrix {
         match self {
-            Self::Arrow(output) => output,
+            Self::Output(output) => output,
         }
     }
 }
@@ -146,22 +146,19 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
 
     let n_variants = indptr.len().saturating_sub(1);
     diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &samples,
-        metadata_return.samples,
-        false,
-    )?;
-    SparseGenotypeMatrixArrowVariants::new(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&samples, metadata_return.samples, false)?;
+    SparseGenotypeMatrix::new(
         n_samples,
         n_variants,
         indptr,
         indices,
         data,
         samples,
-        variants.into_arrow()?,
+        variants.into_output()?,
         diagnostics,
     )
-    .map(TextSparseReadOutput::Arrow)
+    .map(TextSparseReadOutput::Output)
 }
 
 #[expect(
@@ -185,7 +182,7 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
     } = selection;
     let n_samples = samples.len() * 2;
     let haplotype_samples = haplotype_sample_records(&samples, &source_indices);
-    let output_samples = SampleMetadataArrowBuffers::optional_from_records(
+    let output_samples = SampleMetadataBuffers::optional_from_records(
         &haplotype_samples,
         metadata_return.samples,
         true,
@@ -275,17 +272,17 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
 
     let n_variants = indptr.len().saturating_sub(1);
     diagnostics.retained_variants = n_variants;
-    SparseGenotypeMatrixArrowVariants::new(
+    SparseGenotypeMatrix::new(
         n_samples,
         n_variants,
         indptr,
         indices,
         data,
         output_samples,
-        variants.into_arrow()?,
+        variants.into_output()?,
         diagnostics,
     )
-    .map(TextSparseReadOutput::Arrow)
+    .map(TextSparseReadOutput::Output)
 }
 
 /// Append a haplotype sparse column and report whether metadata must be flipped.

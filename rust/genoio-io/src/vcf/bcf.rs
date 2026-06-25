@@ -13,10 +13,10 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, compute_dosage_variant_stats, reject_sparse_missing,
-    select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, MetadataArrowOutput, PartialFilterDecision,
-    SampleMetadataArrowBuffers, SourceCapabilities, SparseGenotypeMatrixArrowVariants,
-    VariantFilter, VariantMetadataArrowBuffers, VariantMetadataView, VariantStats, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, MetadataOutput, PartialFilterDecision,
+    SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -42,7 +42,7 @@ const BCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
 
 /// Borrowed metadata view over a lazy BCF record.
 ///
-/// BCF matrix loops use this for metadata filters, validation, and Arrow append
+/// BCF matrix loops use this for metadata filters, validation, and metadata append
 /// without building an owned `VariantRecord` on the normal retained path.
 struct BcfVariantView<'a> {
     chrom: &'a str,
@@ -171,7 +171,7 @@ fn bcf_multi_alt_allele_string(
 }
 
 fn push_bcf_variant_row(
-    variants: &mut Option<VariantMetadataArrowBuffers>,
+    variants: &mut Option<VariantMetadataBuffers>,
     variant: &BcfVariantView<'_>,
     stats: Option<VariantStats>,
     flipped: bool,
@@ -190,7 +190,7 @@ fn push_bcf_variant_row(
     Ok(())
 }
 
-pub(super) fn read_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
+pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf open error: {error}")))?;
     let mut reader = bcf::io::Reader::new(file);
@@ -199,8 +199,7 @@ pub(super) fn read_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf header error: {error}")))?;
     let samples = sample_records_from_noodles_header(&header);
 
-    let mut variants =
-        VariantMetadataArrowBuffers::with_capacity(BCF_METADATA_INITIAL_VARIANT_CAPACITY);
+    let mut variants = VariantMetadataBuffers::with_capacity(BCF_METADATA_INITIAL_VARIANT_CAPACITY);
     let mut has_phased_genotype_evidence = false;
     // Reuse noodles' lazy BCF record buffer and append public columns directly.
     let mut record = bcf::Record::default();
@@ -231,8 +230,8 @@ pub(super) fn read_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
         SourceCapabilities::genotype_only()
     };
 
-    Ok(MetadataArrowOutput {
-        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
+    Ok(MetadataOutput {
+        samples: SampleMetadataBuffers::from_records(&samples, false)?,
         variants,
         capabilities,
     })
@@ -260,14 +259,14 @@ fn open_bcf_input(path: &Path, requested_samples: Option<&[String]>) -> Result<B
     })
 }
 
-pub(super) fn read_sparse_windowed_with_arrow_variants(
+pub(super) fn read_sparse_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     return_samples: bool,
     return_variants: bool,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     let BcfInput {
         mut reader,
         header,
@@ -283,7 +282,7 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
     let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
     let mut decoded = BcfDenseDecodeBuffers::with_capacity(source_indices.len());
@@ -337,9 +336,8 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
 
     let n_cols = indptr.len() - 1;
     diagnostics.retained_variants = n_cols;
-    let samples =
-        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, false)?;
-    SparseGenotypeMatrixArrowVariants::new(
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, false)?;
+    SparseGenotypeMatrix::new(
         n_rows,
         n_cols,
         indptr,
@@ -351,7 +349,7 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
     )
 }
 
-pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
+pub(super) fn read_haplotypes_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -359,7 +357,7 @@ pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let BcfInput {
         mut reader,
         header,
@@ -371,7 +369,7 @@ pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
         mut diagnostics,
     } = selection;
 
-    let mut variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut variant_major_values = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
@@ -449,14 +447,11 @@ pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
     }
 
     let haplotype_samples = haplotype_sample_records(&selected_samples, &source_indices);
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &haplotype_samples,
-        return_samples,
-        true,
-    )?;
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
     let n_samples = selected_samples.len() * 2;
     diagnostics.retained_variants = n_variants;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         variant_major_values,
@@ -467,14 +462,14 @@ pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
     )
 }
 
-pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
+pub(super) fn read_haplotypes_sparse_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
     return_samples: bool,
     return_variants: bool,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     let BcfInput {
         mut reader,
         header,
@@ -487,16 +482,13 @@ pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
     } = selection;
 
     let haplotype_samples = haplotype_sample_records(&selected_samples, &source_indices);
-    let output_samples = SampleMetadataArrowBuffers::optional_from_records(
-        &haplotype_samples,
-        return_samples,
-        true,
-    )?;
+    let output_samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
     let n_rows = selected_samples.len() * 2;
     let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
     let mut data = Vec::new();
-    let mut variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut retention = RetainedVariantState::new(variant_window);
     let mut record = bcf::Record::default();
     let mut decoded = BcfHaplotypeDecodeBuffers::with_capacity(source_indices.len());
@@ -560,7 +552,7 @@ pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
 
     let n_cols = indptr.len() - 1;
     diagnostics.retained_variants = n_cols;
-    SparseGenotypeMatrixArrowVariants::new(
+    SparseGenotypeMatrix::new(
         n_rows,
         n_cols,
         indptr,
@@ -578,7 +570,7 @@ enum DenseField {
     Ds,
 }
 
-pub(super) fn read_dense_windowed_with_arrow_variants(
+pub(super) fn read_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -586,8 +578,8 @@ pub(super) fn read_dense_windowed_with_arrow_variants(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
-    read_dense_windowed_with_field_arrow_variants(
+) -> Result<DenseGenotypeMatrix> {
+    read_dense_windowed_with_field(
         path,
         requested_samples,
         variant_filter,
@@ -599,7 +591,7 @@ pub(super) fn read_dense_windowed_with_arrow_variants(
     )
 }
 
-pub(super) fn read_dosage_dense_windowed_with_arrow_variants(
+pub(super) fn read_dosage_dense_windowed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -607,8 +599,8 @@ pub(super) fn read_dosage_dense_windowed_with_arrow_variants(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
-    read_dense_windowed_with_field_arrow_variants(
+) -> Result<DenseGenotypeMatrix> {
+    read_dense_windowed_with_field(
         path,
         requested_samples,
         variant_filter,
@@ -624,7 +616,7 @@ pub(super) fn read_dosage_dense_windowed_with_arrow_variants(
     clippy::too_many_arguments,
     reason = "shared BCF dense loop mirrors read options plus field and metadata return choices"
 )]
-fn read_dense_windowed_with_field_arrow_variants(
+fn read_dense_windowed_with_field(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -633,7 +625,7 @@ fn read_dense_windowed_with_field_arrow_variants(
     return_samples: bool,
     return_variants: bool,
     field: DenseField,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let BcfInput {
         mut reader,
         header,
@@ -645,7 +637,7 @@ fn read_dense_windowed_with_field_arrow_variants(
         mut diagnostics,
     } = selection;
 
-    let mut variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
+    let mut variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
     let mut variant_major_values = Vec::new();
     let mut n_variants = 0;
     let mut retention = RetainedVariantState::new(variant_window);
@@ -738,9 +730,8 @@ fn read_dense_windowed_with_field_arrow_variants(
 
     let n_samples = samples.len();
     diagnostics.retained_variants = n_variants;
-    let samples =
-        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, false)?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, false)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         variant_major_values,
@@ -1247,11 +1238,11 @@ fn record_id(record: &bcf::Record) -> String {
 mod tests {
     use std::fs;
 
-    use super::super::read_vcf_dense_windowed_with_threads_and_arrow_variants;
+    use super::super::read_vcf_dense_windowed_with_threads as read_vcf_dense_windowed_with_threads_facade;
     use super::*;
     use genoio_core::{
-        DenseGenotypeMatrixArrowVariants, DenseLayout, SparseGenotypeMatrixArrowVariants,
-        StringColumnBuffers, VariantMetadataArrowBuffers,
+        DenseGenotypeMatrix, DenseLayout, SparseGenotypeMatrix, StringColumnBuffers,
+        VariantMetadataBuffers,
     };
     use noodles_core::Position;
     use noodles_vcf::{
@@ -1281,38 +1272,37 @@ mod tests {
         }
     }
 
-    fn variants(output: &Option<VariantMetadataArrowBuffers>) -> &VariantMetadataArrowBuffers {
+    fn variants(output: &Option<VariantMetadataBuffers>) -> &VariantMetadataBuffers {
         output
             .as_ref()
-            .expect("variant Arrow buffers should be returned")
+            .expect("variant metadata buffers should be returned")
     }
 
     fn string_at(column: &StringColumnBuffers, index: usize) -> &str {
         let start = column.offsets[index] as usize;
         let end = column.offsets[index + 1] as usize;
-        std::str::from_utf8(&column.values[start..end])
-            .expect("Arrow string column should be UTF-8")
+        std::str::from_utf8(&column.values[start..end]).expect("string column should be UTF-8")
     }
 
-    fn variant_ids(variants: &VariantMetadataArrowBuffers) -> Vec<&str> {
+    fn variant_ids(variants: &VariantMetadataBuffers) -> Vec<&str> {
         (0..variants.len())
             .map(|index| string_at(&variants.ids, index))
             .collect()
     }
 
-    fn variant_id(variants: &VariantMetadataArrowBuffers, index: usize) -> &str {
+    fn variant_id(variants: &VariantMetadataBuffers, index: usize) -> &str {
         string_at(&variants.ids, index)
     }
 
-    fn read_vcf_dense_windowed_with_threads(
+    fn read_vcf_dense_windowed_with_threads_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         matrix_only: bool,
         threads: Option<usize>,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
-        read_vcf_dense_windowed_with_threads_and_arrow_variants(
+    ) -> Result<DenseGenotypeMatrix> {
+        read_vcf_dense_windowed_with_threads_facade(
             path,
             requested_samples,
             variant_filter,
@@ -1324,15 +1314,15 @@ mod tests {
         )
     }
 
-    fn read_dense_windowed(
+    fn read_dense_windowed_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         missing_policy: DenseMissingPolicy,
         matrix_only: bool,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
-        read_dense_windowed_with_field_arrow_variants(
+    ) -> Result<DenseGenotypeMatrix> {
+        read_dense_windowed_with_field(
             path,
             requested_samples,
             variant_filter,
@@ -1344,15 +1334,15 @@ mod tests {
         )
     }
 
-    fn read_dosage_dense_windowed(
+    fn read_dosage_dense_windowed_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         missing_policy: DenseMissingPolicy,
         matrix_only: bool,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
-        read_dosage_dense_windowed_with_arrow_variants(
+    ) -> Result<DenseGenotypeMatrix> {
+        super::read_dosage_dense_windowed(
             path,
             requested_samples,
             variant_filter,
@@ -1363,13 +1353,13 @@ mod tests {
         )
     }
 
-    fn read_sparse_windowed(
+    fn read_sparse_windowed_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
-    ) -> Result<SparseGenotypeMatrixArrowVariants> {
-        read_sparse_windowed_with_arrow_variants(
+    ) -> Result<SparseGenotypeMatrix> {
+        super::read_sparse_windowed(
             path,
             requested_samples,
             variant_filter,
@@ -1379,15 +1369,15 @@ mod tests {
         )
     }
 
-    fn read_haplotypes_dense_windowed(
+    fn read_haplotypes_dense_windowed_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         missing_policy: DenseMissingPolicy,
         matrix_only: bool,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
-        read_haplotypes_dense_windowed_with_arrow_variants(
+    ) -> Result<DenseGenotypeMatrix> {
+        super::read_haplotypes_dense_windowed(
             path,
             requested_samples,
             variant_filter,
@@ -1398,13 +1388,13 @@ mod tests {
         )
     }
 
-    fn read_haplotypes_sparse_windowed(
+    fn read_haplotypes_sparse_windowed_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
-    ) -> Result<SparseGenotypeMatrixArrowVariants> {
-        read_haplotypes_sparse_windowed_with_arrow_variants(
+    ) -> Result<SparseGenotypeMatrix> {
+        super::read_haplotypes_sparse_windowed(
             path,
             requested_samples,
             variant_filter,
@@ -1611,7 +1601,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1636,9 +1626,15 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let error =
-            read_vcf_dense_windowed_with_threads(file.path(), None, None, None, false, Some(2))
-                .expect_err("BCF should reject explicit thread count");
+        let error = read_vcf_dense_windowed_with_threads_for_test(
+            file.path(),
+            None,
+            None,
+            None,
+            false,
+            Some(2),
+        )
+        .expect_err("BCF should reject explicit thread count");
 
         assert!(error
             .to_string()
@@ -1671,9 +1667,15 @@ mod tests {
                 .expect("triploid BCF record should be written");
         }
 
-        let error =
-            read_dense_windowed(file.path(), None, None, None, DenseMissingPolicy::Nan, true)
-                .expect_err("non-diploid BCF GT should fail");
+        let error = read_dense_windowed_for_test(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            true,
+        )
+        .expect_err("non-diploid BCF GT should fail");
 
         assert!(error.to_string().contains("non-diploid GT"), "{error}");
     }
@@ -1704,9 +1706,15 @@ mod tests {
                 .expect("multiallelic GT-index BCF record should be written");
         }
 
-        let error =
-            read_dense_windowed(file.path(), None, None, None, DenseMissingPolicy::Nan, true)
-                .expect_err("multiallelic BCF GT allele index should fail");
+        let error = read_dense_windowed_for_test(
+            file.path(),
+            None,
+            None,
+            None,
+            DenseMissingPolicy::Nan,
+            true,
+        )
+        .expect_err("multiallelic BCF GT allele index should fail");
 
         assert!(
             error.to_string().contains("multiallelic GT allele index"),
@@ -1722,7 +1730,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let error = read_sparse_windowed(
+        let error = read_sparse_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1741,7 +1749,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1772,7 +1780,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             Some(&samples),
             Some(&filter),
@@ -1810,7 +1818,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dense_windowed(
+        let dense = read_dense_windowed_for_test(
             file.path(),
             None,
             Some(&filter),
@@ -1828,14 +1836,14 @@ mod tests {
     }
 
     #[test]
-    fn bcf_dense_gt_arrow_can_return_samples_without_variant_buffers() {
+    fn bcf_dense_gt_can_return_samples_without_variant_buffers() {
         let file = tempfile::Builder::new()
             .suffix(".bcf")
             .tempfile()
             .expect("temp BCF should be created");
         write_test_bcf(file.path());
 
-        let dense = read_dense_windowed_with_arrow_variants(
+        let dense = super::read_dense_windowed(
             file.path(),
             None,
             None,
@@ -1844,7 +1852,7 @@ mod tests {
             true,
             false,
         )
-        .expect("BCF dense GT Arrow output should decode without variant buffers");
+        .expect("BCF dense GT output should decode without variant buffers");
 
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 2);
@@ -1866,7 +1874,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_with_ds(file.path());
 
-        let dense = read_dosage_dense_windowed(
+        let dense = read_dosage_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -1897,7 +1905,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_dosage_dense_windowed(
+        let dense = read_dosage_dense_windowed_for_test(
             file.path(),
             None,
             Some(&filter),
@@ -1928,7 +1936,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let sparse = read_sparse_windowed(file.path(), None, Some(&filter), None)
+        let sparse = read_sparse_windowed_for_test(file.path(), None, Some(&filter), None)
             .expect("BCF sparse GT should decode");
 
         assert_eq!(sparse.n_rows, 2);
@@ -1940,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn bcf_sparse_gt_arrow_can_omit_samples_and_variant_buffers() {
+    fn bcf_sparse_gt_can_omit_samples_and_variant_buffers() {
         let file = tempfile::Builder::new()
             .suffix(".bcf")
             .tempfile()
@@ -1953,15 +1961,9 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let sparse = read_sparse_windowed_with_arrow_variants(
-            file.path(),
-            None,
-            Some(&filter),
-            None,
-            false,
-            false,
-        )
-        .expect("BCF sparse GT Arrow output should decode without metadata buffers");
+        let sparse =
+            super::read_sparse_windowed(file.path(), None, Some(&filter), None, false, false)
+                .expect("BCF sparse GT output should decode without metadata buffers");
 
         assert_eq!(sparse.n_rows, 2);
         assert_eq!(sparse.n_cols, 1);
@@ -1980,7 +1982,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_phased(file.path());
 
-        let dense = read_haplotypes_dense_windowed(
+        let dense = read_haplotypes_dense_windowed_for_test(
             file.path(),
             None,
             None,
@@ -2017,7 +2019,7 @@ mod tests {
         }))
         .expect("filter should parse");
 
-        let dense = read_haplotypes_dense_windowed(
+        let dense = read_haplotypes_dense_windowed_for_test(
             file.path(),
             None,
             Some(&filter),
@@ -2042,7 +2044,7 @@ mod tests {
             .expect("temp BCF should be created");
         write_test_bcf_phased(file.path());
 
-        let sparse = read_haplotypes_sparse_windowed(file.path(), None, None, None)
+        let sparse = read_haplotypes_sparse_windowed_for_test(file.path(), None, None, None)
             .expect("BCF sparse haplotypes should decode");
 
         assert_eq!(sparse.n_rows, 4);

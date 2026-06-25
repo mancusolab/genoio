@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use genoio_core::{GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord};
+use genoio_core::{GenoioError, SampleRecord, VariantMetadataBuffers, VariantRecord};
 
 use crate::Result;
 
@@ -287,20 +287,20 @@ fn sample_record(iid: String) -> SampleRecord {
     }
 }
 
-pub(super) fn read_layout2_variant_metadata_arrow(
+pub(super) fn read_layout2_variant_metadata(
     reader: &mut impl Read,
     path: &Path,
     variant_count: u32,
     compression: BgenCompression,
-) -> Result<VariantMetadataArrowBuffers> {
-    let mut variants = VariantMetadataArrowBuffers::with_capacity(
-        usize::try_from(variant_count)
-            .map_err(|_| GenoioError::invalid_source(path, "bgen variant count is out of range"))?,
-    );
+) -> Result<VariantMetadataBuffers> {
+    let mut variants =
+        VariantMetadataBuffers::with_capacity(usize::try_from(variant_count).map_err(|_| {
+            GenoioError::invalid_source(path, "bgen variant count is out of range")
+        })?);
     let mut string_scratch = Vec::new();
 
     for _ in 0..variant_count {
-        read_layout2_variant_identifying_data_arrow(
+        read_layout2_variant_identifying_data_metadata(
             reader,
             path,
             &mut variants,
@@ -366,10 +366,10 @@ pub(super) fn read_layout2_variant_identifying_data(
     })
 }
 
-fn read_layout2_variant_identifying_data_arrow(
+fn read_layout2_variant_identifying_data_metadata(
     reader: &mut impl Read,
     path: &Path,
-    variants: &mut VariantMetadataArrowBuffers,
+    variants: &mut VariantMetadataBuffers,
     scratch: &mut Vec<u8>,
 ) -> Result<()> {
     let row_index = variants.len();
@@ -378,7 +378,7 @@ fn read_layout2_variant_identifying_data_arrow(
     })?;
     // Public BGEN IDs prefer rsid when present, but the on-disk order puts the
     // fallback ID first. Append the fallback, then replace the row only when an
-    // rsid exists so the Arrow path does not materialize both strings.
+    // rsid exists so the metadata-buffer path does not materialize both strings.
     read_len_prefixed_utf8_u16_with(reader, path, "variant rsid", scratch, |rsid| {
         if !rsid.is_empty() {
             variants.ids.replace_value(row_index, rsid)?;

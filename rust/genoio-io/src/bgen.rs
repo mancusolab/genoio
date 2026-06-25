@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::Result;
-use genoio_core::{MetadataArrowOutput, SampleMetadataArrowBuffers, SourceCapabilities};
+use genoio_core::{MetadataOutput, SampleMetadataBuffers, SourceCapabilities};
 
 mod decode;
 mod dense;
@@ -19,20 +19,20 @@ mod index;
 mod io;
 mod session;
 
-pub use dense::read_bgen_dosage_dense_windowed_with_arrow_variants;
-pub use haplotype::read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants;
+pub use dense::read_bgen_dosage_dense_windowed;
+pub use haplotype::read_bgen_haplotypes_dosage_dense_windowed;
 
 use session::BgenReadSession;
 
-/// Read BGEN metadata with variant metadata staged as Arrow-compatible buffers.
-pub fn read_bgen_metadata_arrow(bgen: &Path, sample: Option<&Path>) -> Result<MetadataArrowOutput> {
+/// Read BGEN metadata with variant metadata staged as columnar buffers.
+pub fn read_bgen_metadata(bgen: &Path, sample: Option<&Path>) -> Result<MetadataOutput> {
     let mut session = BgenReadSession::open(bgen)?;
     let samples = session.read_samples(sample)?;
     session.seek_to_variants()?;
-    let variants = session.read_all_variant_metadata_arrow()?;
+    let variants = session.read_all_variant_metadata()?;
 
-    Ok(MetadataArrowOutput {
-        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
+    Ok(MetadataOutput {
+        samples: SampleMetadataBuffers::from_records(&samples, false)?,
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })

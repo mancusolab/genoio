@@ -8,9 +8,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataArrowBuffers,
-    SampleRecord, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataBuffers, SampleRecord,
+    VariantFilter, VariantMetadataBuffers, VariantWindow,
 };
 
 use crate::dosage_filter::evaluate_dosage_filter;
@@ -23,18 +23,17 @@ use super::filter::apply_genotype_filter_result;
 use super::index::{indexed_region_records, BgenIndexRecord};
 use super::session::{BgenIndexedReadContext, BgenReadSession, BgenVariantCursor};
 
-fn empty_dense_arrow_for_samples(
+fn empty_dense_output_for_samples(
     samples: Vec<SampleRecord>,
     mut diagnostics: genoio_core::DenseDiagnostics,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     diagnostics.retained_variants = 0;
     let n_samples = samples.len();
-    let samples =
-        SampleMetadataArrowBuffers::optional_from_records(&samples, return_samples, true)?;
-    let variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, true)?;
+    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         0,
         Vec::new(),
@@ -47,9 +46,9 @@ fn empty_dense_arrow_for_samples(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Arrow facade mirrors haplotype dosage read options plus metadata return choices"
+    reason = "output facade mirrors haplotype dosage read options plus metadata return choices"
 )]
-pub fn read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
+pub fn read_bgen_haplotypes_dosage_dense_windowed(
     bgen: &Path,
     sample: Option<&Path>,
     requested_samples: Option<&[String]>,
@@ -58,7 +57,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
     missing_policy: DenseMissingPolicy,
     return_samples: bool,
     return_variants: bool,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let mut session = BgenReadSession::open(bgen)?;
     let all_samples = session.read_samples(sample)?;
     let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
@@ -66,7 +65,7 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
     let mut diagnostics = selection.diagnostics.clone();
     if variant_filter.is_some_and(VariantFilter::is_always_false) {
         diagnostics.retained_variants = 0;
-        return empty_dense_arrow_for_samples(
+        return empty_dense_output_for_samples(
             haplotype_samples,
             diagnostics,
             return_samples,
@@ -95,8 +94,8 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
         window.len.min(header_variant_count)
     });
     let n_haplotypes = selection.samples.len() * 2;
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
@@ -183,12 +182,9 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &haplotype_samples,
-        return_samples,
-        true,
-    )?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         variant_major_values,
@@ -217,7 +213,7 @@ pub(super) fn expand_selected_samples_to_haplotypes(
 fn read_bgen_haplotypes_dosage_dense_indexed(
     context: BgenIndexedReadContext<'_>,
     index_records: &[BgenIndexRecord],
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let BgenIndexedReadContext {
         session,
         selection,
@@ -235,8 +231,8 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         window.len.min(index_records.len())
     });
     let n_haplotypes = selection.samples.len() * 2;
-    let mut variants = return_variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(output_variant_capacity));
+    let mut variants =
+        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
     let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
     let mut decode_buffers = HaplotypeDecodeBuffers::default();
     let mut retention = RetainedVariantState::new(variant_window);
@@ -331,12 +327,9 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
     let n_samples = n_haplotypes;
     let n_variants = output_variant_count;
     diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
-        &haplotype_samples,
-        return_samples,
-        true,
-    )?;
-    DenseGenotypeMatrixArrowVariants::new_with_layout(
+    let samples =
+        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
+    DenseGenotypeMatrix::new_with_layout(
         n_samples,
         n_variants,
         variant_major_values,

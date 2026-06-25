@@ -13,10 +13,10 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrixArrowVariants, DenseMissingPolicy, DenseSampleSelection, GenoioError,
-    MetadataArrowOutput, PartialFilterDecision, RegionPredicate, SampleMetadataArrowBuffers,
-    SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantMetadataView, VariantStats, VariantWindow,
+    DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
+    PartialFilterDecision, RegionPredicate, SampleMetadataBuffers, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantMetadataBuffers, VariantMetadataView, VariantStats,
+    VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -78,14 +78,14 @@ impl VcfMetadataReturn {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VariantMetadataSinkKind {
-    Arrow,
+    Output,
     None,
 }
 
 impl VariantMetadataSinkKind {
-    const fn for_arrow_output(metadata_return: VcfMetadataReturn) -> Self {
+    const fn for_output(metadata_return: VcfMetadataReturn) -> Self {
         if metadata_return.variants {
-            Self::Arrow
+            Self::Output
         } else {
             Self::None
         }
@@ -93,16 +93,16 @@ impl VariantMetadataSinkKind {
 }
 
 enum VariantMetadataSink {
-    Arrow(Box<VariantMetadataArrowBuffers>),
+    Output(Box<VariantMetadataBuffers>),
     None,
 }
 
 impl VariantMetadataSink {
     fn new(kind: VariantMetadataSinkKind, capacity: usize) -> Self {
         match kind {
-            VariantMetadataSinkKind::Arrow => Self::Arrow(Box::new(
-                VariantMetadataArrowBuffers::with_capacity(capacity),
-            )),
+            VariantMetadataSinkKind::Output => {
+                Self::Output(Box::new(VariantMetadataBuffers::with_capacity(capacity)))
+            }
             VariantMetadataSinkKind::None => Self::None,
         }
     }
@@ -116,7 +116,7 @@ impl VariantMetadataSink {
         variant: &V,
     ) -> Result<Option<usize>> {
         match self {
-            Self::Arrow(variants) => {
+            Self::Output(variants) => {
                 // Sparse reads may need to attach stats or flip allele labels
                 // after matrix emission, so expose the row that was appended.
                 let row_index = variants.len();
@@ -133,7 +133,7 @@ impl VariantMetadataSink {
         stats: VariantStats,
     ) -> Result<()> {
         match self {
-            Self::Arrow(variants) => variants.push_view_with_stats(variant, stats)?,
+            Self::Output(variants) => variants.push_view_with_stats(variant, stats)?,
             Self::None => {}
         }
         Ok(())
@@ -141,7 +141,7 @@ impl VariantMetadataSink {
 
     fn attach_stats(&mut self, row_index: usize, stats: VariantStats) -> Result<()> {
         match self {
-            Self::Arrow(variants) => variants.attach_stats(row_index, stats)?,
+            Self::Output(variants) => variants.attach_stats(row_index, stats)?,
             Self::None => {}
         }
         Ok(())
@@ -149,15 +149,15 @@ impl VariantMetadataSink {
 
     fn flip_to_minor_allele(&mut self, row_index: usize) -> Result<()> {
         match self {
-            Self::Arrow(variants) => variants.flip_to_minor_allele(row_index)?,
+            Self::Output(variants) => variants.flip_to_minor_allele(row_index)?,
             Self::None => {}
         }
         Ok(())
     }
 
-    fn into_arrow(self) -> Result<Option<VariantMetadataArrowBuffers>> {
+    fn into_output(self) -> Result<Option<VariantMetadataBuffers>> {
         match self {
-            Self::Arrow(variants) => Ok(Some(*variants)),
+            Self::Output(variants) => Ok(Some(*variants)),
             Self::None => Ok(None),
         }
     }
@@ -189,26 +189,26 @@ fn write_dense_text_variant(
 }
 
 enum TextDenseReadOutput {
-    Arrow(DenseGenotypeMatrixArrowVariants),
+    Output(DenseGenotypeMatrix),
 }
 
 impl TextDenseReadOutput {
-    fn into_arrow(self) -> DenseGenotypeMatrixArrowVariants {
+    fn into_output(self) -> DenseGenotypeMatrix {
         match self {
-            Self::Arrow(output) => output,
+            Self::Output(output) => output,
         }
     }
 }
 
 impl TextVcfSource {
-    fn read_dense_arrow_variants(
+    fn read_dense(
         self,
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         missing_policy: DenseMissingPolicy,
         metadata_return: VcfMetadataReturn,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+    ) -> Result<DenseGenotypeMatrix> {
         Ok(self
             .read_dense_with_metadata(
                 path,
@@ -216,9 +216,9 @@ impl TextVcfSource {
                 variant_window,
                 missing_policy,
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
             )?
-            .into_arrow())
+            .into_output())
     }
 
     fn read_dense_with_metadata(
@@ -261,14 +261,14 @@ impl TextVcfSource {
         }
     }
 
-    fn read_dosage_dense_arrow_variants(
+    fn read_dosage_dense(
         self,
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         missing_policy: DenseMissingPolicy,
         metadata_return: VcfMetadataReturn,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+    ) -> Result<DenseGenotypeMatrix> {
         Ok(self
             .read_dosage_dense_with_metadata(
                 path,
@@ -276,9 +276,9 @@ impl TextVcfSource {
                 variant_window,
                 missing_policy,
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
             )?
-            .into_arrow())
+            .into_output())
     }
 
     fn read_dosage_dense_with_metadata(
@@ -321,14 +321,14 @@ impl TextVcfSource {
         }
     }
 
-    fn read_haplotype_dense_arrow_variants(
+    fn read_haplotype_dense(
         self,
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         missing_policy: DenseMissingPolicy,
         metadata_return: VcfMetadataReturn,
-    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+    ) -> Result<DenseGenotypeMatrix> {
         Ok(self
             .read_haplotype_dense_with_metadata(
                 path,
@@ -336,9 +336,9 @@ impl TextVcfSource {
                 variant_window,
                 missing_policy,
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
             )?
-            .into_arrow())
+            .into_output())
     }
 
     fn read_haplotype_dense_with_metadata(
@@ -381,22 +381,22 @@ impl TextVcfSource {
         }
     }
 
-    fn read_sparse_arrow_variants(
+    fn read_sparse(
         self,
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         metadata_return: VcfMetadataReturn,
-    ) -> Result<SparseGenotypeMatrixArrowVariants> {
+    ) -> Result<SparseGenotypeMatrix> {
         Ok(self
             .read_sparse_with_metadata(
                 path,
                 variant_filter,
                 variant_window,
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
             )?
-            .into_arrow())
+            .into_output())
     }
 
     fn read_sparse_with_metadata(
@@ -435,22 +435,22 @@ impl TextVcfSource {
         }
     }
 
-    fn read_haplotype_sparse_arrow_variants(
+    fn read_haplotype_sparse(
         self,
         path: &Path,
         variant_filter: Option<&VariantFilter>,
         variant_window: Option<VariantWindow>,
         metadata_return: VcfMetadataReturn,
-    ) -> Result<SparseGenotypeMatrixArrowVariants> {
+    ) -> Result<SparseGenotypeMatrix> {
         Ok(self
             .read_haplotype_sparse_with_metadata(
                 path,
                 variant_filter,
                 variant_window,
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
             )?
-            .into_arrow())
+            .into_output())
     }
 
     fn read_haplotype_sparse_with_metadata(
@@ -530,24 +530,24 @@ macro_rules! with_indexed_text_vcf_input_for_threads {
     }};
 }
 
-pub(super) fn read_vcf_public_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
+pub(super) fn read_vcf_public_metadata(path: &Path) -> Result<MetadataOutput> {
     // Metadata reads can avoid strict full-header parsing. They only need the
     // #CHROM line plus record fields, which keeps real-world VCF headers from
     // forcing a strict parser onto the hot path.
     if is_compressed_vcf(path) {
         let mut reader = open_compressed_reader(path)?;
-        read_metadata_arrow_records(path, &mut reader)
+        read_metadata_records(path, &mut reader)
     } else {
         let mut reader = open_plain_reader(path)?;
-        read_metadata_arrow_records(path, &mut reader)
+        read_metadata_records(path, &mut reader)
     }
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "VCF Arrow metadata path keeps sample and variant return choices explicit"
+    reason = "VCF Output metadata path keeps sample and variant return choices explicit"
 )]
-pub(super) fn read_vcf_dense_arrow_variants(
+pub(super) fn read_vcf_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -556,9 +556,9 @@ pub(super) fn read_vcf_dense_arrow_variants(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
-    open_text_vcf_input(path, requested_samples, threads)?.read_dense_arrow_variants(
+    open_text_vcf_input(path, requested_samples, threads)?.read_dense(
         path,
         variant_filter,
         variant_window,
@@ -570,16 +570,16 @@ pub(super) fn read_vcf_dense_arrow_variants(
     )
 }
 
-pub(super) fn empty_vcf_dense_arrow_variants(
+pub(super) fn empty_vcf_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
     let selection = open_text_sample_selection(path, requested_samples, threads)?;
-    empty_dense_arrow_from_selection(
+    empty_dense_output_from_selection(
         selection,
         VcfMetadataReturn {
             samples: return_samples,
@@ -588,16 +588,16 @@ pub(super) fn empty_vcf_dense_arrow_variants(
     )
 }
 
-pub(super) fn empty_vcf_sparse_arrow_variants(
+pub(super) fn empty_vcf_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
     let selection = open_text_sample_selection(path, requested_samples, threads)?;
-    empty_sparse_arrow_from_selection(
+    empty_sparse_output_from_selection(
         selection,
         VcfMetadataReturn {
             samples: return_samples,
@@ -606,16 +606,16 @@ pub(super) fn empty_vcf_sparse_arrow_variants(
     )
 }
 
-pub(super) fn empty_vcf_haplotypes_dense_arrow_variants(
+pub(super) fn empty_vcf_haplotypes_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
     let selection = open_text_sample_selection(path, requested_samples, threads)?;
-    empty_haplotype_dense_arrow_from_selection(
+    empty_haplotype_dense_output_from_selection(
         selection,
         VcfMetadataReturn {
             samples: return_samples,
@@ -624,16 +624,16 @@ pub(super) fn empty_vcf_haplotypes_dense_arrow_variants(
     )
 }
 
-pub(super) fn empty_vcf_haplotypes_sparse_arrow_variants(
+pub(super) fn empty_vcf_haplotypes_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
     let selection = open_text_sample_selection(path, requested_samples, threads)?;
-    empty_haplotype_sparse_arrow_from_selection(
+    empty_haplotype_sparse_output_from_selection(
         selection,
         VcfMetadataReturn {
             samples: return_samples,
@@ -671,9 +671,9 @@ fn read_dense_with_metadata_from_input<R: BufRead>(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "indexed VCF Arrow boundary carries region, threading, and dense missing policy explicitly"
+    reason = "indexed VCF Output boundary carries region, threading, and dense missing policy explicitly"
 )]
-pub(super) fn read_vcf_dense_arrow_variants_indexed(
+pub(super) fn read_vcf_dense_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -683,7 +683,7 @@ pub(super) fn read_vcf_dense_arrow_variants_indexed(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_indexed_vcf_supported(path)?;
     let metadata_return = VcfMetadataReturn {
         samples: return_samples,
@@ -695,7 +695,7 @@ pub(super) fn read_vcf_dense_arrow_variants_indexed(
         region,
         threads,
         |input, reader| {
-            read_dense_records_arrow_variants(
+            read_dense_records(
                 path,
                 variant_filter,
                 variant_window,
@@ -706,15 +706,15 @@ pub(super) fn read_vcf_dense_arrow_variants_indexed(
                 reader,
             )
         },
-        |selection| empty_dense_arrow_from_selection(selection, metadata_return),
+        |selection| empty_dense_output_from_selection(selection, metadata_return),
     )
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "VCF Arrow metadata path keeps sample and variant return choices explicit"
+    reason = "VCF Output metadata path keeps sample and variant return choices explicit"
 )]
-pub(super) fn read_vcf_dosage_dense_arrow_variants(
+pub(super) fn read_vcf_dosage_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -723,9 +723,9 @@ pub(super) fn read_vcf_dosage_dense_arrow_variants(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
-    open_text_vcf_input(path, requested_samples, threads)?.read_dosage_dense_arrow_variants(
+    open_text_vcf_input(path, requested_samples, threads)?.read_dosage_dense(
         path,
         variant_filter,
         variant_window,
@@ -739,9 +739,9 @@ pub(super) fn read_vcf_dosage_dense_arrow_variants(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "indexed VCF Arrow boundary carries region, threading, and dense missing policy explicitly"
+    reason = "indexed VCF Output boundary carries region, threading, and dense missing policy explicitly"
 )]
-pub(super) fn read_vcf_dosage_dense_arrow_variants_indexed(
+pub(super) fn read_vcf_dosage_dense_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -751,7 +751,7 @@ pub(super) fn read_vcf_dosage_dense_arrow_variants_indexed(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_indexed_vcf_supported(path)?;
     let metadata_return = VcfMetadataReturn {
         samples: return_samples,
@@ -763,7 +763,7 @@ pub(super) fn read_vcf_dosage_dense_arrow_variants_indexed(
         region,
         threads,
         |input, reader| {
-            read_dosage_dense_records_arrow_variants(
+            read_dosage_dense_records(
                 path,
                 variant_filter,
                 variant_window,
@@ -774,7 +774,7 @@ pub(super) fn read_vcf_dosage_dense_arrow_variants_indexed(
                 reader,
             )
         },
-        |selection| empty_dense_arrow_from_selection(selection, metadata_return),
+        |selection| empty_dense_output_from_selection(selection, metadata_return),
     )
 }
 
@@ -807,9 +807,9 @@ fn read_dosage_dense_with_metadata_from_input<R: BufRead>(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "indexed VCF Arrow boundary carries region, threading, and dense missing policy explicitly"
+    reason = "indexed VCF Output boundary carries region, threading, and dense missing policy explicitly"
 )]
-pub(super) fn read_vcf_haplotypes_dense_arrow_variants_indexed(
+pub(super) fn read_vcf_haplotypes_dense_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -819,7 +819,7 @@ pub(super) fn read_vcf_haplotypes_dense_arrow_variants_indexed(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_indexed_vcf_supported(path)?;
     let metadata_return = VcfMetadataReturn {
         samples: return_samples,
@@ -831,7 +831,7 @@ pub(super) fn read_vcf_haplotypes_dense_arrow_variants_indexed(
         region,
         threads,
         |input, reader| {
-            read_haplotype_dense_records_arrow_variants(
+            read_haplotype_dense_records(
                 path,
                 variant_filter,
                 variant_window,
@@ -842,15 +842,15 @@ pub(super) fn read_vcf_haplotypes_dense_arrow_variants_indexed(
                 reader,
             )
         },
-        |selection| empty_haplotype_dense_arrow_from_selection(selection, metadata_return),
+        |selection| empty_haplotype_dense_output_from_selection(selection, metadata_return),
     )
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "VCF Arrow metadata path keeps sample and variant return choices explicit"
+    reason = "VCF Output metadata path keeps sample and variant return choices explicit"
 )]
-pub(super) fn read_vcf_haplotypes_dense_arrow_variants(
+pub(super) fn read_vcf_haplotypes_dense(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -859,9 +859,9 @@ pub(super) fn read_vcf_haplotypes_dense_arrow_variants(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
-    open_text_vcf_input(path, requested_samples, threads)?.read_haplotype_dense_arrow_variants(
+    open_text_vcf_input(path, requested_samples, threads)?.read_haplotype_dense(
         path,
         variant_filter,
         variant_window,
@@ -902,9 +902,9 @@ fn read_haplotype_dense_with_metadata_from_input<R: BufRead>(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "indexed VCF Arrow boundary carries region and threading explicitly"
+    reason = "indexed VCF Output boundary carries region and threading explicitly"
 )]
-pub(super) fn read_vcf_sparse_arrow_variants_indexed(
+pub(super) fn read_vcf_sparse_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -913,7 +913,7 @@ pub(super) fn read_vcf_sparse_arrow_variants_indexed(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     ensure_text_indexed_vcf_supported(path)?;
     let metadata_return = VcfMetadataReturn {
         samples: return_samples,
@@ -931,17 +931,17 @@ pub(super) fn read_vcf_sparse_arrow_variants_indexed(
                 variant_window,
                 Some(input.region),
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
                 input.selection,
                 reader,
             )
-            .map(TextSparseReadOutput::into_arrow)
+            .map(TextSparseReadOutput::into_output)
         },
-        |selection| empty_sparse_arrow_from_selection(selection, metadata_return),
+        |selection| empty_sparse_output_from_selection(selection, metadata_return),
     )
 }
 
-pub(super) fn read_vcf_sparse_arrow_variants(
+pub(super) fn read_vcf_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -949,9 +949,9 @@ pub(super) fn read_vcf_sparse_arrow_variants(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
-    open_text_vcf_input(path, requested_samples, threads)?.read_sparse_arrow_variants(
+    open_text_vcf_input(path, requested_samples, threads)?.read_sparse(
         path,
         variant_filter,
         variant_window,
@@ -989,9 +989,9 @@ fn read_sparse_with_metadata_from_input<R: BufRead>(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "indexed VCF Arrow boundary carries region and threading explicitly"
+    reason = "indexed VCF Output boundary carries region and threading explicitly"
 )]
-pub(super) fn read_vcf_haplotypes_sparse_arrow_variants_indexed(
+pub(super) fn read_vcf_haplotypes_sparse_indexed(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -1000,7 +1000,7 @@ pub(super) fn read_vcf_haplotypes_sparse_arrow_variants_indexed(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     ensure_text_indexed_vcf_supported(path)?;
     let metadata_return = VcfMetadataReturn {
         samples: return_samples,
@@ -1018,17 +1018,17 @@ pub(super) fn read_vcf_haplotypes_sparse_arrow_variants_indexed(
                 variant_window,
                 Some(input.region),
                 metadata_return,
-                VariantMetadataSinkKind::for_arrow_output(metadata_return),
+                VariantMetadataSinkKind::for_output(metadata_return),
                 input.selection,
                 reader,
             )
-            .map(TextSparseReadOutput::into_arrow)
+            .map(TextSparseReadOutput::into_output)
         },
-        |selection| empty_haplotype_sparse_arrow_from_selection(selection, metadata_return),
+        |selection| empty_haplotype_sparse_output_from_selection(selection, metadata_return),
     )
 }
 
-pub(super) fn read_vcf_haplotypes_sparse_arrow_variants(
+pub(super) fn read_vcf_haplotypes_sparse(
     path: &Path,
     requested_samples: Option<&[String]>,
     variant_filter: Option<&VariantFilter>,
@@ -1036,9 +1036,9 @@ pub(super) fn read_vcf_haplotypes_sparse_arrow_variants(
     return_samples: bool,
     return_variants: bool,
     threads: Option<usize>,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     ensure_text_vcf_supported(path, threads)?;
-    open_text_vcf_input(path, requested_samples, threads)?.read_haplotype_sparse_arrow_variants(
+    open_text_vcf_input(path, requested_samples, threads)?.read_haplotype_sparse(
         path,
         variant_filter,
         variant_window,
@@ -1074,45 +1074,40 @@ fn read_haplotype_sparse_with_metadata_from_input<R: BufRead>(
     )
 }
 
-fn empty_dense_arrow_from_selection(
+fn empty_dense_output_from_selection(
     selection: DenseSampleSelection,
     metadata_return: VcfMetadataReturn,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len();
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &selection.samples,
         metadata_return.samples,
         false,
     )?;
     let variants = metadata_return
         .variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(0));
-    TextDenseOutput::new(n_samples, 0, false).finish_arrow_variants(
-        0,
-        samples,
-        variants,
-        diagnostics,
-    )
+        .then(|| VariantMetadataBuffers::with_capacity(0));
+    TextDenseOutput::new(n_samples, 0, false).finish(0, samples, variants, diagnostics)
 }
 
-fn empty_sparse_arrow_from_selection(
+fn empty_sparse_output_from_selection(
     selection: DenseSampleSelection,
     metadata_return: VcfMetadataReturn,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len();
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &selection.samples,
         metadata_return.samples,
         false,
     )?;
     let variants = metadata_return
         .variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(0));
-    SparseGenotypeMatrixArrowVariants::new(
+        .then(|| VariantMetadataBuffers::with_capacity(0));
+    SparseGenotypeMatrix::new(
         n_samples,
         0,
         vec![0],
@@ -1124,47 +1119,42 @@ fn empty_sparse_arrow_from_selection(
     )
 }
 
-fn empty_haplotype_dense_arrow_from_selection(
+fn empty_haplotype_dense_output_from_selection(
     selection: DenseSampleSelection,
     metadata_return: VcfMetadataReturn,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len() * 2;
     let haplotype_samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &haplotype_samples,
         metadata_return.samples,
         true,
     )?;
     let variants = metadata_return
         .variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(0));
-    TextDenseOutput::new(n_samples, 0, false).finish_arrow_variants(
-        0,
-        samples,
-        variants,
-        diagnostics,
-    )
+        .then(|| VariantMetadataBuffers::with_capacity(0));
+    TextDenseOutput::new(n_samples, 0, false).finish(0, samples, variants, diagnostics)
 }
 
-fn empty_haplotype_sparse_arrow_from_selection(
+fn empty_haplotype_sparse_output_from_selection(
     selection: DenseSampleSelection,
     metadata_return: VcfMetadataReturn,
-) -> Result<SparseGenotypeMatrixArrowVariants> {
+) -> Result<SparseGenotypeMatrix> {
     let mut diagnostics = selection.diagnostics;
     diagnostics.retained_variants = 0;
     let n_samples = selection.samples.len() * 2;
     let haplotype_samples = haplotype_sample_records(&selection.samples, &selection.source_indices);
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &haplotype_samples,
         metadata_return.samples,
         true,
     )?;
     let variants = metadata_return
         .variants
-        .then(|| VariantMetadataArrowBuffers::with_capacity(0));
-    SparseGenotypeMatrixArrowVariants::new(
+        .then(|| VariantMetadataBuffers::with_capacity(0));
+    SparseGenotypeMatrix::new(
         n_samples,
         0,
         vec![0],
@@ -1176,13 +1166,12 @@ fn empty_haplotype_sparse_arrow_from_selection(
     )
 }
 
-fn read_metadata_arrow_records<R: BufRead>(
+fn read_metadata_records<R: BufRead>(
     path: &Path,
     reader: &mut noodles::io::Reader<R>,
-) -> Result<MetadataArrowOutput> {
+) -> Result<MetadataOutput> {
     let samples = read_sample_records_from_header(path, reader.get_mut())?;
-    let mut variants =
-        VariantMetadataArrowBuffers::with_capacity(VCF_METADATA_INITIAL_VARIANT_CAPACITY);
+    let mut variants = VariantMetadataBuffers::with_capacity(VCF_METADATA_INITIAL_VARIANT_CAPACITY);
     let mut has_phased_genotype_evidence = false;
     let mut record = noodles::Record::default();
 
@@ -1206,8 +1195,8 @@ fn read_metadata_arrow_records<R: BufRead>(
         SourceCapabilities::genotype_only()
     };
 
-    Ok(MetadataArrowOutput {
-        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
+    Ok(MetadataOutput {
+        samples: SampleMetadataBuffers::from_records(&samples, false)?,
         variants,
         capabilities,
     })
@@ -1217,7 +1206,7 @@ fn read_metadata_arrow_records<R: BufRead>(
     clippy::too_many_arguments,
     reason = "record loop receives prevalidated output mode, sample selection, and reader state"
 )]
-fn read_dense_records_arrow_variants<R: BufRead>(
+fn read_dense_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
@@ -1226,19 +1215,19 @@ fn read_dense_records_arrow_variants<R: BufRead>(
     source: DenseReadSource<'_>,
     selection: &genoio_core::DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     Ok(read_dense_records_with_metadata(
         path,
         variant_filter,
         variant_window,
         missing_policy,
         metadata_return,
-        VariantMetadataSinkKind::for_arrow_output(metadata_return),
+        VariantMetadataSinkKind::for_output(metadata_return),
         source,
         selection,
         reader,
     )?
-    .into_arrow())
+    .into_output())
 }
 
 #[expect(
@@ -1350,26 +1339,26 @@ fn read_dense_records_with_metadata<R: BufRead>(
     }
 
     diagnostics.retained_variants = output_variant_count;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &selection.samples,
         metadata_return.samples,
         false,
     )?;
     output
-        .finish_arrow_variants(
+        .finish(
             output_variant_count,
             samples,
-            variants.into_arrow()?,
+            variants.into_output()?,
             diagnostics,
         )
-        .map(TextDenseReadOutput::Arrow)
+        .map(TextDenseReadOutput::Output)
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "record loop receives prevalidated output mode, sample selection, and reader state"
 )]
-fn read_dosage_dense_records_arrow_variants<R: BufRead>(
+fn read_dosage_dense_records<R: BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
@@ -1378,19 +1367,19 @@ fn read_dosage_dense_records_arrow_variants<R: BufRead>(
     source: DenseReadSource<'_>,
     selection: &genoio_core::DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     Ok(read_dosage_dense_records_with_metadata(
         path,
         variant_filter,
         variant_window,
         missing_policy,
         metadata_return,
-        VariantMetadataSinkKind::for_arrow_output(metadata_return),
+        VariantMetadataSinkKind::for_output(metadata_return),
         source,
         selection,
         reader,
     )?
-    .into_arrow())
+    .into_output())
 }
 
 #[expect(
@@ -1485,26 +1474,26 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
     }
 
     diagnostics.retained_variants = output_variant_count;
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &selection.samples,
         metadata_return.samples,
         false,
     )?;
     output
-        .finish_arrow_variants(
+        .finish(
             output_variant_count,
             samples,
-            variants.into_arrow()?,
+            variants.into_output()?,
             diagnostics,
         )
-        .map(TextDenseReadOutput::Arrow)
+        .map(TextDenseReadOutput::Output)
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "record loop receives prevalidated output mode, sample selection, and reader state"
 )]
-fn read_haplotype_dense_records_arrow_variants<R: std::io::BufRead>(
+fn read_haplotype_dense_records<R: std::io::BufRead>(
     path: &Path,
     variant_filter: Option<&VariantFilter>,
     variant_window: Option<VariantWindow>,
@@ -1513,19 +1502,19 @@ fn read_haplotype_dense_records_arrow_variants<R: std::io::BufRead>(
     source_region: Option<&RegionPredicate>,
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
-) -> Result<DenseGenotypeMatrixArrowVariants> {
+) -> Result<DenseGenotypeMatrix> {
     Ok(read_haplotype_dense_records_with_metadata(
         path,
         variant_filter,
         variant_window,
         missing_policy,
         metadata_return,
-        VariantMetadataSinkKind::for_arrow_output(metadata_return),
+        VariantMetadataSinkKind::for_output(metadata_return),
         source_region,
         selection,
         reader,
     )?
-    .into_arrow())
+    .into_output())
 }
 
 #[expect(
@@ -1645,20 +1634,20 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
     }
 
     let haplotype_samples = haplotype_sample_records(&samples, &source_indices);
-    let samples = SampleMetadataArrowBuffers::optional_from_records(
+    let samples = SampleMetadataBuffers::optional_from_records(
         &haplotype_samples,
         metadata_return.samples,
         true,
     )?;
     diagnostics.retained_variants = output_variant_count;
     output
-        .finish_arrow_variants(
+        .finish(
             output_variant_count,
             samples,
-            variants.into_arrow()?,
+            variants.into_output()?,
             diagnostics,
         )
-        .map(TextDenseReadOutput::Arrow)
+        .map(TextDenseReadOutput::Output)
 }
 
 fn evaluate_text_gt_filter<V: VariantMetadataView + ?Sized>(

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use genoio_core::{
-    GenoioError, MetadataArrowOutput, SampleMetadataArrowBuffers, SourceCapabilities, VariantFilter,
+    GenoioError, MetadataOutput, SampleMetadataBuffers, SourceCapabilities, VariantFilter,
 };
 
 use crate::dosage_filter::evaluate_dosage_filter;
@@ -29,19 +29,18 @@ mod source;
 mod sparse;
 
 #[doc(inline)]
-pub use dense::read_plink2_dense_windowed_with_arrow_variants;
+pub use dense::read_plink2_dense_windowed;
 #[doc(inline)]
-pub use dosage::read_plink2_dosage_dense_windowed_with_arrow_variants;
+pub use dosage::read_plink2_dosage_dense_windowed;
 #[doc(inline)]
 pub use haplotype::{
-    read_plink2_haplotypes_dense_windowed_with_arrow_variants,
-    read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants,
-    read_plink2_haplotypes_sparse_windowed_with_arrow_variants,
+    read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_sparse_windowed,
 };
 #[doc(inline)]
-pub use sparse::read_plink2_sparse_windowed_with_arrow_variants;
+pub use sparse::read_plink2_sparse_windowed;
 
-use metadata::{parse_psam, parse_pvar_arrow};
+use metadata::{parse_psam, parse_pvar_metadata};
 use pgen::{read_supported_pgen_header, validate_plink2_dimensions};
 
 #[cfg(test)]
@@ -55,19 +54,15 @@ pub(super) fn require_genotype_decision_filter(
     })
 }
 
-/// Read PLINK2 metadata with variant metadata staged as Arrow-compatible buffers.
-pub fn read_plink2_metadata_arrow(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-) -> Result<MetadataArrowOutput> {
+/// Read PLINK2 metadata with variant metadata staged as columnar buffers.
+pub fn read_plink2_metadata(pgen: &Path, pvar: &Path, psam: &Path) -> Result<MetadataOutput> {
     let header = read_supported_pgen_header(pgen)?;
     let samples = parse_psam(psam)?;
-    let variants = parse_pvar_arrow(pvar)?;
+    let variants = parse_pvar_metadata(pvar)?;
     validate_plink2_dimensions(pgen, &header, samples.len(), variants.len())?;
 
-    Ok(MetadataArrowOutput {
-        samples: SampleMetadataArrowBuffers::from_records(&samples, false)?,
+    Ok(MetadataOutput {
+        samples: SampleMetadataBuffers::from_records(&samples, false)?,
         variants,
         capabilities: SourceCapabilities::genotype_only(),
     })

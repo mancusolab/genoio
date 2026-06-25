@@ -39,56 +39,6 @@ pub struct VariantRecord {
     pub n_called: Option<u32>,
 }
 
-/// Public sample metadata columns for Python/Arrow adapters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SampleMetadataColumns {
-    pub fids: Vec<Option<String>>,
-    pub iids: Vec<String>,
-    pub fathers: Vec<Option<String>>,
-    pub mothers: Vec<Option<String>>,
-    pub sexes: Vec<Option<String>>,
-    pub phenotypes: Vec<Option<String>>,
-    pub source_sample_indices: Option<Vec<Option<usize>>>,
-    pub haplotype_indices: Option<Vec<Option<usize>>>,
-}
-
-impl SampleMetadataColumns {
-    pub fn from_records(samples: Vec<SampleRecord>, include_haplotype_columns: bool) -> Self {
-        let mut fids = Vec::with_capacity(samples.len());
-        let mut iids = Vec::with_capacity(samples.len());
-        let mut fathers = Vec::with_capacity(samples.len());
-        let mut mothers = Vec::with_capacity(samples.len());
-        let mut sexes = Vec::with_capacity(samples.len());
-        let mut phenotypes = Vec::with_capacity(samples.len());
-        let mut source_sample_indices = Vec::with_capacity(samples.len());
-        let mut haplotype_indices = Vec::with_capacity(samples.len());
-
-        for sample in samples {
-            fids.push(sample.fid);
-            iids.push(sample.iid);
-            fathers.push(sample.father);
-            mothers.push(sample.mother);
-            sexes.push(sample.sex);
-            phenotypes.push(sample.phenotype);
-            if include_haplotype_columns {
-                source_sample_indices.push(sample.source_sample_index);
-                haplotype_indices.push(sample.haplotype_index);
-            }
-        }
-
-        Self {
-            fids,
-            iids,
-            fathers,
-            mothers,
-            sexes,
-            phenotypes,
-            source_sample_indices: include_haplotype_columns.then_some(source_sample_indices),
-            haplotype_indices: include_haplotype_columns.then_some(haplotype_indices),
-        }
-    }
-}
-
 /// Arrow-compatible nullable UTF-8 column buffers for Python/Arrow adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NullableStringColumnBuffers {
@@ -142,7 +92,7 @@ impl NullableStringColumnBuffers {
 
 /// Sample metadata with public fields staged in Arrow-compatible column buffers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SampleMetadataArrowBuffers {
+pub struct SampleMetadataBuffers {
     /// Family IDs; nullable because VCF/BGEN sources may not provide them.
     pub fids: NullableStringColumnBuffers,
     /// Individual/sample IDs; required for every public sample row.
@@ -175,7 +125,7 @@ impl<'a> SampleMetadataStr<'a> {
 /// Borrowed row view produced from columnar sample metadata on demand.
 ///
 /// This exists for tests and diagnostics that need row-shaped assertions. The
-/// main reader and Python paths should keep using `SampleMetadataArrowBuffers`
+/// main reader and Python paths should keep using `SampleMetadataBuffers`
 /// directly so they do not re-materialize sample records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SampleMetadataRow<'a> {
@@ -191,11 +141,11 @@ pub struct SampleMetadataRow<'a> {
 
 #[derive(Debug, Clone)]
 pub struct SampleMetadataRows<'a> {
-    buffers: &'a SampleMetadataArrowBuffers,
+    buffers: &'a SampleMetadataBuffers,
     index: usize,
 }
 
-impl SampleMetadataArrowBuffers {
+impl SampleMetadataBuffers {
     /// Allocate sample metadata columns for `row_capacity` public sample rows.
     ///
     /// `include_haplotype_columns` controls whether the public Arrow schema
@@ -289,42 +239,6 @@ impl SampleMetadataArrowBuffers {
         SampleMetadataRows {
             buffers: self,
             index: 0,
-        }
-    }
-}
-
-/// Public variant metadata columns for Python/Arrow adapters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VariantMetadataColumns {
-    pub chroms: Vec<String>,
-    pub positions: Vec<u32>,
-    pub ids: Vec<String>,
-    pub a0s: Vec<String>,
-    pub a1s: Vec<String>,
-}
-
-impl VariantMetadataColumns {
-    pub fn from_records(variants: Vec<VariantRecord>) -> Self {
-        let mut chroms = Vec::with_capacity(variants.len());
-        let mut positions = Vec::with_capacity(variants.len());
-        let mut ids = Vec::with_capacity(variants.len());
-        let mut a0s = Vec::with_capacity(variants.len());
-        let mut a1s = Vec::with_capacity(variants.len());
-
-        for variant in variants {
-            chroms.push(variant.chrom);
-            positions.push(variant.pos);
-            ids.push(variant.id);
-            a0s.push(variant.a0);
-            a1s.push(variant.a1);
-        }
-
-        Self {
-            chroms,
-            positions,
-            ids,
-            a0s,
-            a1s,
         }
     }
 }
@@ -485,7 +399,7 @@ fn append_utf8_value(
 /// Non-public fields are retained as columns so format readers can attach
 /// genotype-derived statistics without leaving the columnar backend.
 #[derive(Debug, Clone, PartialEq)]
-pub struct VariantMetadataArrowBuffers {
+pub struct VariantMetadataBuffers {
     pub chroms: StringColumnBuffers,
     pub positions: Vec<i64>,
     pub ids: StringColumnBuffers,
@@ -504,7 +418,7 @@ pub struct VariantMetadataArrowBuffers {
     pub n_called: Vec<Option<u32>>,
 }
 
-impl VariantMetadataArrowBuffers {
+impl VariantMetadataBuffers {
     /// Allocate variant metadata columns for `row_capacity` public variant rows.
     pub fn with_capacity(row_capacity: usize) -> Self {
         Self {
@@ -692,17 +606,9 @@ fn exact_u32_from_f64(value: f64) -> Option<u32> {
 
 /// Complete source metadata with public variants already staged as column buffers.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MetadataArrowOutput {
-    pub samples: SampleMetadataArrowBuffers,
-    pub variants: VariantMetadataArrowBuffers,
-    pub capabilities: SourceCapabilities,
-}
-
-/// Complete source metadata returned before or alongside matrix reads.
-#[derive(Debug, Clone, PartialEq)]
 pub struct MetadataOutput {
-    pub samples: Vec<SampleRecord>,
-    pub variants: Vec<VariantRecord>,
+    pub samples: SampleMetadataBuffers,
+    pub variants: VariantMetadataBuffers,
     pub capabilities: SourceCapabilities,
 }
 
@@ -721,27 +627,6 @@ mod tests {
             phenotype: None,
             source_sample_index,
             haplotype_index: None,
-        }
-    }
-
-    fn variant(id: &str, pos: u32) -> VariantRecord {
-        VariantRecord {
-            chrom: "1".to_string(),
-            pos,
-            id: id.to_string(),
-            a0: "A".to_string(),
-            a1: "G".to_string(),
-            ref_allele: Some("A".to_string()),
-            alt_allele: Some("G,T".to_string()),
-            source_a0: "A".to_string(),
-            source_a1: "G".to_string(),
-            flipped: false,
-            qual: Some(99.0),
-            af: Some(0.2),
-            maf: Some(0.2),
-            mac: Some(4),
-            missing_rate: Some(0.0),
-            n_called: Some(20),
         }
     }
 
@@ -816,33 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn sample_metadata_columns_preserve_public_order_and_optional_mapping_columns() {
-        let columns = SampleMetadataColumns::from_records(
-            vec![sample("s1", Some(2)), sample("s2", Some(7))],
-            true,
-        );
-
-        assert_eq!(
-            columns.fids,
-            vec![Some("F_s1".to_string()), Some("F_s2".to_string())]
-        );
-        assert_eq!(columns.iids, vec!["s1".to_string(), "s2".to_string()]);
-        assert_eq!(
-            columns.mothers,
-            vec![Some("0".to_string()), Some("0".to_string())]
-        );
-        assert_eq!(columns.source_sample_indices, Some(vec![Some(2), Some(7)]));
-        assert_eq!(columns.haplotype_indices, Some(vec![None, None]));
-
-        let columns_without_mapping =
-            SampleMetadataColumns::from_records(vec![sample("s3", Some(9))], false);
-        assert_eq!(columns_without_mapping.source_sample_indices, None);
-        assert_eq!(columns_without_mapping.haplotype_indices, None);
-    }
-
-    #[test]
-    fn sample_metadata_arrow_buffers_preserve_nullable_strings_and_mapping_columns() {
-        let buffers = SampleMetadataArrowBuffers::from_records(
+    fn sample_metadata_buffers_preserve_nullable_strings_and_mapping_columns() {
+        let buffers = SampleMetadataBuffers::from_records(
             &[sample("s1", Some(2)), sample("s2", Some(7))],
             true,
         )
@@ -857,22 +717,10 @@ mod tests {
         assert_eq!(buffers.haplotype_indices, Some(vec![None, None]));
 
         let buffers_without_mapping =
-            SampleMetadataArrowBuffers::from_records(&[sample("s3", Some(9))], false)
+            SampleMetadataBuffers::from_records(&[sample("s3", Some(9))], false)
                 .expect("sample buffers should be built");
         assert_eq!(buffers_without_mapping.source_sample_indices, None);
         assert_eq!(buffers_without_mapping.haplotype_indices, None);
-    }
-
-    #[test]
-    fn variant_metadata_columns_preserve_public_order_and_drop_internal_fields() {
-        let columns =
-            VariantMetadataColumns::from_records(vec![variant("rs1", 10), variant("rs2", 20)]);
-
-        assert_eq!(columns.chroms, vec!["1".to_string(), "1".to_string()]);
-        assert_eq!(columns.positions, vec![10, 20]);
-        assert_eq!(columns.ids, vec!["rs1".to_string(), "rs2".to_string()]);
-        assert_eq!(columns.a0s, vec!["A".to_string(), "A".to_string()]);
-        assert_eq!(columns.a1s, vec!["G".to_string(), "G".to_string()]);
     }
 
     #[test]
@@ -888,8 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn variant_metadata_arrow_buffers_preserve_public_columns() {
-        let mut buffers = VariantMetadataArrowBuffers::with_capacity(2);
+    fn variant_metadata_buffers_preserve_public_columns() {
+        let mut buffers = VariantMetadataBuffers::with_capacity(2);
 
         buffers.push("1", 10, "rs1", "A", "G").unwrap();
         buffers.push("2", 20, ".", "C", "T").unwrap();
@@ -904,8 +752,8 @@ mod tests {
     }
 
     #[test]
-    fn variant_metadata_arrow_buffers_append_borrowed_views() {
-        let mut buffers = VariantMetadataArrowBuffers::with_capacity(1);
+    fn variant_metadata_buffers_append_borrowed_views() {
+        let mut buffers = VariantMetadataBuffers::with_capacity(1);
 
         buffers.push_view(&borrowed_variant()).unwrap();
 
@@ -917,8 +765,8 @@ mod tests {
     }
 
     #[test]
-    fn variant_metadata_arrow_buffers_append_views_with_stats() {
-        let mut buffers = VariantMetadataArrowBuffers::with_capacity(1);
+    fn variant_metadata_buffers_append_views_with_stats() {
+        let mut buffers = VariantMetadataBuffers::with_capacity(1);
         let stats = VariantStats {
             af: Some(0.75),
             maf: Some(0.25),
@@ -940,8 +788,8 @@ mod tests {
     }
 
     #[test]
-    fn variant_metadata_arrow_buffers_mutate_retained_rows() {
-        let mut buffers = VariantMetadataArrowBuffers::with_capacity(1);
+    fn variant_metadata_buffers_mutate_retained_rows() {
+        let mut buffers = VariantMetadataBuffers::with_capacity(1);
         buffers.push_view(&borrowed_variant()).unwrap();
 
         buffers.flip_to_minor_allele(0).unwrap();

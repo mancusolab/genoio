@@ -1,11 +1,10 @@
 // pattern: Functional Core
 
 use crate::{
-    DenseDiagnostics, GenoioError, SampleMetadataArrowBuffers, SampleRecord,
-    VariantMetadataArrowBuffers, VariantRecord,
+    DenseDiagnostics, GenoioError, SampleMetadataBuffers, VariantMetadataBuffers, VariantRecord,
 };
 
-/// Sparse genotype matrix stored as SciPy-compatible CSC arrays.
+/// Sparse genotype matrix stored as SciPy-compatible CSC arrays with optional metadata.
 ///
 /// Columns are variants and rows are samples. Python can expose the same data
 /// as CSC or convert to CSR after crossing the FFI boundary. `indptr` and
@@ -18,13 +17,15 @@ pub struct SparseGenotypeMatrix {
     pub indptr: Vec<i32>,
     pub indices: Vec<i32>,
     pub data: Vec<f32>,
-    pub samples: Vec<SampleRecord>,
-    pub variants: Vec<VariantRecord>,
+    /// Requested sample metadata; `None` means it was omitted.
+    pub samples: Option<SampleMetadataBuffers>,
+    /// Requested variant metadata; `None` means it was omitted.
+    pub variants: Option<VariantMetadataBuffers>,
     pub diagnostics: DenseDiagnostics,
 }
 
 impl SparseGenotypeMatrix {
-    /// Build a sparse matrix after validating CSC and metadata contracts.
+    /// Build a sparse matrix after validating CSC and optional metadata contracts.
     #[expect(
         clippy::too_many_arguments,
         reason = "constructor mirrors validated CSC matrix fields"
@@ -35,76 +36,8 @@ impl SparseGenotypeMatrix {
         indptr: Vec<i32>,
         indices: Vec<i32>,
         data: Vec<f32>,
-        samples: Vec<SampleRecord>,
-        variants: Vec<VariantRecord>,
-        diagnostics: DenseDiagnostics,
-    ) -> Result<Self, GenoioError> {
-        validate_csc_contract(n_rows, n_cols, &indptr, &indices, &data)?;
-        if samples.len() != n_rows {
-            return Err(GenoioError::invalid_source(
-                "<sparse>",
-                format!(
-                    "sample metadata length {} does not match n_rows {n_rows}",
-                    samples.len()
-                ),
-            ));
-        }
-        if variants.len() != n_cols {
-            return Err(GenoioError::invalid_source(
-                "<sparse>",
-                format!(
-                    "variant metadata length {} does not match n_cols {n_cols}",
-                    variants.len()
-                ),
-            ));
-        }
-
-        Ok(Self {
-            n_rows,
-            n_cols,
-            indptr,
-            indices,
-            data,
-            samples,
-            variants,
-            diagnostics,
-        })
-    }
-}
-
-/// Sparse genotype matrix with public variants staged in Arrow-compatible buffers.
-///
-/// This uses the same `i32` sparse-index contract as `SparseGenotypeMatrix`;
-/// shape fields remain `usize` because they are Rust-side dimensions, not
-/// Python sparse index payloads.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SparseGenotypeMatrixArrowVariants {
-    pub n_rows: usize,
-    pub n_cols: usize,
-    pub indptr: Vec<i32>,
-    pub indices: Vec<i32>,
-    pub data: Vec<f32>,
-    /// Requested sample metadata in Arrow-compatible buffers; `None` means it was omitted.
-    pub samples: Option<SampleMetadataArrowBuffers>,
-    /// Requested variant metadata in Arrow-compatible buffers; `None` means it was omitted.
-    pub variants: Option<VariantMetadataArrowBuffers>,
-    pub diagnostics: DenseDiagnostics,
-}
-
-impl SparseGenotypeMatrixArrowVariants {
-    /// Build a sparse matrix with optional sample metadata and optional Arrow variant metadata.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "constructor mirrors validated CSC matrix fields"
-    )]
-    pub fn new(
-        n_rows: usize,
-        n_cols: usize,
-        indptr: Vec<i32>,
-        indices: Vec<i32>,
-        data: Vec<f32>,
-        samples: Option<SampleMetadataArrowBuffers>,
-        variants: Option<VariantMetadataArrowBuffers>,
+        samples: Option<SampleMetadataBuffers>,
+        variants: Option<VariantMetadataBuffers>,
         diagnostics: DenseDiagnostics,
     ) -> Result<Self, GenoioError> {
         validate_csc_contract(n_rows, n_cols, &indptr, &indices, &data)?;

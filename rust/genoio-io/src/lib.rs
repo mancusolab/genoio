@@ -33,31 +33,21 @@ mod retention;
 mod vcf;
 
 pub use bgen::{
-    read_bgen_dosage_dense_windowed_with_arrow_variants,
-    read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants, read_bgen_metadata_arrow,
+    read_bgen_dosage_dense_windowed, read_bgen_haplotypes_dosage_dense_windowed, read_bgen_metadata,
 };
 pub use error::Result;
 pub use plink::{
-    read_plink1_dense_windowed_with_arrow_variants, read_plink1_metadata_arrow,
-    read_plink1_sparse_windowed_with_arrow_variants,
-    read_plink2_dense_windowed_with_arrow_variants,
-    read_plink2_dosage_dense_windowed_with_arrow_variants,
-    read_plink2_haplotypes_dense_windowed_with_arrow_variants,
-    read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants,
-    read_plink2_haplotypes_sparse_windowed_with_arrow_variants, read_plink2_metadata_arrow,
-    read_plink2_sparse_windowed_with_arrow_variants,
+    read_plink1_dense_windowed, read_plink1_metadata, read_plink1_sparse_windowed,
+    read_plink2_dense_windowed, read_plink2_dosage_dense_windowed,
+    read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,
+    read_plink2_haplotypes_sparse_windowed, read_plink2_metadata, read_plink2_sparse_windowed,
 };
 pub use vcf::{
-    read_vcf_dense_windowed_with_arrow_variants,
-    read_vcf_dense_windowed_with_threads_and_arrow_variants,
-    read_vcf_dosage_dense_windowed_with_arrow_variants,
-    read_vcf_dosage_dense_windowed_with_threads_and_arrow_variants,
-    read_vcf_haplotypes_dense_windowed_with_arrow_variants,
-    read_vcf_haplotypes_dense_windowed_with_threads_and_arrow_variants,
-    read_vcf_haplotypes_sparse_windowed_with_arrow_variants,
-    read_vcf_haplotypes_sparse_windowed_with_threads_and_arrow_variants,
-    read_vcf_public_metadata_arrow, read_vcf_sparse_windowed_with_arrow_variants,
-    read_vcf_sparse_windowed_with_threads_and_arrow_variants,
+    read_vcf_dense_windowed, read_vcf_dense_windowed_with_threads, read_vcf_dosage_dense_windowed,
+    read_vcf_dosage_dense_windowed_with_threads, read_vcf_haplotypes_dense_windowed,
+    read_vcf_haplotypes_dense_windowed_with_threads, read_vcf_haplotypes_sparse_windowed,
+    read_vcf_haplotypes_sparse_windowed_with_threads, read_vcf_public_metadata,
+    read_vcf_sparse_windowed, read_vcf_sparse_windowed_with_threads,
 };
 
 /// Return the compiled Rust IO backend name for diagnostics.
