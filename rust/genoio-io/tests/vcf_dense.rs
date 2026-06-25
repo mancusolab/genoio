@@ -6,10 +6,13 @@ use std::path::Path;
 
 mod common;
 
-use common::dense::{
-    assert_values_with_nan, dense_missing_sample_major, dense_values_sample_major,
-};
+use common::dense::assert_values_with_nan;
 use common::unique_dir;
+use common::vcf_arrow as genoio_io;
+use common::vcf_arrow::{
+    dense_missing_sample_major_arrow as dense_missing_sample_major,
+    dense_values_sample_major_arrow as dense_values_sample_major, variant_ids, variants,
+};
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -65,14 +68,7 @@ fn vcf_dense_values_count_a1_in_sample_by_variant_shape() {
             .collect::<Vec<_>>(),
         vec!["S1", "S2", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -142,7 +138,7 @@ this record is intentionally not valid VCF and should not be decoded
             .collect::<Vec<_>>(),
         vec!["S1", "S2"]
     );
-    assert!(dense.variants.is_empty());
+    assert!(variants(&dense.variants).is_empty());
 }
 
 #[test]
@@ -172,7 +168,7 @@ fn vcf_dense_matrix_only_omits_metadata() {
     );
     assert_eq!(dense_missing_sample_major(&dense), vec![false; 6]);
     assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.variants.is_none());
 }
 
 #[test]
@@ -206,7 +202,7 @@ fn vcf_dosage_dense_matrix_only_omits_metadata() {
         vec![false, false, false, true, false, false]
     );
     assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.variants.is_none());
 }
 
 #[test]
@@ -243,14 +239,7 @@ fn compressed_vcf_dosage_dense_uses_text_backend_semantics() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]
@@ -422,7 +411,7 @@ fn compressed_vcf_matrix_only_uses_text_backend_semantics() {
         vec![false, false, false, true]
     );
     assert!(dense.samples.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(dense.variants.is_none());
 }
 
 #[test]
@@ -463,14 +452,7 @@ fn compressed_vcf_dense_with_metadata_uses_text_backend_semantics() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
 }
 
 #[test]

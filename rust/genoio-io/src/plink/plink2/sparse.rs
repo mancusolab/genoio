@@ -9,9 +9,8 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
-    GenoioError, GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
-    VariantWindow,
+    GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -40,50 +39,6 @@ fn append_decoded_sparse_column(
     flip_values_to_minor_allele(&mut decoder_state.values, variant);
     append_sparse_column(indptr, indices, data, &decoder_state.values);
     Ok(())
-}
-
-fn sparse_arrow_output_to_rows(
-    output: SparseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<SparseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "PLINK2 hardcall {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-/// Read all retained PLINK2 hard-call genotypes as sparse CSC.
-pub fn read_plink2_sparse(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink2_sparse_windowed(pgen, pvar, psam, requested_samples, variant_filter, None)
-}
-
-/// Read retained PLINK2 hard calls as sparse CSC over an optional block window.
-pub fn read_plink2_sparse_windowed(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink2_sparse_windowed_with_arrow_variants(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        true,
-        true,
-    )
-    .and_then(|output| sparse_arrow_output_to_rows(output, "sparse"))
 }
 
 #[expect(

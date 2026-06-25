@@ -8,7 +8,12 @@ const PGEN_DOSAGE_TOLERANCE: f32 = 2.0 / 32768.0;
 mod common;
 
 use common::dense::{assert_values_with_nan, dense_missing_sample_major};
+use common::legacy as legacy_io;
 use common::unique_dir;
+use common::vcf_arrow as genoio_io;
+use common::vcf_arrow::{
+    dense_missing_sample_major_arrow as dense_missing_sample_major_vcf, variant_id, variants,
+};
 
 fn write_vcf(path: &Path) {
     fs::write(
@@ -200,7 +205,7 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
     }))
     .expect("filter should parse");
 
-    let dense = genoio_io::read_plink2_dosage_dense_windowed(
+    let dense = legacy_io::read_plink2_dosage_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -246,14 +251,18 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
         .expect("vcf dosage should filter");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs2");
+    let variant_metadata = variants(&dense.variants);
+    assert_eq!(variant_id(variant_metadata, 0), "rs2");
     assert_values_with_nan(&dense.values, &[0.0, f32::NAN, 0.7]);
-    assert_eq!(dense_missing_sample_major(&dense), vec![false, true, false]);
-    assert_eq!(dense.variants[0].af, Some(0.175));
-    assert_eq!(dense.variants[0].maf, Some(0.175));
-    assert_eq!(dense.variants[0].mac, None);
-    assert_eq!(dense.variants[0].missing_rate, Some(1.0 / 3.0));
-    assert_eq!(dense.variants[0].n_called, Some(2));
+    assert_eq!(
+        dense_missing_sample_major_vcf(&dense),
+        vec![false, true, false]
+    );
+    assert_eq!(variant_metadata.afs[0], Some(0.175));
+    assert_eq!(variant_metadata.mafs[0], Some(0.175));
+    assert_eq!(variant_metadata.macs[0], None);
+    assert_eq!(variant_metadata.missing_rates[0], Some(1.0 / 3.0));
+    assert_eq!(variant_metadata.n_called[0], Some(2));
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -265,10 +274,10 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.samples.is_empty());
-    assert!(matrix_only.variants.is_empty());
+    assert!(matrix_only.variants.is_none());
     assert_values_with_nan(&matrix_only.values, &[0.0, f32::NAN, 0.7]);
     assert_eq!(
-        dense_missing_sample_major(&matrix_only),
+        dense_missing_sample_major_vcf(&matrix_only),
         vec![false, true, false]
     );
 }
@@ -288,13 +297,14 @@ fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
     let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("vcf should filter");
 
     assert_eq!(dense.n_variants, 1);
-    assert_eq!(dense.variants[0].id, "rs1");
+    let variant_metadata = variants(&dense.variants);
+    assert_eq!(variant_id(variant_metadata, 0), "rs1");
     assert_eq!(dense.values, vec![0.0, 1.0, 2.0]);
-    assert_eq!(dense.variants[0].af, Some(0.5));
-    assert_eq!(dense.variants[0].maf, Some(0.5));
-    assert_eq!(dense.variants[0].mac, Some(3));
-    assert_eq!(dense.variants[0].missing_rate, Some(0.0));
-    assert_eq!(dense.variants[0].n_called, Some(3));
+    assert_eq!(variant_metadata.afs[0], Some(0.5));
+    assert_eq!(variant_metadata.mafs[0], Some(0.5));
+    assert_eq!(variant_metadata.macs[0], Some(3));
+    assert_eq!(variant_metadata.missing_rates[0], Some(0.0));
+    assert_eq!(variant_metadata.n_called[0], Some(3));
     assert_eq!(dense.diagnostics.candidate_variants, 3);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 2);
@@ -305,10 +315,10 @@ fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
     assert_eq!(matrix_only.n_samples, 3);
     assert_eq!(matrix_only.n_variants, 1);
     assert!(matrix_only.samples.is_empty());
-    assert!(matrix_only.variants.is_empty());
+    assert!(matrix_only.variants.is_none());
     assert_eq!(matrix_only.values, vec![0.0, 1.0, 2.0]);
     assert_eq!(
-        dense_missing_sample_major(&matrix_only),
+        dense_missing_sample_major_vcf(&matrix_only),
         vec![false, false, false]
     );
 }
@@ -324,7 +334,7 @@ fn filter_genotype_stats_plink2_match_expanded_stats_and_attach_metadata() {
     }))
     .expect("filter should parse");
 
-    let dense = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
+    let dense = legacy_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
         .expect("plink2 should filter");
 
     assert_eq!(dense.n_variants, 3);
@@ -372,7 +382,7 @@ fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
     }))
     .expect("filter should parse");
 
-    let dense = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, Some(&keep), Some(&filter))
+    let dense = legacy_io::read_plink2_dense(&pgen, &pvar, &psam, Some(&keep), Some(&filter))
         .expect("variable-width plink2 should filter");
 
     assert_eq!(
@@ -423,9 +433,9 @@ fn filter_genotype_stats_plink2_sparse_keeps_dense_filter_semantics() {
     }))
     .expect("filter should parse");
 
-    let dense = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
+    let dense = legacy_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
         .expect("dense plink2 should filter");
-    let sparse = genoio_io::read_plink2_sparse(&pgen, &pvar, &psam, None, Some(&filter))
+    let sparse = legacy_io::read_plink2_sparse(&pgen, &pvar, &psam, None, Some(&filter))
         .expect("sparse plink2 should filter");
 
     assert_eq!(

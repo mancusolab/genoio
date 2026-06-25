@@ -6,8 +6,13 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::dense::dense_values_sample_major;
+use common::legacy as legacy_io;
 use common::unique_dir;
+use common::vcf_arrow as genoio_io;
+use common::vcf_arrow::{
+    dense_values_sample_major_arrow, sparse_values_dense_arrow, variant_a0, variant_a1,
+    variant_ids, variants,
+};
 
 fn write_text(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -86,7 +91,10 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
 
     assert_eq!(sparse.n_rows, dense.n_samples);
     assert_eq!(sparse.n_cols, dense.n_variants);
-    assert_eq!(csc_to_dense(&sparse), dense_values_sample_major(&dense));
+    assert_eq!(
+        sparse_values_dense_arrow(&sparse),
+        dense_values_sample_major_arrow(&dense)
+    );
 }
 
 #[test]
@@ -134,14 +142,8 @@ fn compressed_vcf_sparse_windowed_matches_existing_sparse_semantics() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(
-        sparse
-            .variants
-            .iter()
-            .map(|variant| (variant.id.as_str(), variant.flipped))
-            .collect::<Vec<_>>(),
-        vec![("rs1", false), ("rs2", true)]
-    );
+    assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs1", "rs2"]);
+    assert_eq!(variants(&sparse.variants).flipped, vec![false, true]);
 }
 
 #[test]
@@ -149,9 +151,9 @@ fn plink1_sparse_reconstructs_dense_when_no_missing_calls() {
     let dir = unique_dir("plink1-sparse-parity");
     let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c]);
 
-    let dense = genoio_io::read_plink1_dense(&bed, &bim, &fam, None, None)
+    let dense = legacy_io::read_plink1_dense(&bed, &bim, &fam, None, None)
         .expect("dense plink should decode");
-    let sparse = genoio_io::read_plink1_sparse(&bed, &bim, &fam, None, None)
+    let sparse = legacy_io::read_plink1_sparse(&bed, &bim, &fam, None, None)
         .expect("sparse plink should decode");
 
     assert_eq!(csc_to_dense(&sparse), dense.values);
@@ -189,9 +191,10 @@ fn sparse_reads_flip_common_minor_allele_columns_by_default() {
     let sparse = genoio_io::read_vcf_sparse(&path, None, None).expect("sparse vcf should decode");
 
     assert_eq!(dense.values, vec![2.0, 2.0, 1.0]);
-    assert_eq!(csc_to_dense(&sparse), vec![0.0, 0.0, 1.0]);
-    assert!(sparse.variants[0].flipped);
-    assert_eq!(sparse.variants[0].a0, "G");
-    assert_eq!(sparse.variants[0].a1, "A");
-    assert!(!dense.variants[0].flipped);
+    assert_eq!(sparse_values_dense_arrow(&sparse), vec![0.0, 0.0, 1.0]);
+    let sparse_variants = variants(&sparse.variants);
+    assert!(sparse_variants.flipped[0]);
+    assert_eq!(variant_a0(sparse_variants, 0), "G");
+    assert_eq!(variant_a1(sparse_variants, 0), "A");
+    assert!(!variants(&dense.variants).flipped[0]);
 }

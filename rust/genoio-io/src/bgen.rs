@@ -19,16 +19,8 @@ mod index;
 mod io;
 mod session;
 
-pub use dense::{
-    read_bgen_dosage_dense, read_bgen_dosage_dense_windowed,
-    read_bgen_dosage_dense_windowed_with_arrow_variants,
-    read_bgen_dosage_dense_windowed_with_missing_policy,
-};
-pub use haplotype::{
-    read_bgen_haplotypes_dosage_dense_windowed,
-    read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants,
-    read_bgen_haplotypes_dosage_dense_windowed_with_missing_policy,
-};
+pub use dense::read_bgen_dosage_dense_windowed_with_arrow_variants;
+pub use haplotype::read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants;
 
 use session::BgenReadSession;
 

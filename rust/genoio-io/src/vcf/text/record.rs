@@ -76,6 +76,45 @@ where
     })
 }
 
+pub(in crate::vcf) fn append_public_variant_metadata_from_noodles_variant_record<R>(
+    path: &Path,
+    header: &noodles::Header,
+    record: &R,
+    variants: &mut VariantMetadataArrowBuffers,
+) -> Result<()>
+where
+    R: noodles::variant::Record + ?Sized,
+{
+    let chrom = record
+        .reference_sequence_name(header)
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf chrom error: {error}")))?;
+    if chrom.is_empty() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "vcf record is missing a chromosome id",
+        ));
+    }
+
+    let pos = record
+        .variant_start()
+        .transpose()
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf position error: {error}")))?
+        .ok_or_else(|| GenoioError::invalid_source(path, "vcf record position is missing"))?;
+    let pos = i64::try_from(pos.get())
+        .map_err(|_| GenoioError::invalid_source(path, "vcf record position is out of range"))?;
+
+    let ref_allele = reference_bases_string(path, record)?;
+    let first_alt = first_alternate_base_string(path, record)?.ok_or_else(|| {
+        GenoioError::invalid_source(
+            path,
+            format!("vcf record {chrom}:{pos} has fewer than two alleles"),
+        )
+    })?;
+    let id = first_trait_record_id(record);
+
+    variants.push(chrom, pos, &id, &ref_allele, &first_alt)
+}
+
 pub(super) fn variant_in_region(variant: &VariantRecord, region: &RegionPredicate) -> bool {
     variant.chrom == region.chrom && variant.pos >= region.start && variant.pos <= region.end
 }
@@ -216,6 +255,20 @@ where
         })?);
     }
     Ok(values)
+}
+
+fn first_alternate_base_string<R>(path: &Path, record: &R) -> Result<Option<String>>
+where
+    R: noodles::variant::Record + ?Sized,
+{
+    let alternate_bases = record.alternate_bases();
+    let first = match alternate_bases.iter().next() {
+        Some(result) => result.map(str::to_string).map(Some).map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf alternate allele error: {error}"))
+        }),
+        None => Ok(None),
+    };
+    first
 }
 
 fn first_id(record: &noodles::Record) -> String {

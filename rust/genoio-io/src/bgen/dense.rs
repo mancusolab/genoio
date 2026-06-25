@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants,
-    DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError, PartialFilterDecision,
-    VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, PartialFilterDecision, VariantFilter,
+    VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -26,17 +26,6 @@ use super::decode::{
 use super::filter::{apply_genotype_filter_result, decode_and_evaluate_dosage_filter};
 use super::index::{indexed_region_records, BgenIndexRecord};
 use super::session::{BgenIndexedReadContext, BgenReadSession, BgenVariantCursor};
-
-fn dense_arrow_output_to_rows(
-    output: DenseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<DenseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "BGEN {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
 
 fn empty_dense_arrow_for_samples(
     samples: Vec<genoio_core::SampleRecord>,
@@ -57,65 +46,6 @@ fn empty_dense_arrow_for_samples(
         variants,
         diagnostics,
     )
-}
-
-pub fn read_bgen_dosage_dense(
-    bgen: &Path,
-    sample: Option<&Path>,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<DenseGenotypeMatrix> {
-    read_bgen_dosage_dense_windowed_with_missing_policy(
-        bgen,
-        sample,
-        requested_samples,
-        variant_filter,
-        None,
-        DenseMissingPolicy::Nan,
-        false,
-    )
-}
-
-/// Read retained BGEN biallelic diploid dosages as a dense matrix.
-pub fn read_bgen_dosage_dense_windowed(
-    bgen: &Path,
-    sample: Option<&Path>,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_bgen_dosage_dense_windowed_with_missing_policy(
-        bgen,
-        sample,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-pub fn read_bgen_dosage_dense_windowed_with_missing_policy(
-    bgen: &Path,
-    sample: Option<&Path>,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_bgen_dosage_dense_windowed_with_arrow_variants(
-        bgen,
-        sample,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dosage dense"))
 }
 
 #[expect(

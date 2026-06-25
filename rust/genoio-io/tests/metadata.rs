@@ -21,6 +21,7 @@ use noodles_vcf::{
 mod common;
 
 use common::unique_dir;
+use common::vcf_arrow::{variant_a0, variant_a1, variant_chrom, variant_ids};
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -109,7 +110,8 @@ fn vcf_metadata_preserves_header_sample_and_variant_order() {
 ",
     );
 
-    let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
+    let metadata =
+        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -120,17 +122,16 @@ fn vcf_metadata_preserves_header_sample_and_variant_order() {
         vec!["s1", "s2", "s3"]
     );
     assert_eq!(
-        metadata
-            .variants
-            .iter()
-            .map(|variant| (variant.chrom.as_str(), variant.pos, variant.id.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("1", 10, "rs1"), ("1", 20, "rs2"), ("2", 30, "indel1")]
+        variant_ids(&metadata.variants),
+        vec!["rs1", "rs2", "indel1"]
     );
-    assert_eq!(metadata.variants[0].a0, "A");
-    assert_eq!(metadata.variants[0].a1, "G");
-    assert_eq!(metadata.variants[1].a1, "T");
-    assert_eq!(metadata.variants[1].alt_allele.as_deref(), Some("T,A"));
+    assert_eq!(metadata.variants.positions, vec![10, 20, 30]);
+    assert_eq!(variant_chrom(&metadata.variants, 0), "1");
+    assert_eq!(variant_chrom(&metadata.variants, 1), "1");
+    assert_eq!(variant_chrom(&metadata.variants, 2), "2");
+    assert_eq!(variant_a0(&metadata.variants, 0), "A");
+    assert_eq!(variant_a1(&metadata.variants, 0), "G");
+    assert_eq!(variant_a1(&metadata.variants, 1), "T");
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
 }
@@ -141,7 +142,8 @@ fn bcf_metadata_preserves_samples_variants_and_capabilities() {
     let path = dir.join("tiny.bcf");
     write_bcf_file(&path);
 
-    let metadata = genoio_io::read_vcf_metadata(&path).expect("bcf metadata should parse");
+    let metadata =
+        genoio_io::read_vcf_public_metadata_arrow(&path).expect("bcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -151,16 +153,11 @@ fn bcf_metadata_preserves_samples_variants_and_capabilities() {
             .collect::<Vec<_>>(),
         vec!["s1", "s2"]
     );
-    assert_eq!(
-        metadata
-            .variants
-            .iter()
-            .map(|variant| (variant.chrom.as_str(), variant.pos, variant.id.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("1", 10, "rs1"), ("1", 20, "rs2")]
-    );
-    assert_eq!(metadata.variants[1].a1, "T");
-    assert_eq!(metadata.variants[1].alt_allele.as_deref(), Some("T,A"));
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1", "rs2"]);
+    assert_eq!(metadata.variants.positions, vec![10, 20]);
+    assert_eq!(variant_chrom(&metadata.variants, 0), "1");
+    assert_eq!(variant_chrom(&metadata.variants, 1), "1");
+    assert_eq!(variant_a1(&metadata.variants, 1), "T");
     assert!(metadata.capabilities.supports_geno);
     assert!(metadata.capabilities.supports_haplo);
     assert!(metadata.capabilities.phased);
@@ -205,7 +202,8 @@ fn vcf_haplotype_capability_requires_phased_genotype_evidence() {
 ",
     );
 
-    let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
+    let metadata =
+        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
 
     assert!(metadata.capabilities.supports_geno);
     assert!(metadata.capabilities.supports_haplo);
@@ -227,7 +225,8 @@ fn vcf_haplotype_capability_is_detected_from_records_not_extension() {
 ",
     );
 
-    let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
+    let metadata =
+        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
 
     assert!(metadata.capabilities.supports_geno);
     assert!(metadata.capabilities.supports_haplo);
@@ -248,7 +247,8 @@ fn compressed_vcf_metadata_uses_permissive_header_and_preserves_multiallelic_rec
 ",
     );
 
-    let metadata = genoio_io::read_vcf_metadata(&path).expect("vcf metadata should parse");
+    let metadata =
+        genoio_io::read_vcf_public_metadata_arrow(&path).expect("vcf metadata should parse");
 
     assert_eq!(
         metadata
@@ -259,8 +259,7 @@ fn compressed_vcf_metadata_uses_permissive_header_and_preserves_multiallelic_rec
         vec!["s1", "s2"]
     );
     assert_eq!(metadata.variants.len(), 1);
-    assert_eq!(metadata.variants[0].a1, "G");
-    assert_eq!(metadata.variants[0].alt_allele.as_deref(), Some("G,T"));
+    assert_eq!(variant_a1(&metadata.variants, 0), "G");
     assert!(metadata.capabilities.supports_haplo);
     assert!(metadata.capabilities.phased);
 }

@@ -1,3 +1,5 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +8,10 @@ use genoio_core::{DenseLayout, VariantWindow};
 mod common;
 
 use common::dense::assert_values_with_nan;
+use common::legacy as legacy_io;
 use common::unique_dir;
+use common::vcf_arrow as genoio_io;
+use common::vcf_arrow::{variant_ids, variants};
 
 fn write_text(path: &Path, contents: &str) {
     fs::write(path, contents).expect("test fixture should be written");
@@ -180,14 +185,7 @@ fn vcf_dense_window_stops_after_requested_retained_variants() {
     )
     .expect("windowed vcf should stop before later invalid records");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs1"]);
     assert_eq!(block.values, vec![0.0, 1.0]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
@@ -206,15 +204,8 @@ fn vcf_sparse_window_stops_after_requested_retained_variants() {
     )
     .expect("windowed sparse vcf should stop before later invalid records");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1"]
-    );
-    assert_eq!(block.variants.len(), 1);
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs1"]);
+    assert_eq!(variants(&block.variants).len(), 1);
     assert_eq!(block.diagnostics.candidate_variants, 1);
 }
 
@@ -239,14 +230,7 @@ fn vcf_dense_window_uses_retained_variant_order_after_filters() {
     )
     .expect("windowed vcf should decode");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs2", "rs4"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["rs2", "rs4"]);
     assert_eq!(block.values, vec![1.0, 2.0, 0.0, 0.0]);
     assert_eq!(block.layout, DenseLayout::VariantMajor);
 }
@@ -272,14 +256,7 @@ fn vcf_dense_window_skips_pre_window_metadata_accepted_genotypes() {
     )
     .expect("windowed vcf should skip pre-window metadata-accepted genotypes");
 
-    assert_eq!(
-        block
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["stats_pass"]
-    );
+    assert_eq!(variant_ids(variants(&block.variants)), vec!["stats_pass"]);
     assert_eq!(block.values, vec![1.0, 2.0]);
     assert_eq!(block.diagnostics.candidate_variants, 2);
     assert_eq!(block.diagnostics.retained_variants, 1);
@@ -296,7 +273,7 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink1_dense_windowed(
+    let block = legacy_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -323,7 +300,7 @@ fn plink1_dense_unfiltered_window_stops_after_requested_source_variants() {
     let dir = unique_dir("plink1-source-window-stop");
     let (bed, bim, fam) = write_plink_source_window_stop_fixture(&dir);
 
-    let block = genoio_io::read_plink1_dense_windowed(
+    let block = legacy_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -357,7 +334,7 @@ malformed
 ",
     );
 
-    let block = genoio_io::read_plink1_dense_windowed(
+    let block = legacy_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -385,7 +362,7 @@ fn plink1_dense_impossible_filter_returns_empty_without_parsing_bim_variants() {
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink1_dense_windowed(
+    let block = legacy_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -417,7 +394,7 @@ malformed
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink1_dense_windowed(
+    let block = legacy_io::read_plink1_dense_windowed(
         &bed,
         &bim,
         &fam,
@@ -445,7 +422,7 @@ fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink2_dense_windowed(
+    let block = legacy_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -486,7 +463,7 @@ malformed
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink2_dense_windowed(
+    let block = legacy_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -536,7 +513,7 @@ S3
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink2_dense_windowed(
+    let block = legacy_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -582,7 +559,7 @@ S3
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink2_dense_windowed(
+    let block = legacy_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -609,7 +586,7 @@ fn plink2_sparse_filtered_window_stops_after_requested_retained_variants() {
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink2_sparse_windowed(
+    let block = legacy_io::read_plink2_sparse_windowed(
         &pgen,
         &pvar,
         &psam,
@@ -641,7 +618,7 @@ fn plink2_dense_impossible_filter_returns_empty_without_parsing_pvar_variants() 
     }))
     .expect("filter should parse");
 
-    let block = genoio_io::read_plink2_dense_windowed(
+    let block = legacy_io::read_plink2_dense_windowed(
         &pgen,
         &pvar,
         &psam,

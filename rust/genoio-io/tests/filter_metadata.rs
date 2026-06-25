@@ -14,6 +14,8 @@ use genoio_core::DenseLayout;
 mod common;
 
 use common::unique_dir;
+use common::vcf_arrow as genoio_io;
+use common::vcf_arrow::{sparse_values_dense_arrow, variant_ids, variants};
 
 fn write_vcf(path: &Path) {
     fs::write(
@@ -109,17 +111,6 @@ fn tabix_index_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tbi", path.to_string_lossy()))
 }
 
-fn csc_to_dense(sparse: &genoio_core::SparseGenotypeMatrix) -> Vec<f32> {
-    let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
-    for col in 0..sparse.n_cols {
-        for offset in sparse.indptr[col]..sparse.indptr[col + 1] {
-            let row = sparse.indices[offset];
-            dense[row * sparse.n_cols + col] = sparse.data[offset];
-        }
-    }
-    dense
-}
-
 fn write_compressed_unindexed_vcf(path: &Path) {
     write_bgzf_file(
         path,
@@ -159,14 +150,7 @@ fn indexed_vcf_region_dosage_uses_permissive_text_backend() {
     let dense = genoio_io::read_vcf_dosage_dense_windowed(&path, None, Some(&filter), None, false)
         .expect("indexed dosage VCF should decode through permissive text backend");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs20"]);
     assert_eq!(dense.values, vec![0.2, 1.2]);
 }
 
@@ -195,16 +179,9 @@ fn indexed_vcf_region_sparse_uses_permissive_text_backend() {
     let sparse = genoio_io::read_vcf_sparse(&path, None, Some(&filter))
         .expect("indexed sparse VCF should decode through permissive text backend");
 
-    assert_eq!(
-        sparse
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
-    assert_eq!(csc_to_dense(&sparse), vec![1.0, 0.0]);
-    assert!(sparse.variants[0].flipped);
+    assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs20"]);
+    assert_eq!(sparse_values_dense_arrow(&sparse), vec![1.0, 0.0]);
+    assert!(variants(&sparse.variants).flipped[0]);
 }
 
 #[test]
@@ -234,16 +211,9 @@ fn indexed_vcf_region_haplotypes_use_permissive_text_backend() {
     let sparse = genoio_io::read_vcf_haplotypes_sparse(&path, None, Some(&filter))
         .expect("indexed haplotype sparse VCF should decode through permissive text backend");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs20"]);
     assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
-    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(sparse_values_dense_arrow(&sparse), dense.values);
 }
 
 #[test]
@@ -260,14 +230,7 @@ fn vcf_metadata_filters_retain_expected_variants() {
 
     let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("vcf should filter");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs1", "rs2"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
     assert_eq!(dense.diagnostics.candidate_variants, 3);
     assert_eq!(dense.diagnostics.retained_variants, 2);
     assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);
@@ -287,14 +250,9 @@ fn region_filter_includes_start_and_end_positions_once() {
 
     let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("vcf should filter");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| (variant.id.as_str(), variant.pos))
-            .collect::<Vec<_>>(),
-        vec![("rs1", 10), ("rs2", 20)]
-    );
+    let variants = variants(&dense.variants);
+    assert_eq!(variant_ids(variants), vec!["rs1", "rs2"]);
+    assert_eq!(variants.positions, vec![10, 20]);
 }
 
 #[test]
@@ -312,14 +270,9 @@ fn indexed_vcf_region_filter_fetches_exact_start_and_end_positions() {
     let dense =
         genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("indexed vcf should filter");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| (variant.id.as_str(), variant.pos))
-            .collect::<Vec<_>>(),
-        vec![("rs20", 20), ("rs30", 30)]
-    );
+    let variants = variants(&dense.variants);
+    assert_eq!(variant_ids(variants), vec!["rs20", "rs30"]);
+    assert_eq!(variants.positions, vec![20, 30]);
     assert_eq!(dense.diagnostics.candidate_variants, 2);
 }
 
@@ -350,14 +303,9 @@ fn indexed_vcf_region_uses_tabix_reference_names() {
     let dense =
         genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("indexed VCF should decode");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| (variant.id.as_str(), variant.pos))
-            .collect::<Vec<_>>(),
-        vec![("rs20", 20)]
-    );
+    let variants = variants(&dense.variants);
+    assert_eq!(variant_ids(variants), vec!["rs20"]);
+    assert_eq!(variants.positions, vec![20]);
     assert_eq!(dense.values, vec![1.0]);
     assert_eq!(dense.diagnostics.candidate_variants, 1);
     assert_eq!(dense.diagnostics.retained_variants, 1);
@@ -425,51 +373,22 @@ fn threaded_indexed_vcf_region_uses_permissive_text_backend_for_all_outputs() {
     )
     .expect("threaded indexed sparse haplotype VCF should decode through permissive text backend");
 
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs20"]);
+    assert_eq!(variant_ids(variants(&dosage.variants)), vec!["rs20"]);
+    assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs20"]);
+    assert_eq!(variant_ids(variants(&haplotypes.variants)), vec!["rs20"]);
     assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
-    assert_eq!(
-        dosage
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
-    assert_eq!(
-        sparse
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
-    assert_eq!(
-        haplotypes
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
-    assert_eq!(
-        sparse_haplotypes
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
+        variant_ids(variants(&sparse_haplotypes.variants)),
         vec!["rs20"]
     );
     assert_eq!(dense.values, vec![1.0, 1.0]);
     assert_eq!(dosage.values, vec![1.0, 1.0]);
-    assert_eq!(csc_to_dense(&sparse), dense.values);
+    assert_eq!(sparse_values_dense_arrow(&sparse), dense.values);
     assert_eq!(haplotypes.values, vec![0.0, 1.0, 1.0, 0.0]);
-    assert_eq!(csc_to_dense(&sparse_haplotypes), haplotypes.values);
+    assert_eq!(
+        sparse_values_dense_arrow(&sparse_haplotypes),
+        haplotypes.values
+    );
 }
 
 #[test]
@@ -535,7 +454,7 @@ fn indexed_vcf_region_absent_contig_returns_empty_dense_matrix() {
     assert_eq!(dense.n_samples, 1);
     assert_eq!(dense.n_variants, 0);
     assert!(dense.values.is_empty());
-    assert!(dense.variants.is_empty());
+    assert!(variants(&dense.variants).is_empty());
 }
 
 #[test]
@@ -573,14 +492,7 @@ fn indexed_vcf_region_sample_filter_preserves_source_order() {
             .collect::<Vec<_>>(),
         vec!["S1", "S3"]
     );
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs10", "rs20"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs10", "rs20"]);
     assert_eq!(dense.values, vec![0.0, 2.0, 1.0, 2.0]);
     assert_eq!(dense.layout, DenseLayout::VariantMajor);
 }
@@ -611,14 +523,7 @@ fn indexed_vcf_region_uses_permissive_header_scan() {
     let dense =
         genoio_io::read_vcf_dense(&path, None, Some(&filter)).expect("indexed VCF should decode");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs20"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs20"]);
     assert_eq!(dense.values, vec![1.0]);
 }
 
@@ -667,14 +572,7 @@ fn compressed_vcf_non_pushdown_region_filter_uses_permissive_full_scan() {
     let dense = genoio_io::read_vcf_dense(&path, None, Some(&filter))
         .expect("non-pushdown region filter should use permissive full scan");
 
-    assert_eq!(
-        dense
-            .variants
-            .iter()
-            .map(|variant| variant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rs10"]
-    );
+    assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs10"]);
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_metadata_variants, 1);

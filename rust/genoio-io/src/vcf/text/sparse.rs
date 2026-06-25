@@ -15,8 +15,8 @@ use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, RegionPredicate, SparseGenotypeMatrix,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantRecord, VariantWindow,
+    PartialFilterDecision, RegionPredicate, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantRecord, VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -38,45 +38,11 @@ pub(super) enum TextSparseReadOutput {
 }
 
 impl TextSparseReadOutput {
-    pub(super) fn into_legacy_matrix(self, context: &'static str) -> Result<SparseGenotypeMatrix> {
-        match self {
-            Self::Arrow(output) => output.into_matrix().map_err(|error| {
-                GenoioError::internal_contract(format!(
-                    "text VCF {context} Arrow-to-row compatibility conversion failed: {error}"
-                ))
-            }),
-        }
-    }
-
     pub(super) fn into_arrow(self) -> SparseGenotypeMatrixArrowVariants {
         match self {
             Self::Arrow(output) => output,
         }
     }
-}
-
-pub(super) fn read_sparse_records<R: BufRead>(
-    path: &Path,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    source_region: Option<&RegionPredicate>,
-    selection: DenseSampleSelection,
-    reader: &mut noodles::io::Reader<R>,
-) -> Result<SparseGenotypeMatrix> {
-    read_sparse_records_with_metadata(
-        path,
-        variant_filter,
-        variant_window,
-        source_region,
-        VcfMetadataReturn {
-            samples: true,
-            variants: true,
-        },
-        VariantMetadataSinkKind::Arrow,
-        selection,
-        reader,
-    )?
-    .into_legacy_matrix("sparse")
 }
 
 #[expect(
@@ -187,30 +153,6 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
         diagnostics,
     )
     .map(TextSparseReadOutput::Arrow)
-}
-
-pub(super) fn read_haplotype_sparse_records<R: BufRead>(
-    path: &Path,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    source_region: Option<&RegionPredicate>,
-    selection: DenseSampleSelection,
-    reader: &mut noodles::io::Reader<R>,
-) -> Result<SparseGenotypeMatrix> {
-    read_haplotype_sparse_records_with_metadata(
-        path,
-        variant_filter,
-        variant_window,
-        source_region,
-        VcfMetadataReturn {
-            samples: true,
-            variants: true,
-        },
-        VariantMetadataSinkKind::Arrow,
-        selection,
-        reader,
-    )?
-    .into_legacy_matrix("haplotype sparse")
 }
 
 #[expect(

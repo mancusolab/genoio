@@ -8,9 +8,8 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants, DenseLayout,
-    DenseMissingPolicy, GenoioError, PartialFilterDecision, VariantFilter,
-    VariantMetadataArrowBuffers, VariantWindow,
+    attach_variant_stats, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
+    PartialFilterDecision, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -24,67 +23,6 @@ use super::require_genotype_decision_filter;
 use super::source::{
     empty_dense_arrow_for_samples, require_pvar, variant_output_capacity, Plink2ReadContext,
 };
-
-fn dense_arrow_output_to_rows(
-    output: DenseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<DenseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "PLINK2 dosage {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-/// Read retained PLINK2 unphased biallelic dosages as a dense matrix.
-pub fn read_plink2_dosage_dense_windowed(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_dosage_dense_windowed_with_missing_policy(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
-)]
-pub fn read_plink2_dosage_dense_windowed_with_missing_policy(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_dosage_dense_windowed_with_arrow_variants(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dense"))
-}
 
 #[expect(
     clippy::too_many_arguments,

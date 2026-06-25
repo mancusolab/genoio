@@ -14,11 +14,10 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, attach_variant_stats, compute_dosage_variant_stats,
     flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele, reject_sparse_missing,
-    select_samples_source_order, DenseGenotypeMatrix, DenseGenotypeMatrixArrowVariants,
-    DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
-    PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrix,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantRecord,
-    VariantStats, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
+    DenseSampleSelection, GenoioError, MetadataArrowOutput, PartialFilterDecision,
+    SourceCapabilities, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantMetadataArrowBuffers, VariantRecord, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -34,13 +33,18 @@ use crate::hardcall::{evaluate_hardcall_counts_filter, HardcallCounts};
 use crate::matrix::apply_dense_missing_policy_to_variant;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
-use super::text::variant_record_from_noodles_variant_record;
+use super::text::{
+    append_public_variant_metadata_from_noodles_variant_record,
+    variant_record_from_noodles_variant_record,
+};
 use super::{
     haplotype_sample_records, sample_records_from_noodles_header,
     variant_record_has_phased_genotype,
 };
 
-pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
+const BCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
+
+pub(super) fn read_metadata_arrow(path: &Path) -> Result<MetadataArrowOutput> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf open error: {error}")))?;
     let mut reader = bcf::io::Reader::new(file);
@@ -49,10 +53,10 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf header error: {error}")))?;
     let samples = sample_records_from_noodles_header(&header);
 
-    let mut variants = Vec::new();
+    let mut variants =
+        VariantMetadataArrowBuffers::with_capacity(BCF_METADATA_INITIAL_VARIANT_CAPACITY);
     let mut has_phased_genotype_evidence = false;
-    // Reuse noodles' lazy BCF record buffer so metadata scans do not allocate a
-    // full RecordBuf for each variant before genotype decoding exists.
+    // Reuse noodles' lazy BCF record buffer and append public columns directly.
     let mut record = bcf::Record::default();
     loop {
         let n = reader.read_record(&mut record).map_err(|error| {
@@ -67,9 +71,12 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
         {
             has_phased_genotype_evidence = true;
         }
-        variants.push(variant_record_from_noodles_variant_record(
-            path, &header, &record,
-        )?);
+        append_public_variant_metadata_from_noodles_variant_record(
+            path,
+            &header,
+            &record,
+            &mut variants,
+        )?;
     }
 
     let capabilities = if has_phased_genotype_evidence {
@@ -78,74 +85,11 @@ pub(super) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
         SourceCapabilities::genotype_only()
     };
 
-    Ok(MetadataOutput {
+    Ok(MetadataArrowOutput {
         samples,
         variants,
         capabilities,
     })
-}
-
-fn dense_arrow_output_to_rows(
-    output: DenseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<DenseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "BCF {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-fn sparse_arrow_output_to_rows(
-    output: SparseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<SparseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "BCF {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-pub(super) fn read_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_dense_windowed_with_field_arrow_variants(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-        DenseField::Gt,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dense GT"))
-}
-
-pub(super) fn read_dosage_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_dosage_dense_windowed_with_arrow_variants(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dense DS"))
 }
 
 struct BcfInput {
@@ -168,23 +112,6 @@ fn open_bcf_input(path: &Path, requested_samples: Option<&[String]>) -> Result<B
         header,
         selection,
     })
-}
-
-pub(super) fn read_sparse_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    read_sparse_windowed_with_arrow_variants(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        true,
-        true,
-    )
-    .and_then(|output| sparse_arrow_output_to_rows(output, "sparse GT"))
 }
 
 pub(super) fn read_sparse_windowed_with_arrow_variants(
@@ -279,26 +206,6 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
         variants,
         diagnostics,
     )
-}
-
-pub(super) fn read_haplotypes_dense_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_haplotypes_dense_windowed_with_arrow_variants(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dense haplotype"))
 }
 
 pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
@@ -437,23 +344,6 @@ pub(super) fn read_haplotypes_dense_windowed_with_arrow_variants(
         variants,
         diagnostics,
     )
-}
-
-pub(super) fn read_haplotypes_sparse_windowed(
-    path: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    read_haplotypes_sparse_windowed_with_arrow_variants(
-        path,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        true,
-        true,
-    )
-    .and_then(|output| sparse_arrow_output_to_rows(output, "sparse haplotype"))
 }
 
 pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
@@ -1225,9 +1115,12 @@ fn record_id(record: &bcf::Record) -> String {
 mod tests {
     use std::fs;
 
-    use super::super::read_vcf_dense_windowed_with_threads;
+    use super::super::read_vcf_dense_windowed_with_threads_and_arrow_variants;
     use super::*;
-    use genoio_core::DenseLayout;
+    use genoio_core::{
+        DenseGenotypeMatrixArrowVariants, DenseLayout, SparseGenotypeMatrixArrowVariants,
+        StringColumnBuffers, VariantMetadataArrowBuffers,
+    };
     use noodles_core::Position;
     use noodles_vcf::{
         self as noodles_vcf,
@@ -1254,6 +1147,139 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
+    }
+
+    fn variants(output: &Option<VariantMetadataArrowBuffers>) -> &VariantMetadataArrowBuffers {
+        output
+            .as_ref()
+            .expect("variant Arrow buffers should be returned")
+    }
+
+    fn string_at(column: &StringColumnBuffers, index: usize) -> &str {
+        let start = column.offsets[index] as usize;
+        let end = column.offsets[index + 1] as usize;
+        std::str::from_utf8(&column.values[start..end])
+            .expect("Arrow string column should be UTF-8")
+    }
+
+    fn variant_ids(variants: &VariantMetadataArrowBuffers) -> Vec<&str> {
+        (0..variants.len())
+            .map(|index| string_at(&variants.ids, index))
+            .collect()
+    }
+
+    fn variant_id(variants: &VariantMetadataArrowBuffers, index: usize) -> &str {
+        string_at(&variants.ids, index)
+    }
+
+    fn read_vcf_dense_windowed_with_threads(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        matrix_only: bool,
+        threads: Option<usize>,
+    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+        read_vcf_dense_windowed_with_threads_and_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            DenseMissingPolicy::Nan,
+            !matrix_only,
+            !matrix_only,
+            threads,
+        )
+    }
+
+    fn read_dense_windowed(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
+        matrix_only: bool,
+    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+        read_dense_windowed_with_field_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            missing_policy,
+            !matrix_only,
+            !matrix_only,
+            DenseField::Gt,
+        )
+    }
+
+    fn read_dosage_dense_windowed(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
+        matrix_only: bool,
+    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+        read_dosage_dense_windowed_with_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            missing_policy,
+            !matrix_only,
+            !matrix_only,
+        )
+    }
+
+    fn read_sparse_windowed(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+    ) -> Result<SparseGenotypeMatrixArrowVariants> {
+        read_sparse_windowed_with_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            true,
+            true,
+        )
+    }
+
+    fn read_haplotypes_dense_windowed(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+        missing_policy: DenseMissingPolicy,
+        matrix_only: bool,
+    ) -> Result<DenseGenotypeMatrixArrowVariants> {
+        read_haplotypes_dense_windowed_with_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            missing_policy,
+            !matrix_only,
+            !matrix_only,
+        )
+    }
+
+    fn read_haplotypes_sparse_windowed(
+        path: &Path,
+        requested_samples: Option<&[String]>,
+        variant_filter: Option<&VariantFilter>,
+        variant_window: Option<VariantWindow>,
+    ) -> Result<SparseGenotypeMatrixArrowVariants> {
+        read_haplotypes_sparse_windowed_with_arrow_variants(
+            path,
+            requested_samples,
+            variant_filter,
+            variant_window,
+            true,
+            true,
+        )
     }
 
     fn write_test_bcf(path: &Path) {
@@ -1467,14 +1493,7 @@ mod tests {
         assert_eq!(dense.n_variants, 2);
         assert_values_with_nan(&dense.values, &[0.0, 1.0, 2.0, f32::NAN]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(
-            dense
-                .variants
-                .iter()
-                .map(|variant| variant.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["rs1", "rs2"]
-        );
+        assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
     }
 
     #[test]
@@ -1515,7 +1534,7 @@ mod tests {
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
-        assert_eq!(dense.variants[0].id, "rs2");
+        assert_eq!(variant_id(variants(&dense.variants), 0), "rs2");
     }
 
     #[test]
@@ -1547,9 +1566,10 @@ mod tests {
         assert_eq!(dense.n_variants, 1);
         assert_eq!(dense.values, vec![1.0]);
         assert_eq!(dense.samples[0].iid, "s2");
-        assert_eq!(dense.variants[0].id, "rs1");
-        assert_eq!(dense.variants[0].mac, Some(1));
-        assert_eq!(dense.variants[0].n_called, Some(1));
+        let variant_metadata = variants(&dense.variants);
+        assert_eq!(variant_id(variant_metadata, 0), "rs1");
+        assert_eq!(variant_metadata.macs[0], Some(1));
+        assert_eq!(variant_metadata.n_called[0], Some(1));
     }
 
     #[test]
@@ -1579,7 +1599,7 @@ mod tests {
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert!(dense.samples.is_empty());
-        assert!(dense.variants.is_empty());
+        assert!(dense.variants.is_none());
         assert_eq!(dense.values, vec![0.0, 1.0]);
     }
 
@@ -1632,14 +1652,7 @@ mod tests {
         assert_eq!(dense.n_variants, 2);
         assert_values_with_nan(&dense.values, &[0.2, 1.4, 2.0, f32::NAN]);
         assert_eq!(dense.layout, DenseLayout::VariantMajor);
-        assert_eq!(
-            dense
-                .variants
-                .iter()
-                .map(|variant| variant.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["rs1", "rs2"]
-        );
+        assert_eq!(variant_ids(variants(&dense.variants)), vec!["rs1", "rs2"]);
     }
 
     #[test]
@@ -1669,7 +1682,7 @@ mod tests {
         assert_eq!(dense.n_samples, 2);
         assert_eq!(dense.n_variants, 1);
         assert!(dense.samples.is_empty());
-        assert!(dense.variants.is_empty());
+        assert!(dense.variants.is_none());
         assert_values_with_nan(&dense.values, &[2.0, f32::NAN]);
     }
 
@@ -1695,7 +1708,7 @@ mod tests {
         assert_eq!(sparse.indptr, vec![0, 1]);
         assert_eq!(sparse.indices, vec![1]);
         assert_eq!(sparse.data, vec![1.0]);
-        assert_eq!(sparse.variants[0].id, "rs1");
+        assert_eq!(variant_id(variants(&sparse.variants), 0), "rs1");
     }
 
     #[test]
@@ -1785,7 +1798,7 @@ mod tests {
         assert_eq!(dense.n_samples, 4);
         assert_eq!(dense.n_variants, 1);
         assert!(dense.samples.is_empty());
-        assert!(dense.variants.is_empty());
+        assert!(dense.variants.is_none());
         assert_eq!(dense.values, vec![0.0, 1.0, 1.0, 0.0]);
     }
 
@@ -1805,7 +1818,7 @@ mod tests {
         assert_eq!(sparse.indptr, vec![0, 1, 2]);
         assert_eq!(sparse.indices, vec![0, 0]);
         assert_eq!(sparse.data, vec![1.0, 1.0]);
-        assert!(sparse.variants[0].flipped);
-        assert!(!sparse.variants[1].flipped);
+        assert!(variants(&sparse.variants).flipped[0]);
+        assert!(!variants(&sparse.variants).flipped[1]);
     }
 }

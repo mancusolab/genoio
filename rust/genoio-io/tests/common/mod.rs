@@ -10,6 +10,8 @@ use tempfile::TempDir;
     reason = "shared integration-test helpers are compiled per test target"
 )]
 pub(crate) mod dense;
+pub(crate) mod legacy;
+pub(crate) mod vcf_arrow;
 
 pub struct TestDir {
     inner: TempDir,

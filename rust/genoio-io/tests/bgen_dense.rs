@@ -15,6 +15,7 @@ mod common;
 use common::dense::{
     assert_values_close_with_nan as assert_values_with_nan, dense_missing_sample_major,
 };
+use common::legacy as genoio_io;
 use common::unique_dir;
 
 const FLAG_LAYOUT2: u32 = 2 << 2;

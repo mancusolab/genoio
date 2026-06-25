@@ -8,9 +8,8 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, reject_sparse_missing, DenseGenotypeMatrix,
-    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, GenoioError,
-    GenotypeFilterPlan, PartialFilterDecision, SparseGenotypeMatrix,
+    attach_variant_stats, reject_sparse_missing, DenseGenotypeMatrixArrowVariants, DenseLayout,
+    DenseMissingPolicy, GenotypeFilterPlan, PartialFilterDecision,
     SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
 };
 
@@ -32,78 +31,6 @@ use super::source::{
     expand_selected_samples_to_haplotypes, require_pvar, variant_output_capacity,
     Plink2ReadContext,
 };
-
-fn dense_arrow_output_to_rows(
-    output: DenseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<DenseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "PLINK2 haplotype {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-fn sparse_arrow_output_to_rows(
-    output: SparseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<SparseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "PLINK2 haplotype {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-/// Read retained explicit-phased PLINK2 hard calls as dense haplotype rows.
-pub fn read_plink2_haplotypes_dense_windowed(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_haplotypes_dense_windowed_with_missing_policy(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
-)]
-pub fn read_plink2_haplotypes_dense_windowed_with_missing_policy(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_haplotypes_dense_windowed_with_arrow_variants(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dense"))
-}
 
 #[expect(
     clippy::too_many_arguments,
@@ -246,56 +173,6 @@ pub fn read_plink2_haplotypes_dense_windowed_with_arrow_variants(
     )
 }
 
-/// Read retained explicit-phased PLINK2 dosages as dense haplotype rows.
-pub fn read_plink2_haplotypes_dosage_dense_windowed(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
-)]
-pub fn read_plink2_haplotypes_dosage_dense_windowed_with_missing_policy(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dosage dense"))
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "Arrow facade mirrors haplotype dosage read options plus metadata return choices"
@@ -432,46 +309,6 @@ pub fn read_plink2_haplotypes_dosage_dense_windowed_with_arrow_variants(
         variants,
         diagnostics,
     )
-}
-
-/// Read all retained explicit-phased PLINK2 hard calls as sparse haplotype CSC.
-pub fn read_plink2_haplotypes_sparse(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink2_haplotypes_sparse_windowed(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        None,
-    )
-}
-
-/// Read retained explicit-phased PLINK2 hard calls as sparse haplotype CSC.
-pub fn read_plink2_haplotypes_sparse_windowed(
-    pgen: &Path,
-    pvar: &Path,
-    psam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
-        pgen,
-        pvar,
-        psam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        true,
-        true,
-    )
-    .and_then(|output| sparse_arrow_output_to_rows(output, "sparse"))
 }
 
 #[expect(

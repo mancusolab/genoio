@@ -10,11 +10,10 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
-    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix,
-    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, DenseSampleSelection,
-    GenoioError, GenotypeFilterPlan, MetadataArrowOutput, MetadataOutput, PartialFilterDecision,
-    SourceCapabilities, SparseGenotypeMatrix, SparseGenotypeMatrixArrowVariants, VariantFilter,
-    VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrixArrowVariants, DenseLayout,
+    DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataArrowOutput,
+    MetadataOutput, PartialFilterDecision, SourceCapabilities, SparseGenotypeMatrixArrowVariants,
+    VariantFilter, VariantMetadataArrowBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::error::Result;
@@ -58,28 +57,6 @@ struct Plink1DenseContext<'a> {
     all_samples_selected: bool,
 }
 
-fn dense_arrow_output_to_rows(
-    output: DenseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<DenseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "PLINK1 {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
-fn sparse_arrow_output_to_rows(
-    output: SparseGenotypeMatrixArrowVariants,
-    context: &'static str,
-) -> Result<SparseGenotypeMatrix> {
-    output.into_matrix().map_err(|error| {
-        GenoioError::internal_contract(format!(
-            "PLINK1 {context} Arrow-to-row compatibility conversion failed: {error}"
-        ))
-    })
-}
-
 /// Read PLINK1 sample and variant metadata without decoding BED genotypes.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
     fs::metadata(bed).map_err(|source| GenoioError::Io {
@@ -103,76 +80,6 @@ pub fn read_plink1_metadata_arrow(
     fam: &Path,
 ) -> Result<MetadataArrowOutput> {
     read_plink1_metadata(bed, bim, fam).and_then(MetadataArrowOutput::from_metadata)
-}
-
-/// Read all retained PLINK1 genotypes as a dense sample-by-variant matrix.
-pub fn read_plink1_dense(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink1_dense_windowed_with_missing_policy(
-        bed,
-        bim,
-        fam,
-        requested_samples,
-        variant_filter,
-        None,
-        DenseMissingPolicy::Nan,
-        false,
-    )
-}
-
-/// Read retained PLINK1 genotypes as a dense matrix over an optional block window.
-pub fn read_plink1_dense_windowed(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink1_dense_windowed_with_missing_policy(
-        bed,
-        bim,
-        fam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        DenseMissingPolicy::Nan,
-        matrix_only,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "reader boundary keeps PLINK companions and dense policy controls explicit"
-)]
-pub fn read_plink1_dense_windowed_with_missing_policy(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    read_plink1_dense_windowed_with_arrow_variants(
-        bed,
-        bim,
-        fam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        !matrix_only,
-        !matrix_only,
-    )
-    .and_then(|output| dense_arrow_output_to_rows(output, "dense"))
 }
 
 #[expect(
@@ -622,39 +529,6 @@ fn read_plink1_dense_matrix_only_genotype_filter_arrow(
         None,
         diagnostics,
     )
-}
-
-/// Read all retained PLINK1 genotypes as a sparse CSC matrix.
-pub fn read_plink1_sparse(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink1_sparse_windowed(bed, bim, fam, requested_samples, variant_filter, None)
-}
-
-/// Read retained PLINK1 genotypes as sparse CSC over an optional block window.
-pub fn read_plink1_sparse_windowed(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Result<SparseGenotypeMatrix> {
-    read_plink1_sparse_windowed_with_arrow_variants(
-        bed,
-        bim,
-        fam,
-        requested_samples,
-        variant_filter,
-        variant_window,
-        true,
-        true,
-    )
-    .and_then(|output| sparse_arrow_output_to_rows(output, "sparse"))
 }
 
 #[expect(

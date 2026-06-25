@@ -1,9 +1,12 @@
+// pattern: Imperative Shell
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 mod common;
 
 use common::dense::{assert_values_with_nan, dense_missing_sample_major};
+use common::legacy as genoio_io;
 use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {
