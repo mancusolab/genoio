@@ -2413,7 +2413,7 @@ fn bgen_metadata_rejects_multiallelic_variants() {
 }
 
 #[test]
-fn bgen_metadata_rejects_invalid_phase_value_probability_blocks() {
+fn bgen_metadata_skips_invalid_phase_value_probability_blocks() {
     let dir = unique_dir("bgen-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2434,14 +2434,42 @@ fn bgen_metadata_rejects_invalid_phase_value_probability_blocks() {
         .expect("invalid-phase probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("invalid-phase BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
+
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
+}
+
+#[test]
+fn bgen_dosage_dense_rejects_retained_invalid_phase_value_probability_blocks() {
+    let dir = unique_dir("bgen-dense-invalid-phase-probability-block");
+    let bgen = dir.join("tiny.bgen");
+    write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
+        write_layout2_variant_identifying_data(writer, "var1", "rs1", "1", 10, &["A", "G"])
+            .expect("variant identifying data should write");
+        write_layout2_probability_block_header(
+            writer,
+            ProbabilityBlockHeader {
+                n_samples: 2,
+                allele_count: 2,
+                min_ploidy: 2,
+                max_ploidy: 2,
+                sample_ploidies: &[2, 2],
+                phased: 2,
+                bit_depth: 8,
+            },
+        )
+        .expect("invalid-phase probability block should write");
+    });
+
+    let error = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
+        .expect_err("retained invalid-phase BGEN should fail");
 
     assert_genoio_error_contains(error, "phased probability value");
 }
 
 #[test]
-fn bgen_metadata_rejects_variable_ploidy_layout2_probability_blocks() {
+fn bgen_metadata_skips_variable_ploidy_layout2_probability_blocks() {
     let dir = unique_dir("bgen-variable-ploidy-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2462,14 +2490,14 @@ fn bgen_metadata_rejects_variable_ploidy_layout2_probability_blocks() {
         .expect("variable-ploidy probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("variable-ploidy BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
+fn bgen_metadata_skips_non_diploid_sample_ploidy_bytes() {
     let dir = unique_dir("bgen-non-diploid-sample-ploidy");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2490,10 +2518,10 @@ fn bgen_metadata_rejects_non_diploid_sample_ploidy_bytes() {
         .expect("non-diploid probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect_err("non-diploid BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
@@ -2514,7 +2542,7 @@ fn bgen_metadata_allows_missing_diploid_sample_ploidy_bytes() {
 }
 
 #[test]
-fn bgen_metadata_rejects_zero_bit_depth_probability_blocks() {
+fn bgen_metadata_skips_zero_bit_depth_probability_blocks() {
     let dir = unique_dir("bgen-zero-bit-depth-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2535,14 +2563,14 @@ fn bgen_metadata_rejects_zero_bit_depth_probability_blocks() {
         .expect("zero-bit-depth probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect_err("zero bit depth should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "bit depth");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_too_large_bit_depth_probability_blocks() {
+fn bgen_metadata_skips_too_large_bit_depth_probability_blocks() {
     let dir = unique_dir("bgen-too-large-bit-depth-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2563,14 +2591,14 @@ fn bgen_metadata_rejects_too_large_bit_depth_probability_blocks() {
         .expect("too-large-bit-depth probability block should write");
     });
 
-    let error =
-        genoio_io::read_bgen_metadata_arrow(&bgen, None).expect_err("large bit depth should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "bit depth");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_truncated_packed_probability_bytes() {
+fn bgen_metadata_skips_truncated_packed_probability_bytes() {
     let dir = unique_dir("bgen-truncated-packed-probabilities");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2591,14 +2619,14 @@ fn bgen_metadata_rejects_truncated_packed_probability_bytes() {
         .expect("truncated probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("truncated packed probabilities should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "truncated");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_decompressed_length_mismatch() {
+fn bgen_metadata_skips_zlib_decompressed_length_mismatch() {
     let dir = unique_dir("bgen-zlib-decompressed-length-mismatch");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2608,14 +2636,14 @@ fn bgen_metadata_rejects_zlib_decompressed_length_mismatch() {
             .expect("compressed probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("decompressed length mismatch should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "decompressed probability block length");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
+fn bgen_metadata_skips_probability_block_sample_count_mismatch() {
     let dir = unique_dir("bgen-probability-sample-count-mismatch");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2, 1, |writer| {
@@ -2637,14 +2665,14 @@ fn bgen_metadata_rejects_probability_block_sample_count_mismatch() {
         .expect("sample-count-mismatched probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("probability block sample count mismatch should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip probability payload bytes");
 
-    assert_genoio_error_contains(error, "sample count does not match");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_invalid_phase_value_probability_blocks() {
+fn bgen_metadata_skips_zlib_compressed_invalid_phase_value_probability_blocks() {
     let dir = unique_dir("bgen-zlib-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2667,14 +2695,14 @@ fn bgen_metadata_rejects_zlib_compressed_invalid_phase_value_probability_blocks(
         .expect("compressed invalid-phase probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("zlib-compressed invalid-phase BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "phased probability value");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_variable_ploidy_probability_blocks() {
+fn bgen_metadata_skips_zlib_compressed_variable_ploidy_probability_blocks() {
     let dir = unique_dir("bgen-zlib-variable-ploidy-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2697,14 +2725,14 @@ fn bgen_metadata_rejects_zlib_compressed_variable_ploidy_probability_blocks() {
         .expect("compressed variable-ploidy probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("zlib-compressed variable-ploidy BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
+fn bgen_metadata_skips_zlib_compressed_non_diploid_sample_ploidy_bytes() {
     let dir = unique_dir("bgen-zlib-non-diploid-sample-ploidy");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2727,14 +2755,14 @@ fn bgen_metadata_rejects_zlib_compressed_non_diploid_sample_ploidy_bytes() {
         .expect("compressed non-diploid probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("zlib-compressed non-diploid BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zstd_compressed_invalid_phase_value_probability_blocks() {
+fn bgen_metadata_skips_zstd_compressed_invalid_phase_value_probability_blocks() {
     let dir = unique_dir("bgen-zstd-invalid-phase-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
@@ -2757,14 +2785,14 @@ fn bgen_metadata_rejects_zstd_compressed_invalid_phase_value_probability_blocks(
         .expect("compressed invalid-phase probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("zstd-compressed invalid-phase BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "phased probability value");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_zstd_compressed_variable_ploidy_probability_blocks() {
+fn bgen_metadata_skips_zstd_compressed_variable_ploidy_probability_blocks() {
     let dir = unique_dir("bgen-zstd-variable-ploidy-probability-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZSTD_COMPRESSION, 1, |writer| {
@@ -2787,14 +2815,14 @@ fn bgen_metadata_rejects_zstd_compressed_variable_ploidy_probability_blocks() {
         .expect("compressed variable-ploidy probability block should write");
     });
 
-    let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("zstd-compressed variable-ploidy BGEN should fail");
+    let metadata = genoio_io::read_bgen_metadata_arrow(&bgen, None)
+        .expect("metadata-only reads should skip compressed probability payload bytes raw");
 
-    assert_genoio_error_contains(error, "variable-ploidy");
+    assert_eq!(variant_ids(&metadata.variants), vec!["rs1"]);
 }
 
 #[test]
-fn bgen_metadata_rejects_compressed_probability_block_shorter_than_length_prefix() {
+fn bgen_metadata_rejects_truncated_compressed_probability_payload_bytes() {
     let dir = unique_dir("bgen-short-compressed-block");
     let bgen = dir.join("tiny.bgen");
     write_bgen_fixture(&bgen, FLAG_LAYOUT2 | FLAG_ZLIB_COMPRESSION, 1, |writer| {
@@ -2806,9 +2834,9 @@ fn bgen_metadata_rejects_compressed_probability_block_shorter_than_length_prefix
     });
 
     let error = genoio_io::read_bgen_metadata_arrow(&bgen, None)
-        .expect_err("short compressed block should fail");
+        .expect_err("declared compressed payload bytes should be present");
 
-    assert_genoio_error_contains(error, "probability block");
+    assert_genoio_error_contains(error, "failed to read source");
 }
 
 #[test]

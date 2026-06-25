@@ -314,20 +314,23 @@ def test_bgen_dataset_read_dosage_rejects_invalid_placeholder_source(tmp_path):
         dataset.read(dosage="dosage")
 
 
-@pytest.mark.parametrize(
-    "operation",
-    [
-        pytest.param(lambda dataset: dataset.read(dosage="dosage"), id="read"),
-        pytest.param(lambda dataset: dataset.variants(), id="metadata"),
-    ],
-)
-def test_bgen_maps_unsupported_probability_representation(tmp_path, operation):
+def test_bgen_read_maps_unsupported_probability_representation(tmp_path):
     import genoio
 
     dataset = genoio.bgen(write_invalid_phase_probability_bgen(tmp_path))
 
     with pytest.raises(genoio.UnsupportedRepresentation, match="phased probability value"):
-        operation(dataset)
+        dataset.read(dosage="dosage")
+
+
+def test_bgen_metadata_skips_unsupported_probability_representation(tmp_path):
+    import genoio
+
+    dataset = genoio.bgen(write_invalid_phase_probability_bgen(tmp_path))
+
+    variants = dataset.variants()
+
+    assert variants["id"].to_list() == ["rs1"]
 
 
 def test_bgen_dataset_metadata_maps_unsupported_layout(tmp_path):

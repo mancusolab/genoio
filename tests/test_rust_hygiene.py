@@ -99,6 +99,16 @@ def test_bgen_arrow_backend_does_not_wrap_row_matrices():
         assert wrapper.search(source) is None
 
 
+def test_bgen_metadata_and_zstd_paths_avoid_decode_hot_spot_allocations():
+    decode_source = Path("rust/genoio-io/src/bgen/decode.rs").read_text()
+    header_source = Path("rust/genoio-io/src/bgen/header.rs").read_text()
+
+    assert "zstd::stream::decode_all" not in decode_source
+    assert "skip_layout2_probability_block" not in decode_source
+    assert "skip_layout2_probability_block" not in header_source
+    assert "skip_layout2_probability_payload_raw" in header_source
+
+
 def test_bcf_arrow_backend_does_not_wrap_row_matrices():
     source = Path("rust/genoio-io/src/vcf.rs").read_text()
 

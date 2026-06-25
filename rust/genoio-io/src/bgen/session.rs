@@ -17,7 +17,7 @@ use genoio_core::{
 use crate::error::Result;
 
 use super::decode::{
-    read_layout2_probability_payload_into, skip_layout2_probability_payload,
+    read_layout2_probability_payload_into, skip_layout2_probability_payload_raw,
     ProbabilityPayloadBuffers,
 };
 use super::header::{
@@ -69,7 +69,6 @@ impl<'a> BgenReadSession<'a> {
             &mut self.reader,
             self.bgen,
             self.header.variant_count,
-            self.header.sample_count,
             self.header.flags.compression,
         )
     }
@@ -115,7 +114,11 @@ impl<'a> BgenReadSession<'a> {
     }
 
     pub(super) fn skip_payload(&mut self) -> Result<()> {
-        skip_layout2_probability_payload(&mut self.reader, self.bgen, self.header.flags.compression)
+        skip_layout2_probability_payload_raw(
+            &mut self.reader,
+            self.bgen,
+            self.header.flags.compression,
+        )
     }
 
     fn validate_index_record_consumed(&mut self, index_record: &BgenIndexRecord) -> Result<()> {

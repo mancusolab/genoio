@@ -14,10 +14,11 @@ use genoio_core::{GenoioError, SampleRecord, VariantMetadataArrowBuffers, Varian
 
 use crate::Result;
 
-use super::decode::skip_layout2_probability_block;
+use super::decode::skip_layout2_probability_payload_raw;
 use super::io::{
-    read_exact_vec, read_len_prefixed_string_u16, read_len_prefixed_string_u32, read_u16_le,
-    read_u32_le, skip_exact, skip_len_prefixed_string_u16, skip_len_prefixed_string_u32,
+    read_exact_vec, read_len_prefixed_string_u16, read_len_prefixed_string_u32,
+    read_len_prefixed_utf8_u16_with, read_len_prefixed_utf8_u32_with, read_u16_le, read_u32_le,
+    skip_exact, skip_len_prefixed_string_u16, skip_len_prefixed_string_u32,
 };
 
 const BGEN_MAGIC: &[u8; 4] = b"bgen";
@@ -290,17 +291,22 @@ pub(super) fn read_layout2_variant_metadata_arrow(
     reader: &mut impl Read,
     path: &Path,
     variant_count: u32,
-    sample_count: u32,
     compression: BgenCompression,
 ) -> Result<VariantMetadataArrowBuffers> {
     let mut variants = VariantMetadataArrowBuffers::with_capacity(
         usize::try_from(variant_count)
             .map_err(|_| GenoioError::invalid_source(path, "bgen variant count is out of range"))?,
     );
+    let mut string_scratch = Vec::new();
 
     for _ in 0..variant_count {
-        read_layout2_variant_identifying_data_arrow(reader, path, &mut variants)?;
-        skip_layout2_probability_block(reader, path, sample_count, 2, compression)?;
+        read_layout2_variant_identifying_data_arrow(
+            reader,
+            path,
+            &mut variants,
+            &mut string_scratch,
+        )?;
+        skip_layout2_probability_payload_raw(reader, path, compression)?;
     }
 
     if variants.len() != usize::try_from(variant_count).unwrap_or(usize::MAX) {
@@ -364,10 +370,21 @@ fn read_layout2_variant_identifying_data_arrow(
     reader: &mut impl Read,
     path: &Path,
     variants: &mut VariantMetadataArrowBuffers,
+    scratch: &mut Vec<u8>,
 ) -> Result<()> {
-    let id = read_len_prefixed_string_u16(reader, path, "variant id")?;
-    let rsid = read_len_prefixed_string_u16(reader, path, "variant rsid")?;
-    let chrom = read_len_prefixed_string_u16(reader, path, "variant chromosome")?;
+    let row_index = variants.len();
+    read_len_prefixed_utf8_u16_with(reader, path, "variant id", scratch, |id| {
+        variants.ids.append_value(id)
+    })?;
+    read_len_prefixed_utf8_u16_with(reader, path, "variant rsid", scratch, |rsid| {
+        if !rsid.is_empty() {
+            variants.ids.replace_value(row_index, rsid)?;
+        }
+        Ok(())
+    })?;
+    read_len_prefixed_utf8_u16_with(reader, path, "variant chromosome", scratch, |chrom| {
+        variants.chroms.append_value(chrom)
+    })?;
     let pos = i64::from(read_u32_le(reader, path)?);
     let allele_count = read_u16_le(reader, path)?;
     if allele_count != 2 {
@@ -376,19 +393,18 @@ fn read_layout2_variant_identifying_data_arrow(
         ));
     }
 
-    let a0 = read_len_prefixed_string_u32(reader, path, "variant allele")?;
-    let a1 = read_len_prefixed_string_u32(reader, path, "variant allele")?;
-    let id = if rsid.is_empty() { id } else { rsid };
+    read_len_prefixed_utf8_u32_with(reader, path, "variant allele", scratch, |a0| {
+        variants.a0s.append_value(a0)?;
+        variants.ref_alleles.push(Some(a0.to_owned()));
+        variants.source_a0s.append_value(a0)
+    })?;
+    read_len_prefixed_utf8_u32_with(reader, path, "variant allele", scratch, |a1| {
+        variants.a1s.append_value(a1)?;
+        variants.alt_alleles.push(Some(a1.to_owned()));
+        variants.source_a1s.append_value(a1)
+    })?;
 
-    variants.chroms.append_value(&chrom)?;
     variants.positions.push(pos);
-    variants.ids.append_value(&id)?;
-    variants.a0s.append_value(&a0)?;
-    variants.a1s.append_value(&a1)?;
-    variants.ref_alleles.push(Some(a0.clone()));
-    variants.alt_alleles.push(Some(a1.clone()));
-    variants.source_a0s.append_value(&a0)?;
-    variants.source_a1s.append_value(&a1)?;
     variants.flipped.push(false);
     variants.quals.push(None);
     variants.afs.push(None);
