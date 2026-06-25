@@ -33,7 +33,8 @@ pub use error::GenoioError;
 pub use filter::{
     attach_variant_stats, compute_dosage_variant_stats, is_dosage_polymorphic,
     variant_stats_from_counts, GenotypeFilterConjunction, GenotypeFilterPlan,
-    PartialFilterDecision, RegionPredicate, VariantFilter, VariantStats, VariantWindow,
+    PartialFilterDecision, RegionPredicate, VariantFilter, VariantMetadataView, VariantStats,
+    VariantWindow,
 };
 pub use metadata::{
     MetadataArrowOutput, MetadataOutput, NullableStringColumnBuffers, SampleMetadataArrowBuffers,

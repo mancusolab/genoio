@@ -17,7 +17,8 @@ use genoio_core::{
     select_samples_source_order, DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy,
     DenseSampleSelection, GenoioError, MetadataArrowOutput, PartialFilterDecision,
     SampleMetadataArrowBuffers, SourceCapabilities, SparseGenotypeMatrixArrowVariants,
-    VariantFilter, VariantMetadataArrowBuffers, VariantRecord, VariantStats, VariantWindow,
+    VariantFilter, VariantMetadataArrowBuffers, VariantMetadataView, VariantRecord, VariantStats,
+    VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -699,25 +700,24 @@ fn validate_biallelic_lazy_record(
     validate_biallelic_variant(path, &variant)
 }
 
-fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()> {
+fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
+    path: &Path,
+    variant: &V,
+) -> Result<()> {
     if variant
-        .alt_allele
-        .as_deref()
+        .alt_allele()
         .is_some_and(|alt| !alt.is_empty() && !alt.contains(','))
     {
         return Ok(());
     }
 
-    if variant
-        .alt_allele
-        .as_deref()
-        .is_some_and(|alt| alt.contains(','))
-    {
+    if variant.alt_allele().is_some_and(|alt| alt.contains(',')) {
         return Err(GenoioError::invalid_source(
             path,
             format!(
                 "vcf dense reads require biallelic records; record {}:{} has multi-ALT alleles: multi-ALT records are not supported",
-                variant.chrom, variant.pos
+                variant.chrom(),
+                variant.pos()
             ),
         ));
     }
@@ -726,7 +726,8 @@ fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()
         path,
         format!(
             "vcf dense reads require biallelic records; record {}:{} is not biallelic",
-            variant.chrom, variant.pos
+            variant.chrom(),
+            variant.pos()
         ),
     ))
 }

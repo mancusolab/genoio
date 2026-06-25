@@ -201,6 +201,140 @@ pub struct VariantStats {
     pub polymorphic: bool,
 }
 
+/// Borrowed variant metadata contract for filter and validation hot paths.
+///
+/// Format readers can implement this view over parser-owned buffers, avoiding a
+/// temporary [`VariantRecord`] when predicates only need borrowed fields. The
+/// default methods describe metadata that many source formats do not provide or
+/// only attach after genotype-stat filters retain a row.
+pub trait VariantMetadataView {
+    /// Source contig or chromosome label.
+    fn chrom(&self) -> &str;
+    /// 1-based source coordinate.
+    fn pos(&self) -> u32;
+    /// Public variant identifier after format-specific normalization.
+    fn id(&self) -> &str;
+    /// Public allele 0, potentially flipped for minor-allele sparse outputs.
+    fn a0(&self) -> &str;
+    /// Public allele 1, potentially flipped for minor-allele sparse outputs.
+    fn a1(&self) -> &str;
+    /// Original REF allele when the source format provides REF/ALT orientation.
+    fn ref_allele(&self) -> Option<&str>;
+    /// Original ALT allele string when available; comma-separated ALT marks multiallelic records.
+    fn alt_allele(&self) -> Option<&str>;
+
+    /// Source allele 0 before public allele flipping.
+    fn source_a0(&self) -> &str {
+        self.a0()
+    }
+
+    /// Source allele 1 before public allele flipping.
+    fn source_a1(&self) -> &str {
+        self.a1()
+    }
+
+    /// True when public `a0`/`a1` have been swapped relative to source alleles.
+    fn flipped(&self) -> bool {
+        false
+    }
+
+    /// Source quality score when the metadata format exposes one.
+    fn qual(&self) -> Option<f32> {
+        None
+    }
+
+    /// Attached allele frequency for retained genotype-stat-filtered variants.
+    fn af(&self) -> Option<f32> {
+        None
+    }
+
+    /// Attached minor allele frequency for retained genotype-stat-filtered variants.
+    fn maf(&self) -> Option<f32> {
+        None
+    }
+
+    /// Attached integer minor allele count for retained hard-call-compatible variants.
+    fn mac(&self) -> Option<u32> {
+        None
+    }
+
+    /// Attached missing-call rate for retained genotype-stat-filtered variants.
+    fn missing_rate(&self) -> Option<f32> {
+        None
+    }
+
+    /// Attached called genotype count for retained genotype-stat-filtered variants.
+    fn n_called(&self) -> Option<u32> {
+        None
+    }
+}
+
+impl VariantMetadataView for VariantRecord {
+    fn chrom(&self) -> &str {
+        &self.chrom
+    }
+
+    fn pos(&self) -> u32 {
+        self.pos
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn a0(&self) -> &str {
+        &self.a0
+    }
+
+    fn a1(&self) -> &str {
+        &self.a1
+    }
+
+    fn ref_allele(&self) -> Option<&str> {
+        self.ref_allele.as_deref()
+    }
+
+    fn alt_allele(&self) -> Option<&str> {
+        self.alt_allele.as_deref()
+    }
+
+    fn source_a0(&self) -> &str {
+        &self.source_a0
+    }
+
+    fn source_a1(&self) -> &str {
+        &self.source_a1
+    }
+
+    fn flipped(&self) -> bool {
+        self.flipped
+    }
+
+    fn qual(&self) -> Option<f32> {
+        self.qual
+    }
+
+    fn af(&self) -> Option<f32> {
+        self.af
+    }
+
+    fn maf(&self) -> Option<f32> {
+        self.maf
+    }
+
+    fn mac(&self) -> Option<u32> {
+        self.mac
+    }
+
+    fn missing_rate(&self) -> Option<f32> {
+        self.missing_rate
+    }
+
+    fn n_called(&self) -> Option<u32> {
+        self.n_called
+    }
+}
+
 /// Retained-variant window for block reads.
 ///
 /// `start` and `len` are expressed after filters have retained variants, not
@@ -288,6 +422,18 @@ impl VariantFilter {
     /// Returns `None` when any part of the expression needs genotype-derived
     /// statistics such as MAF or missing rate.
     pub fn metadata_decision(&self, variant: &VariantRecord) -> Option<bool> {
+        self.metadata_decision_view(variant)
+    }
+
+    /// Evaluate metadata-only predicates against borrowed variant fields.
+    ///
+    /// This is the hot-path entry point for parser-owned metadata. It keeps the
+    /// old `VariantRecord` wrapper available while letting readers avoid owned
+    /// strings when metadata alone can decide the filter.
+    pub fn metadata_decision_view<V: VariantMetadataView + ?Sized>(
+        &self,
+        variant: &V,
+    ) -> Option<bool> {
         self.expr.metadata_decision(variant)
     }
 
@@ -296,11 +442,34 @@ impl VariantFilter {
     /// This preserves boolean semantics while letting readers avoid genotype
     /// statistics whenever metadata alone proves an accept or reject decision.
     pub fn partial_decision(&self, variant: &VariantRecord) -> PartialFilterDecision {
+        self.partial_decision_view(variant)
+    }
+
+    /// Partially evaluate the filter using borrowed metadata fields.
+    ///
+    /// `NeedGenotypes` is the only result that should force a reader to decode
+    /// genotypes solely for filter evaluation.
+    pub fn partial_decision_view<V: VariantMetadataView + ?Sized>(
+        &self,
+        variant: &V,
+    ) -> PartialFilterDecision {
         self.expr.partial_decision(variant)
     }
 
     /// Evaluate the complete filter against metadata and optional statistics.
     pub fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
+        self.evaluate_view(variant, stats)
+    }
+
+    /// Evaluate the complete filter against borrowed metadata and optional statistics.
+    ///
+    /// Genotype-dependent predicates evaluate from `stats`; metadata predicates
+    /// continue to read borrowed fields from `variant`.
+    pub fn evaluate_view<V: VariantMetadataView + ?Sized>(
+        &self,
+        variant: &V,
+        stats: Option<&VariantStats>,
+    ) -> bool {
         self.expr.evaluate(variant, stats)
     }
 
@@ -370,7 +539,7 @@ impl Expr {
         }
     }
 
-    fn metadata_decision(&self, variant: &VariantRecord) -> Option<bool> {
+    fn metadata_decision<V: VariantMetadataView + ?Sized>(&self, variant: &V) -> Option<bool> {
         match self {
             Self::AlwaysTrue => Some(true),
             Self::AlwaysFalse => Some(false),
@@ -395,7 +564,10 @@ impl Expr {
         }
     }
 
-    fn partial_decision(&self, variant: &VariantRecord) -> PartialFilterDecision {
+    fn partial_decision<V: VariantMetadataView + ?Sized>(
+        &self,
+        variant: &V,
+    ) -> PartialFilterDecision {
         match self.metadata_decision(variant) {
             Some(true) => PartialFilterDecision::Accept,
             Some(false) => PartialFilterDecision::Reject,
@@ -403,7 +575,11 @@ impl Expr {
         }
     }
 
-    fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
+    fn evaluate<V: VariantMetadataView + ?Sized>(
+        &self,
+        variant: &V,
+        stats: Option<&VariantStats>,
+    ) -> bool {
         match self {
             Self::AlwaysTrue => true,
             Self::AlwaysFalse => false,
@@ -716,16 +892,16 @@ impl Predicate {
         }
     }
 
-    fn metadata_decision(&self, variant: &VariantRecord) -> Option<bool> {
+    fn metadata_decision<V: VariantMetadataView + ?Sized>(&self, variant: &V) -> Option<bool> {
         match self {
-            Self::Chrom(value) => Some(variant.chrom == *value),
+            Self::Chrom(value) => Some(variant.chrom() == value),
             Self::Region { chrom, start, end } => {
-                Some(variant.chrom == *chrom && variant.pos >= *start && variant.pos <= *end)
+                Some(variant.chrom() == chrom && variant.pos() >= *start && variant.pos() <= *end)
             }
-            Self::IdIn(values) => Some(values.contains(&variant.id)),
+            Self::IdIn(values) => Some(values.contains(variant.id())),
             Self::Snp => Some(is_snp(variant)),
             Self::Biallelic => Some(is_biallelic(variant)),
-            Self::Qual { min, max } => Some(variant.qual.is_some_and(|qual| {
+            Self::Qual { min, max } => Some(variant.qual().is_some_and(|qual| {
                 min.is_none_or(|threshold| qual >= threshold)
                     && max.is_none_or(|threshold| qual <= threshold)
             })),
@@ -735,7 +911,11 @@ impl Predicate {
         }
     }
 
-    fn evaluate(&self, variant: &VariantRecord, stats: Option<&VariantStats>) -> bool {
+    fn evaluate<V: VariantMetadataView + ?Sized>(
+        &self,
+        variant: &V,
+        stats: Option<&VariantStats>,
+    ) -> bool {
         match self {
             Self::Chrom(_)
             | Self::Region { .. }
@@ -1246,14 +1426,13 @@ fn exact_u32_from_f64(value: f64) -> Option<u32> {
     }
 }
 
-fn is_snp(variant: &VariantRecord) -> bool {
-    is_biallelic(variant) && variant.a0.len() == 1 && variant.a1.len() == 1
+fn is_snp(variant: &(impl VariantMetadataView + ?Sized)) -> bool {
+    is_biallelic(variant) && variant.a0().len() == 1 && variant.a1().len() == 1
 }
 
-fn is_biallelic(variant: &VariantRecord) -> bool {
+fn is_biallelic(variant: &(impl VariantMetadataView + ?Sized)) -> bool {
     variant
-        .alt_allele
-        .as_ref()
+        .alt_allele()
         .is_none_or(|alt_allele| !alt_allele.contains(','))
 }
 

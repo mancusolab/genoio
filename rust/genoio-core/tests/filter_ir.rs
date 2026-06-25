@@ -19,6 +19,66 @@ fn variant(id: &str, chrom: &str, pos: u32, a0: &str, a1: &str) -> genoio_core::
     }
 }
 
+struct BorrowedVariantView<'a> {
+    chrom: &'a str,
+    pos: u32,
+    id: &'a str,
+    a0: &'a str,
+    a1: &'a str,
+    ref_allele: Option<&'a str>,
+    alt_allele: Option<&'a str>,
+    qual: Option<f32>,
+}
+
+// Minimal parser-style view used to prove filter decisions do not depend on
+// owned `VariantRecord` strings.
+impl genoio_core::VariantMetadataView for BorrowedVariantView<'_> {
+    fn chrom(&self) -> &str {
+        self.chrom
+    }
+
+    fn pos(&self) -> u32 {
+        self.pos
+    }
+
+    fn id(&self) -> &str {
+        self.id
+    }
+
+    fn a0(&self) -> &str {
+        self.a0
+    }
+
+    fn a1(&self) -> &str {
+        self.a1
+    }
+
+    fn ref_allele(&self) -> Option<&str> {
+        self.ref_allele
+    }
+
+    fn alt_allele(&self) -> Option<&str> {
+        self.alt_allele
+    }
+
+    fn qual(&self) -> Option<f32> {
+        self.qual
+    }
+}
+
+fn borrowed_variant_for_values(values: LeafValues) -> BorrowedVariantView<'static> {
+    BorrowedVariantView {
+        chrom: if values.chrom1 { "1" } else { "2" },
+        pos: 10,
+        id: if values.id_rs1 { "rs1" } else { "rs2" },
+        a0: "A",
+        a1: "G",
+        ref_allele: Some("A"),
+        alt_allele: Some("G"),
+        qual: Some(if values.qual_min20 { 30.0 } else { 10.0 }),
+    }
+}
+
 #[derive(Clone)]
 enum LeafPredicate {
     Chrom1,
@@ -259,6 +319,33 @@ fn partial_filter_decisions_match_reference_truth_table_when_metadata_is_decisiv
                     Some(false) => genoio_core::PartialFilterDecision::Reject,
                     None => genoio_core::PartialFilterDecision::NeedGenotypes,
                 }
+            );
+        }
+    }
+}
+
+#[test]
+fn borrowed_variant_metadata_views_match_owned_filter_decisions() {
+    for expr in generated_boolean_expressions() {
+        let filter = genoio_core::VariantFilter::from_json_value(ref_expr_to_json(&expr))
+            .expect("generated filter should parse");
+
+        for values in all_leaf_values() {
+            let owned = variant_for_values(values);
+            let borrowed = borrowed_variant_for_values(values);
+            let stats = stats_for_values(values);
+
+            assert_eq!(
+                filter.metadata_decision_view(&borrowed),
+                filter.metadata_decision(&owned)
+            );
+            assert_eq!(
+                filter.partial_decision_view(&borrowed),
+                filter.partial_decision(&owned)
+            );
+            assert_eq!(
+                filter.evaluate_view(&borrowed, Some(&stats)),
+                filter.evaluate(&owned, Some(&stats))
             );
         }
     }

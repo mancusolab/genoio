@@ -7,7 +7,9 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, RegionPredicate, VariantMetadataArrowBuffers, VariantRecord};
+use genoio_core::{
+    GenoioError, RegionPredicate, VariantMetadataArrowBuffers, VariantMetadataView, VariantRecord,
+};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
@@ -296,13 +298,11 @@ fn first_alt_allele_str(alt: &str) -> Option<&str> {
     }
 }
 
-pub(super) fn validate_biallelic_variant(path: &Path, variant: &VariantRecord) -> Result<()> {
-    validate_biallelic_record(
-        path,
-        &variant.chrom,
-        variant.pos,
-        variant.alt_allele.as_deref(),
-    )
+pub(super) fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
+    path: &Path,
+    variant: &V,
+) -> Result<()> {
+    validate_biallelic_record(path, variant.chrom(), variant.pos(), variant.alt_allele())
 }
 
 fn validate_biallelic_record(path: &Path, chrom: &str, pos: u32, alt: Option<&str>) -> Result<()> {

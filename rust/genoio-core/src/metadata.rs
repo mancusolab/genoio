@@ -1,6 +1,9 @@
 // pattern: Functional Core
 
-use crate::{GenoioError, SourceCapabilities};
+use crate::{
+    filter::{VariantMetadataView, VariantStats},
+    GenoioError, SourceCapabilities,
+};
 
 /// Sample metadata normalized across VCF, PLINK1, and PLINK2 inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +354,56 @@ impl StringColumnBuffers {
         append_utf8_value(&mut self.offsets, &mut self.values, value)
     }
 
+    /// Replace one logical row while preserving Arrow Utf8 offsets.
+    ///
+    /// Retained-row allele flips can swap strings after a row has already been
+    /// appended. This keeps the column in canonical Arrow Utf8 layout instead
+    /// of rebuilding the entire metadata buffer.
+    pub fn replace_value(&mut self, index: usize, value: &str) -> Result<(), GenoioError> {
+        if index >= self.len() {
+            return Err(metadata_row_index_error(index, self.len()));
+        }
+
+        let start = self.offsets[index] as usize;
+        let end = self.offsets[index + 1] as usize;
+        let old_len = end.saturating_sub(start);
+        let new_len = value.len();
+        if old_len == new_len {
+            self.values[start..end].copy_from_slice(value.as_bytes());
+            return Ok(());
+        }
+
+        let new_total_len = self
+            .values
+            .len()
+            .checked_sub(old_len)
+            .and_then(|len| len.checked_add(new_len))
+            .ok_or_else(|| {
+                GenoioError::unsupported("metadata string column exceeds addressable memory")
+            })?;
+        i32::try_from(new_total_len).map_err(|_| {
+            GenoioError::unsupported("metadata string column exceeds Arrow Utf8 offset capacity")
+        })?;
+
+        // Allele strings may have different byte lengths, so every following
+        // offset must move by the replacement delta.
+        self.values.splice(start..end, value.bytes());
+        let delta = i64::try_from(new_len)
+            .and_then(|new_len| i64::try_from(old_len).map(|old_len| new_len - old_len))
+            .map_err(|_| {
+                GenoioError::unsupported("metadata string column exceeds addressable memory")
+            })?;
+        for offset in &mut self.offsets[index + 1..] {
+            let next_offset = i64::from(*offset) + delta;
+            *offset = i32::try_from(next_offset).map_err(|_| {
+                GenoioError::unsupported(
+                    "metadata string column exceeds Arrow Utf8 offset capacity",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     /// Return the number of logical rows in the column.
     pub fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
@@ -452,6 +505,7 @@ pub struct VariantMetadataArrowBuffers {
 }
 
 impl VariantMetadataArrowBuffers {
+    /// Allocate variant metadata columns for `row_capacity` public variant rows.
     pub fn with_capacity(row_capacity: usize) -> Self {
         Self {
             chroms: StringColumnBuffers::with_capacity(
@@ -509,23 +563,90 @@ impl VariantMetadataArrowBuffers {
         Ok(())
     }
 
+    /// Append one owned compatibility record by borrowing its metadata fields.
     pub fn push_record(&mut self, variant: &VariantRecord) -> Result<(), GenoioError> {
-        self.chroms.append_value(&variant.chrom)?;
-        self.positions.push(i64::from(variant.pos));
-        self.ids.append_value(&variant.id)?;
-        self.a0s.append_value(&variant.a0)?;
-        self.a1s.append_value(&variant.a1)?;
-        self.ref_alleles.push(variant.ref_allele.clone());
-        self.alt_alleles.push(variant.alt_allele.clone());
-        self.source_a0s.append_value(&variant.source_a0)?;
-        self.source_a1s.append_value(&variant.source_a1)?;
-        self.flipped.push(variant.flipped);
-        self.quals.push(variant.qual);
-        self.afs.push(variant.af);
-        self.mafs.push(variant.maf);
-        self.macs.push(variant.mac);
-        self.missing_rates.push(variant.missing_rate);
-        self.n_called.push(variant.n_called);
+        self.push_view(variant)
+    }
+
+    /// Append one borrowed metadata view into Arrow-compatible columns.
+    ///
+    /// This is the columnar hot-path boundary used by parser-specific phases:
+    /// callers can project borrowed parser fields into Arrow buffers without
+    /// first materializing an owned [`VariantRecord`].
+    pub fn push_view<V: VariantMetadataView + ?Sized>(
+        &mut self,
+        variant: &V,
+    ) -> Result<(), GenoioError> {
+        self.chroms.append_value(variant.chrom())?;
+        self.positions.push(i64::from(variant.pos()));
+        self.ids.append_value(variant.id())?;
+        self.a0s.append_value(variant.a0())?;
+        self.a1s.append_value(variant.a1())?;
+        self.ref_alleles
+            .push(variant.ref_allele().map(str::to_owned));
+        self.alt_alleles
+            .push(variant.alt_allele().map(str::to_owned));
+        self.source_a0s.append_value(variant.source_a0())?;
+        self.source_a1s.append_value(variant.source_a1())?;
+        self.flipped.push(variant.flipped());
+        self.quals.push(variant.qual());
+        self.afs.push(variant.af());
+        self.mafs.push(variant.maf());
+        self.macs.push(variant.mac());
+        self.missing_rates.push(variant.missing_rate());
+        self.n_called.push(variant.n_called());
+        Ok(())
+    }
+
+    /// Append one borrowed metadata view and attach genotype statistics.
+    ///
+    /// Use this when a genotype-stat filter has already retained the row and
+    /// the public variant metadata should expose the computed statistics.
+    pub fn push_view_with_stats<V: VariantMetadataView + ?Sized>(
+        &mut self,
+        variant: &V,
+        stats: VariantStats,
+    ) -> Result<(), GenoioError> {
+        self.push_view(variant)?;
+        self.attach_stats(self.len() - 1, stats)
+    }
+
+    /// Attach computed genotype statistics to a retained metadata row.
+    ///
+    /// The row index is in retained-output coordinates, not source-row
+    /// coordinates. This keeps delayed stat attachment aligned with the matrix
+    /// column that survived filtering and windowing.
+    pub fn attach_stats(
+        &mut self,
+        row_index: usize,
+        stats: VariantStats,
+    ) -> Result<(), GenoioError> {
+        self.validate_row_index(row_index)?;
+        self.afs[row_index] = stats.af.map(|value| value as f32);
+        self.mafs[row_index] = stats.maf.map(|value| value as f32);
+        // Public variant metadata keeps MAC integer-valued. Dosage filters can
+        // still evaluate fractional MAC internally before this projection.
+        self.macs[row_index] = stats.mac.and_then(exact_u32_from_f64);
+        self.missing_rates[row_index] = Some(stats.missing_rate as f32);
+        self.n_called[row_index] = Some(stats.n_called);
+        Ok(())
+    }
+
+    /// Flip public alleles for a retained row when values are encoded as minor allele.
+    ///
+    /// This mutates only the public allele columns and flip marker. Source
+    /// allele columns remain unchanged so downstream adapters can report both
+    /// public and original source orientation.
+    pub fn flip_to_minor_allele(&mut self, row_index: usize) -> Result<(), GenoioError> {
+        self.validate_row_index(row_index)?;
+        let a0 = string_at(&self.a0s, row_index).to_owned();
+        let a1 = string_at(&self.a1s, row_index).to_owned();
+        self.a0s.replace_value(row_index, &a1)?;
+        self.a1s.replace_value(row_index, &a0)?;
+        self.flipped[row_index] = true;
+        if let Some(af) = self.afs[row_index] {
+            self.afs[row_index] = Some(1.0 - af);
+        }
         Ok(())
     }
 
@@ -544,6 +665,28 @@ impl VariantMetadataArrowBuffers {
 
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
+    }
+
+    fn validate_row_index(&self, row_index: usize) -> Result<(), GenoioError> {
+        if row_index < self.len() {
+            Ok(())
+        } else {
+            Err(metadata_row_index_error(row_index, self.len()))
+        }
+    }
+}
+
+fn metadata_row_index_error(index: usize, len: usize) -> GenoioError {
+    GenoioError::internal_contract(format!(
+        "metadata row index {index} is outside row count {len}"
+    ))
+}
+
+fn exact_u32_from_f64(value: f64) -> Option<u32> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
+        Some(value as u32)
+    } else {
+        None
     }
 }
 
@@ -566,6 +709,7 @@ pub struct MetadataOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::{VariantMetadataView, VariantStats};
 
     fn sample(iid: &str, source_sample_index: Option<usize>) -> SampleRecord {
         SampleRecord {
@@ -598,6 +742,76 @@ mod tests {
             mac: Some(4),
             missing_rate: Some(0.0),
             n_called: Some(20),
+        }
+    }
+
+    struct BorrowedVariantView<'a> {
+        chrom: &'a str,
+        pos: u32,
+        id: &'a str,
+        a0: &'a str,
+        a1: &'a str,
+        ref_allele: Option<&'a str>,
+        alt_allele: Option<&'a str>,
+        source_a0: &'a str,
+        source_a1: &'a str,
+        qual: Option<f32>,
+    }
+
+    impl VariantMetadataView for BorrowedVariantView<'_> {
+        fn chrom(&self) -> &str {
+            self.chrom
+        }
+
+        fn pos(&self) -> u32 {
+            self.pos
+        }
+
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn a0(&self) -> &str {
+            self.a0
+        }
+
+        fn a1(&self) -> &str {
+            self.a1
+        }
+
+        fn ref_allele(&self) -> Option<&str> {
+            self.ref_allele
+        }
+
+        fn alt_allele(&self) -> Option<&str> {
+            self.alt_allele
+        }
+
+        fn source_a0(&self) -> &str {
+            self.source_a0
+        }
+
+        fn source_a1(&self) -> &str {
+            self.source_a1
+        }
+
+        fn qual(&self) -> Option<f32> {
+            self.qual
+        }
+    }
+
+    fn borrowed_variant() -> BorrowedVariantView<'static> {
+        BorrowedVariantView {
+            chrom: "chr1",
+            pos: 42,
+            id: "rs42",
+            a0: "A",
+            a1: "G",
+            ref_allele: Some("A"),
+            alt_allele: Some("G"),
+            source_a0: "A",
+            source_a1: "G",
+            qual: Some(30.0),
         }
     }
 
@@ -687,5 +901,68 @@ mod tests {
         assert_eq!(buffers.ids.values, b"rs1.");
         assert_eq!(buffers.a0s.values, b"AC");
         assert_eq!(buffers.a1s.values, b"GT");
+    }
+
+    #[test]
+    fn variant_metadata_arrow_buffers_append_borrowed_views() {
+        let mut buffers = VariantMetadataArrowBuffers::with_capacity(1);
+
+        buffers.push_view(&borrowed_variant()).unwrap();
+
+        assert_eq!(buffers.positions, vec![42]);
+        assert_eq!(buffers.ref_alleles, vec![Some("A".to_string())]);
+        assert_eq!(buffers.alt_alleles, vec![Some("G".to_string())]);
+        assert_eq!(buffers.quals, vec![Some(30.0)]);
+        assert_eq!(buffers.afs, vec![None]);
+    }
+
+    #[test]
+    fn variant_metadata_arrow_buffers_append_views_with_stats() {
+        let mut buffers = VariantMetadataArrowBuffers::with_capacity(1);
+        let stats = VariantStats {
+            af: Some(0.75),
+            maf: Some(0.25),
+            mac: Some(3.0),
+            missing_rate: 0.125,
+            n_called: 12,
+            polymorphic: true,
+        };
+
+        buffers
+            .push_view_with_stats(&borrowed_variant(), stats)
+            .unwrap();
+
+        assert_eq!(buffers.afs, vec![Some(0.75)]);
+        assert_eq!(buffers.mafs, vec![Some(0.25)]);
+        assert_eq!(buffers.macs, vec![Some(3)]);
+        assert_eq!(buffers.missing_rates, vec![Some(0.125)]);
+        assert_eq!(buffers.n_called, vec![Some(12)]);
+    }
+
+    #[test]
+    fn variant_metadata_arrow_buffers_mutate_retained_rows() {
+        let mut buffers = VariantMetadataArrowBuffers::with_capacity(1);
+        buffers.push_view(&borrowed_variant()).unwrap();
+
+        buffers.flip_to_minor_allele(0).unwrap();
+        buffers
+            .attach_stats(
+                0,
+                VariantStats {
+                    af: Some(0.25),
+                    maf: Some(0.25),
+                    mac: Some(1.5),
+                    missing_rate: 0.0,
+                    n_called: 4,
+                    polymorphic: true,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(string_at(&buffers.a0s, 0), "G");
+        assert_eq!(string_at(&buffers.a1s, 0), "A");
+        assert_eq!(buffers.flipped, vec![true]);
+        assert_eq!(buffers.afs, vec![Some(0.25)]);
+        assert_eq!(buffers.macs, vec![None]);
     }
 }
