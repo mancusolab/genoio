@@ -195,7 +195,7 @@ impl<'a> BgenVariantCursor<'a> {
     }
 }
 
-/// Matrix-only indexed read state that can skip unused variant metadata.
+/// Indexed read state shared by BGEN dense output loops.
 pub(super) struct BgenIndexedReadContext<'a> {
     pub(super) session: &'a mut BgenReadSession<'a>,
     pub(super) selection: DenseSampleSelection,
@@ -203,5 +203,6 @@ pub(super) struct BgenIndexedReadContext<'a> {
     pub(super) variant_filter: Option<&'a VariantFilter>,
     pub(super) variant_window: Option<VariantWindow>,
     pub(super) missing_policy: DenseMissingPolicy,
-    pub(super) matrix_only: bool,
+    pub(super) return_samples: bool,
+    pub(super) return_variants: bool,
 }

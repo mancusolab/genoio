@@ -82,3 +82,16 @@ def test_plink2_non_hardcall_arrow_backend_does_not_wrap_row_matrices():
     for function_name, conversion_helper in wrapped_entry_points:
         wrapper = re.compile(rf"pub fn {function_name}[\s\S]*?{conversion_helper}")
         assert wrapper.search(source) is None
+
+
+def test_bgen_arrow_backend_does_not_wrap_row_matrices():
+    source = Path("rust/genoio-io/src/bgen.rs").read_text()
+
+    wrapped_entry_points = [
+        "read_bgen_dosage_dense_windowed_with_arrow_variants",
+        "read_bgen_haplotypes_dosage_dense_windowed_with_arrow_variants",
+    ]
+
+    for function_name in wrapped_entry_points:
+        wrapper = re.compile(rf"pub fn {function_name}[\s\S]*?dense_matrix_to_arrow_variants")
+        assert wrapper.search(source) is None

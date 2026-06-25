@@ -13,19 +13,6 @@ use genoio_core::{
 
 use crate::error::Result;
 
-/// Already sample-major dense matrix components.
-///
-/// Use this when a reader wrote directly into the public sample-by-variant
-/// layout and only needs final shape validation and metadata elision.
-pub(crate) struct DenseMatrixParts {
-    pub(crate) n_samples: usize,
-    pub(crate) n_variants: usize,
-    pub(crate) values: Vec<f32>,
-    pub(crate) samples: Vec<SampleRecord>,
-    pub(crate) variants: Vec<VariantRecord>,
-    pub(crate) diagnostics: DenseDiagnostics,
-}
-
 /// Variant-major dense matrix components.
 ///
 /// Use this when a decoder naturally appends one complete variant at a time.
@@ -38,32 +25,6 @@ pub(crate) struct VariantMajorDenseParts {
     pub(crate) samples: Vec<SampleRecord>,
     pub(crate) variants: Vec<VariantRecord>,
     pub(crate) diagnostics: DenseDiagnostics,
-}
-
-pub(crate) fn finish_dense_matrix(
-    parts: DenseMatrixParts,
-    matrix_only: bool,
-) -> Result<DenseGenotypeMatrix> {
-    let DenseMatrixParts {
-        n_samples,
-        n_variants,
-        values,
-        samples,
-        variants,
-        diagnostics,
-    } = parts;
-    if matrix_only {
-        DenseGenotypeMatrix::new_matrix_only(n_samples, n_variants, values, diagnostics)
-    } else {
-        DenseGenotypeMatrix::new(
-            n_samples,
-            n_variants,
-            values,
-            samples,
-            variants,
-            diagnostics,
-        )
-    }
 }
 
 pub(crate) fn finish_variant_major_dense_matrix(
