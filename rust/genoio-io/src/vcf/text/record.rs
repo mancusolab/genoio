@@ -187,6 +187,8 @@ pub(super) fn text_variant_view_from_text_record<'a>(
     let ref_allele = record.reference_bases();
     let alternate_bases = record.alternate_bases();
     let alt_allele = alternate_bases.as_ref();
+    // Validate the first ALT while the path and coordinates are available, but
+    // keep the full ALT field borrowed for metadata output.
     let _ = first_alt_allele_str(alt_allele).ok_or_else(|| {
         GenoioError::invalid_source(
             path,
@@ -222,6 +224,8 @@ pub(super) fn append_public_variant_metadata_from_text_view(
     variant: &TextVariantView<'_>,
     variants: &mut VariantMetadataArrowBuffers,
 ) -> Result<()> {
+    // Metadata-only text reads share the same borrowed append path as matrix
+    // reads so REF/ALT/id handling stays consistent.
     variants.push_view(variant)
 }
 

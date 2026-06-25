@@ -120,6 +120,8 @@ impl VariantMetadataSink {
     ) -> Result<Option<usize>> {
         match self {
             Self::Arrow(variants) => {
+                // Sparse reads may need to attach stats or flip allele labels
+                // after matrix emission, so expose the row that was appended.
                 let row_index = variants.len();
                 variants.push_view(variant)?;
                 Ok(Some(row_index))
@@ -164,12 +166,18 @@ impl VariantMetadataSink {
     }
 }
 
+/// Choose the initial retained-variant capacity for text matrix output.
+///
+/// Indexed/windowed reads know the exact variant bound; full scans start with a
+/// small nonzero capacity so the first retained variants do not repeatedly
+/// grow empty vectors.
 fn dense_output_variant_capacity(variant_window: Option<VariantWindow>) -> usize {
     variant_window.map_or(VCF_TEXT_INITIAL_MATRIX_VARIANT_CAPACITY, |window| {
         window.len
     })
 }
 
+/// Append one decoded dense text variant, using the no-missing fast path when valid.
 fn write_dense_text_variant(
     output: &mut TextDenseOutput,
     variant_index: usize,
