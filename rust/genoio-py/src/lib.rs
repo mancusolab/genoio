@@ -25,9 +25,9 @@
 //!
 //! Numeric arrays returned from this crate transfer Rust vector ownership to
 //! NumPy. Dense missing policies are resolved while the IO layer builds matrix
-//! values, so dense reads do not materialize Python missing masks. `usize`
-//! indices are checked and converted to NumPy-compatible `int64` values before
-//! ownership transfer.
+//! values, so dense reads do not materialize Python missing masks. Sparse
+//! indices are emitted as NumPy `int32` arrays to match SciPy's default sparse
+//! index contract without an adapter-side copy.
 
 use std::any::Any as PanicPayload;
 use std::panic::{self, AssertUnwindSafe};
@@ -1034,8 +1034,10 @@ fn sparse_matrix_to_py(
     include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("indptr", usize_vec_to_numpy_i64(py, output.indptr)?)?;
-    dict.set_item("indices", usize_vec_to_numpy_i64(py, output.indices)?)?;
+    // Core sparse buffers already use SciPy's int32 index width, so transfer
+    // vector ownership directly to NumPy instead of widening through i64.
+    dict.set_item("indptr", vec_to_numpy(py, output.indptr))?;
+    dict.set_item("indices", vec_to_numpy(py, output.indices))?;
     dict.set_item("data", f32_vec_to_numpy(py, output.data)?)?;
     dict.set_item("shape", (output.n_rows, output.n_cols))?;
     if return_samples {
@@ -1071,20 +1073,6 @@ fn sparse_matrix_to_py(
 }
 
 fn f32_vec_to_numpy(py: Python<'_>, values: Vec<f32>) -> PyResult<Bound<'_, PyAny>> {
-    Ok(vec_to_numpy(py, values))
-}
-
-fn usize_vec_to_numpy_i64(py: Python<'_>, values: Vec<usize>) -> PyResult<Bound<'_, PyAny>> {
-    let values = values
-        .into_iter()
-        .map(|value| {
-            i64::try_from(value).map_err(|_| {
-                pyo3::exceptions::PyOverflowError::new_err(
-                    "array index exceeds supported NumPy int64 range",
-                )
-            })
-        })
-        .collect::<PyResult<Vec<i64>>>()?;
     Ok(vec_to_numpy(py, values))
 }
 

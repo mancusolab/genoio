@@ -12,8 +12,8 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele,
-    flip_variant_metadata_to_minor_allele, reject_sparse_missing,
+    append_sparse_column, append_sparse_value, attach_variant_stats, finish_sparse_column,
+    flip_values_to_minor_allele, flip_variant_metadata_to_minor_allele, reject_sparse_missing,
     should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
     PartialFilterDecision, RegionPredicate, SparseGenotypeMatrixArrowVariants, VariantFilter,
     VariantRecord, VariantWindow,
@@ -131,7 +131,7 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
         reject_sparse_missing(!decoded.missing_indices().is_empty())?;
         // Genotype sparse columns store minor-allele dosage by convention.
         flip_values_to_minor_allele(decoded.values_mut(), &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, decoded.values());
+        append_sparse_column(&mut indptr, &mut indices, &mut data, decoded.values())?;
         variants.push_variant(variant)?;
     }
 
@@ -256,7 +256,7 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
             &mut data,
             &mut variant,
             &decoded,
-        );
+        )?;
         variants.push_variant(variant)?;
     }
 
@@ -276,42 +276,48 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
 }
 
 fn append_haplotype_minor_sparse_column(
-    indptr: &mut Vec<usize>,
-    indices: &mut Vec<usize>,
+    indptr: &mut Vec<i32>,
+    indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
     variant: &mut VariantRecord,
     decoded: &HaplotypeSparseDecodeBuffers,
-) {
+) -> Result<()> {
     let a1_rows = decoded.a1_rows();
     if should_flip_haplotype_to_minor_allele(a1_rows.len(), decoded.n_rows()) {
         flip_variant_metadata_to_minor_allele(variant);
         // `a1_rows` is sorted because selected samples are scanned in source
         // order and each phased call contributes rows in haplotype order.
-        append_haplotype_complement_column(indices, data, decoded.n_rows(), a1_rows);
+        append_haplotype_complement_column(indices, data, decoded.n_rows(), a1_rows)?;
     } else {
-        append_haplotype_rows(indices, data, a1_rows);
+        append_haplotype_rows(indices, data, a1_rows)?;
     }
-    indptr.push(indices.len());
+    finish_sparse_column(indptr, data.len())
 }
 
-fn append_haplotype_rows(indices: &mut Vec<usize>, data: &mut Vec<f32>, rows: &[usize]) {
-    indices.extend_from_slice(rows);
-    data.extend(std::iter::repeat_n(1.0, rows.len()));
+fn append_haplotype_rows(
+    indices: &mut Vec<i32>,
+    data: &mut Vec<f32>,
+    rows: &[usize],
+) -> Result<()> {
+    for &row in rows {
+        append_sparse_value(indices, data, row, 1.0)?;
+    }
+    Ok(())
 }
 
 fn append_haplotype_complement_column(
-    indices: &mut Vec<usize>,
+    indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
     n_rows: usize,
     a1_rows: &[usize],
-) {
+) -> Result<()> {
     let mut next_a1 = 0_usize;
     for row in 0..n_rows {
         if next_a1 < a1_rows.len() && a1_rows[next_a1] == row {
             next_a1 += 1;
         } else {
-            indices.push(row);
-            data.push(1.0);
+            append_sparse_value(indices, data, row, 1.0)?;
         }
     }
+    Ok(())
 }

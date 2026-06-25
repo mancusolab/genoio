@@ -187,8 +187,10 @@ fn expected_pgen_haplotype_dosages(left: f32, right: f32) -> (f32, f32) {
 fn csc_to_dense(sparse: &SparseGenotypeMatrixArrowVariants) -> Vec<f32> {
     let mut dense = vec![0.0; sparse.n_rows * sparse.n_cols];
     for col in 0..sparse.n_cols {
-        for offset in sparse.indptr[col]..sparse.indptr[col + 1] {
-            let row = sparse.indices[offset];
+        let start = usize::try_from(sparse.indptr[col]).expect("sparse pointer is nonnegative");
+        let end = usize::try_from(sparse.indptr[col + 1]).expect("sparse pointer is nonnegative");
+        for offset in start..end {
+            let row = usize::try_from(sparse.indices[offset]).expect("sparse row is nonnegative");
             dense[row * sparse.n_cols + col] = sparse.data[offset];
         }
     }

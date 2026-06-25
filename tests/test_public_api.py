@@ -479,8 +479,8 @@ def test_rust_dense_read_returns_numpy_buffers(tmp_path):
     )
 
     assert metadata_result["shape"] == (2, 2)
-    assert metadata_result["samples"]["iid"] == []
-    assert metadata_result["variants"]["id"] == []
+    assert api.samples_frame(metadata_result["samples"])["iid"].to_list() == ["S1", "S2"]
+    assert api.variants_frame(metadata_result["variants"])["id"].to_list() == ["rs1", "rs2"]
 
 
 def test_dataset_blocks_accepts_read_options_and_validates_size(tmp_path):

@@ -31,14 +31,13 @@ use super::source::{
 fn append_decoded_sparse_column(
     decoder_state: &mut PgenDecoderState,
     variant: &mut VariantRecord,
-    indptr: &mut Vec<usize>,
-    indices: &mut Vec<usize>,
+    indptr: &mut Vec<i32>,
+    indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
 ) -> Result<()> {
     reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
     flip_values_to_minor_allele(&mut decoder_state.values, variant);
-    append_sparse_column(indptr, indices, data, &decoder_state.values);
-    Ok(())
+    append_sparse_column(indptr, indices, data, &decoder_state.values)
 }
 
 #[expect(

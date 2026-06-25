@@ -639,7 +639,7 @@ pub fn read_plink1_sparse_windowed_with_arrow_variants(
         );
         reject_sparse_missing(!decoder_state.missing_indices.is_empty())?;
         flip_values_to_minor_allele(&mut decoder_state.values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &decoder_state.values)?;
         output_variant_count += 1;
         if let Some(variants) = variants.as_mut() {
             variants.push_record(&variant)?;

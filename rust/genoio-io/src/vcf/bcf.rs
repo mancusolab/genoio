@@ -134,7 +134,7 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
     } = selection;
 
     let n_rows = samples.len();
-    let mut indptr = vec![0];
+    let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
     let mut data = Vec::new();
     let mut variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
@@ -187,7 +187,7 @@ pub(super) fn read_sparse_windowed_with_arrow_variants(
         reject_sparse_missing(!decoded.missing_indices.is_empty())?;
         let mut values = decoded.values;
         flip_values_to_minor_allele(&mut values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &values);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &values)?;
         if let Some(variants) = variants.as_mut() {
             variants.push_record(&variant)?;
         }
@@ -371,7 +371,7 @@ pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
         Vec::new()
     };
     let n_rows = selected_samples.len() * 2;
-    let mut indptr = vec![0];
+    let mut indptr = vec![0_i32];
     let mut indices = Vec::new();
     let mut data = Vec::new();
     let mut variants = return_variants.then(|| VariantMetadataArrowBuffers::with_capacity(0));
@@ -432,7 +432,7 @@ pub(super) fn read_haplotypes_sparse_windowed_with_arrow_variants(
         reject_sparse_missing(!decoded.missing_indices.is_empty())?;
         let mut values = decoded.values;
         flip_haplotype_values_to_minor_allele(&mut values, &mut variant);
-        append_sparse_column(&mut indptr, &mut indices, &mut data, &values);
+        append_sparse_column(&mut indptr, &mut indices, &mut data, &values)?;
         if let Some(variants) = variants.as_mut() {
             variants.push_record(&variant)?;
         }

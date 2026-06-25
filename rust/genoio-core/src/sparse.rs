@@ -4,16 +4,18 @@ use crate::{
     DenseDiagnostics, GenoioError, SampleRecord, VariantMetadataArrowBuffers, VariantRecord,
 };
 
-/// Sparse genotype matrix stored as CSC arrays.
+/// Sparse genotype matrix stored as SciPy-compatible CSC arrays.
 ///
 /// Columns are variants and rows are samples. Python can expose the same data
-/// as CSC or convert to CSR after crossing the FFI boundary.
+/// as CSC or convert to CSR after crossing the FFI boundary. `indptr` and
+/// `indices` are `i32` because SciPy uses 32-bit sparse indices by default and
+/// the Python bridge can transfer these buffers without a widening copy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparseGenotypeMatrix {
     pub n_rows: usize,
     pub n_cols: usize,
-    pub indptr: Vec<usize>,
-    pub indices: Vec<usize>,
+    pub indptr: Vec<i32>,
+    pub indices: Vec<i32>,
     pub data: Vec<f32>,
     pub samples: Vec<SampleRecord>,
     pub variants: Vec<VariantRecord>,
@@ -29,8 +31,8 @@ impl SparseGenotypeMatrix {
     pub fn new(
         n_rows: usize,
         n_cols: usize,
-        indptr: Vec<usize>,
-        indices: Vec<usize>,
+        indptr: Vec<i32>,
+        indices: Vec<i32>,
         data: Vec<f32>,
         samples: Vec<SampleRecord>,
         variants: Vec<VariantRecord>,
@@ -70,12 +72,16 @@ impl SparseGenotypeMatrix {
 }
 
 /// Sparse genotype matrix with public variants staged in Arrow-compatible buffers.
+///
+/// This uses the same `i32` sparse-index contract as `SparseGenotypeMatrix`;
+/// shape fields remain `usize` because they are Rust-side dimensions, not
+/// Python sparse index payloads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparseGenotypeMatrixArrowVariants {
     pub n_rows: usize,
     pub n_cols: usize,
-    pub indptr: Vec<usize>,
-    pub indices: Vec<usize>,
+    pub indptr: Vec<i32>,
+    pub indices: Vec<i32>,
     pub data: Vec<f32>,
     pub samples: Vec<SampleRecord>,
     pub variants: Option<VariantMetadataArrowBuffers>,
@@ -91,8 +97,8 @@ impl SparseGenotypeMatrixArrowVariants {
     pub fn new(
         n_rows: usize,
         n_cols: usize,
-        indptr: Vec<usize>,
-        indices: Vec<usize>,
+        indptr: Vec<i32>,
+        indices: Vec<i32>,
         data: Vec<f32>,
         samples: Vec<SampleRecord>,
         variants: Option<VariantMetadataArrowBuffers>,
@@ -185,28 +191,67 @@ pub fn flip_variant_metadata_to_minor_allele(variant: &mut VariantRecord) {
 }
 
 /// Append one dense variant column to CSC buffers, skipping zero entries.
+///
+/// This is the common path for genotype sparse reads: parsers may decode one
+/// retained variant into dense scratch for missing-value policy and allele
+/// flipping, then this helper emits only the nonzero rows into CSC storage.
 pub fn append_sparse_column(
-    indptr: &mut Vec<usize>,
-    indices: &mut Vec<usize>,
+    indptr: &mut Vec<i32>,
+    indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
     values: &[f32],
-) {
+) -> Result<(), GenoioError> {
     for (row, value) in values.iter().enumerate() {
         if *value != 0.0 {
-            indices.push(row);
-            data.push(*value);
+            append_sparse_value(indices, data, row, *value)?;
         }
     }
-    indptr.push(indices.len());
+    finish_sparse_column(indptr, data.len())
+}
+
+/// Append one nonzero sparse row/value pair after checking the row and nnz range.
+///
+/// Haplotype paths often already know the nonzero rows, so they call this
+/// directly instead of materializing a dense temporary column. Keeping the
+/// conversion here makes every sparse emitter use the same `i32` overflow
+/// checks before data reaches the PyO3 boundary.
+pub fn append_sparse_value(
+    indices: &mut Vec<i32>,
+    data: &mut Vec<f32>,
+    row: usize,
+    value: f32,
+) -> Result<(), GenoioError> {
+    let row = i32::try_from(row).map_err(|_| sparse_i32_range_error("sparse row index", row))?;
+    let next_nnz = data
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| sparse_i32_range_error("sparse nnz", usize::MAX))?;
+    if next_nnz > SPARSE_INDEX_MAX {
+        return Err(sparse_i32_range_error("sparse nnz", next_nnz));
+    }
+    indices.push(row);
+    data.push(value);
+    Ok(())
+}
+
+/// Finish a CSC column after checking the cumulative nonzero count range.
+///
+/// `nnz` becomes the next `indptr` value, so it must fit in the same `i32`
+/// index payload as row indices.
+pub fn finish_sparse_column(indptr: &mut Vec<i32>, nnz: usize) -> Result<(), GenoioError> {
+    let nnz = i32::try_from(nnz).map_err(|_| sparse_i32_range_error("sparse nnz", nnz))?;
+    indptr.push(nnz);
+    Ok(())
 }
 
 fn validate_csc_contract(
     n_rows: usize,
     n_cols: usize,
-    indptr: &[usize],
-    indices: &[usize],
+    indptr: &[i32],
+    indices: &[i32],
     data: &[f32],
 ) -> Result<(), GenoioError> {
+    validate_sparse_i32_dimensions(n_rows, n_cols)?;
     if indptr.is_empty() {
         return Err(GenoioError::invalid_source(
             "<sparse>",
@@ -223,6 +268,18 @@ fn validate_csc_contract(
             ),
         ));
     }
+    if indptr.iter().any(|pointer| *pointer < 0) {
+        return Err(GenoioError::invalid_source(
+            "<sparse>",
+            "sparse pointers must be nonnegative",
+        ));
+    }
+    if indices.iter().any(|row_index| *row_index < 0) {
+        return Err(GenoioError::invalid_source(
+            "<sparse>",
+            "sparse row indices must be nonnegative",
+        ));
+    }
     if indptr[0] != 0 {
         return Err(GenoioError::invalid_source(
             "<sparse>",
@@ -237,7 +294,9 @@ fn validate_csc_contract(
             ));
         }
     }
-    let terminal_pointer = indptr[indptr.len() - 1];
+    let terminal_pointer = usize::try_from(indptr[indptr.len() - 1]).map_err(|_| {
+        GenoioError::invalid_source("<sparse>", "sparse terminal pointer must be nonnegative")
+    })?;
     if terminal_pointer != indices.len() || terminal_pointer != data.len() {
         return Err(GenoioError::invalid_source(
             "<sparse>",
@@ -248,13 +307,46 @@ fn validate_csc_contract(
             ),
         ));
     }
-    if let Some(row_index) = indices.iter().find(|row_index| **row_index >= n_rows) {
+    if let Some(row_index) = indices
+        .iter()
+        .filter_map(|row_index| {
+            usize::try_from(*row_index)
+                .ok()
+                .map(|row| (*row_index, row))
+        })
+        .find(|(_, row)| *row >= n_rows)
+        .map(|(row_index, _)| row_index)
+    {
         return Err(GenoioError::invalid_source(
             "<sparse>",
             format!("sparse row index {row_index} is outside n_rows {n_rows}"),
         ));
     }
     Ok(())
+}
+
+const SPARSE_INDEX_MAX: usize = i32::MAX as usize;
+
+// Validate dimensions before inspecting `indptr` so huge shapes fail with the
+// sparse-index contract error instead of overflowing `n_cols + 1` checks later.
+fn validate_sparse_i32_dimensions(n_rows: usize, n_cols: usize) -> Result<(), GenoioError> {
+    if n_rows > SPARSE_INDEX_MAX {
+        return Err(sparse_i32_range_error("sparse n_rows", n_rows));
+    }
+    let indptr_len = n_cols
+        .checked_add(1)
+        .ok_or_else(|| sparse_i32_range_error("sparse n_cols + 1", usize::MAX))?;
+    if indptr_len > SPARSE_INDEX_MAX {
+        return Err(sparse_i32_range_error("sparse n_cols + 1", indptr_len));
+    }
+    Ok(())
+}
+
+fn sparse_i32_range_error(label: &str, value: usize) -> GenoioError {
+    GenoioError::invalid_source(
+        "<sparse>",
+        format!("{label} {value} exceeds sparse int32 index range {SPARSE_INDEX_MAX}"),
+    )
 }
 
 fn mark_variant_flipped(variant: &mut VariantRecord) {

@@ -31,8 +31,10 @@ pub(crate) fn dense_missing_sample_major_arrow(
 pub(crate) fn sparse_values_dense_arrow(matrix: &SparseGenotypeMatrixArrowVariants) -> Vec<f32> {
     let mut dense = vec![0.0; matrix.n_rows * matrix.n_cols];
     for col in 0..matrix.n_cols {
-        for offset in matrix.indptr[col]..matrix.indptr[col + 1] {
-            let row = matrix.indices[offset];
+        let start = usize::try_from(matrix.indptr[col]).expect("sparse pointer is nonnegative");
+        let end = usize::try_from(matrix.indptr[col + 1]).expect("sparse pointer is nonnegative");
+        for offset in start..end {
+            let row = usize::try_from(matrix.indices[offset]).expect("sparse row is nonnegative");
             dense[row * matrix.n_cols + col] = matrix.data[offset];
         }
     }

@@ -40,7 +40,8 @@ pub use metadata::{
     VariantMetadataArrowBuffers, VariantMetadataColumns, VariantRecord,
 };
 pub use sparse::{
-    append_sparse_column, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
+    append_sparse_column, append_sparse_value, finish_sparse_column,
+    flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
     flip_variant_metadata_to_minor_allele, reject_sparse_missing, reject_sparse_missing_values,
     should_flip_haplotype_to_minor_allele, SparseGenotypeMatrix, SparseGenotypeMatrixArrowVariants,
 };

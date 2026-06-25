@@ -8,9 +8,10 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, reject_sparse_missing, DenseGenotypeMatrixArrowVariants, DenseLayout,
-    DenseMissingPolicy, GenotypeFilterPlan, PartialFilterDecision,
-    SparseGenotypeMatrixArrowVariants, VariantFilter, VariantMetadataArrowBuffers, VariantWindow,
+    append_sparse_value, attach_variant_stats, finish_sparse_column, reject_sparse_missing,
+    DenseGenotypeMatrixArrowVariants, DenseLayout, DenseMissingPolicy, GenotypeFilterPlan,
+    PartialFilterDecision, SparseGenotypeMatrixArrowVariants, VariantFilter,
+    VariantMetadataArrowBuffers, VariantWindow,
 };
 
 use crate::error::Result;
@@ -462,19 +463,19 @@ pub fn read_plink2_haplotypes_sparse_windowed_with_arrow_variants(
 
 #[inline]
 fn append_haplotype_sparse_column(
-    indptr: &mut Vec<usize>,
-    indices: &mut Vec<usize>,
+    indptr: &mut Vec<i32>,
+    indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
     values: &[f32],
     missing_indices: &[usize],
 ) -> Result<()> {
     reject_sparse_missing(!missing_indices.is_empty())?;
+    // Haplotype decode already returns row-major values, so append nonzeros
+    // directly while reusing the core sparse index range checks.
     for (row, &value) in values.iter().enumerate() {
         if value != 0.0 {
-            indices.push(row);
-            data.push(value);
+            append_sparse_value(indices, data, row, value)?;
         }
     }
-    indptr.push(indices.len());
-    Ok(())
+    finish_sparse_column(indptr, data.len())
 }

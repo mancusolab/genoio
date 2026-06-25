@@ -152,18 +152,19 @@ def _validate_dense_layout(values_layout: str) -> str:
 
 def sparse_matrix_from_rust(
     *,
-    indptr: list[int],
-    indices: list[int],
-    data: list[float],
+    indptr: Any,
+    indices: Any,
+    data: Any,
     shape: tuple[int, int],
     dtype: np.dtype[Any],
     sparse_format: str,
 ) -> SparseMatrixResult:
     r"""Convert Rust CSC arrays into the requested SciPy sparse format.
 
-    Rust always emits CSC because variants are accumulated column-wise. CSR is
-    a Python-side view conversion after the validated CSC arrays cross the
-    extension boundary.
+    Rust always emits CSC because variants are accumulated column-wise. Sparse
+    indices arrive as NumPy `int32` arrays, matching SciPy's default index
+    width. This boundary validates that contract and avoids a second dtype
+    conversion before SciPy takes ownership of the arrays.
 
     **Arguments:**
 
@@ -181,8 +182,8 @@ def sparse_matrix_from_rust(
     matrix = scipy_sparse.csc_matrix(
         (
             np.asarray(data, dtype=dtype),
-            np.asarray(indices, dtype=np.int64),
-            np.asarray(indptr, dtype=np.int64),
+            _sparse_index_array(indices, name="indices"),
+            _sparse_index_array(indptr, name="indptr"),
         ),
         shape=shape,
     )
@@ -191,6 +192,14 @@ def sparse_matrix_from_rust(
     if sparse_format == "csr":
         return matrix.tocsr()
     raise AssertionError(f"unvalidated sparse format: {sparse_format}")
+
+
+def _sparse_index_array(values: Any, *, name: str) -> NDArray[Any]:
+    """Return a CSC index array after enforcing Rust's int32 sparse contract."""
+    array = np.asarray(values)
+    if array.dtype != np.dtype("int32"):
+        raise AssertionError(f"sparse {name} dtype {array.dtype} is not supported; expected int32")
+    return array
 
 
 def read_result_tuple(
