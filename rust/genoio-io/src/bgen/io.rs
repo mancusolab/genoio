@@ -49,6 +49,7 @@ pub(super) fn read_len_prefixed_string_u16(
     read_utf8_string(reader, path, label, len)
 }
 
+/// Read one u16-length-prefixed UTF-8 field into reusable scratch space.
 pub(super) fn read_len_prefixed_utf8_u16_with<T>(
     reader: &mut impl Read,
     path: &Path,
@@ -76,6 +77,7 @@ pub(super) fn read_len_prefixed_string_u32(
     read_utf8_string(reader, path, label, len)
 }
 
+/// Read one u32-length-prefixed UTF-8 field into reusable scratch space.
 pub(super) fn read_len_prefixed_utf8_u32_with<T>(
     reader: &mut impl Read,
     path: &Path,
@@ -120,6 +122,8 @@ fn read_utf8_with<T>(
     scratch: &mut Vec<u8>,
     visitor: impl FnOnce(&str) -> Result<T>,
 ) -> Result<T> {
+    // The borrowed string is valid only until the caller reuses `scratch`.
+    // Visitors must copy or append the value before returning.
     scratch.clear();
     scratch.resize(len, 0);
     reader

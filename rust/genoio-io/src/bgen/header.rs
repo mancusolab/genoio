@@ -376,6 +376,9 @@ fn read_layout2_variant_identifying_data_arrow(
     read_len_prefixed_utf8_u16_with(reader, path, "variant id", scratch, |id| {
         variants.ids.append_value(id)
     })?;
+    // Public BGEN IDs prefer rsid when present, but the on-disk order puts the
+    // fallback ID first. Append the fallback, then replace the row only when an
+    // rsid exists so the Arrow path does not materialize both strings.
     read_len_prefixed_utf8_u16_with(reader, path, "variant rsid", scratch, |rsid| {
         if !rsid.is_empty() {
             variants.ids.replace_value(row_index, rsid)?;
