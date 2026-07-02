@@ -167,15 +167,14 @@ fn dense_output_variant_capacity(variant_window: Option<VariantWindow>) -> usize
 /// Append one decoded dense text variant, using the no-missing fast path when valid.
 fn write_dense_text_variant(
     output: &mut TextDenseOutput,
-    variant_index: usize,
     values: &[f32],
     missing_indices: &[usize],
     missing_policy: DenseMissingPolicy,
 ) -> Result<()> {
     if missing_indices.is_empty() {
-        return output.write_variant_no_missing_direct(variant_index, values);
+        return output.write_variant_no_missing_direct(values);
     }
-    output.write_variant(variant_index, values, missing_indices, missing_policy)
+    output.write_variant(values, missing_indices, missing_policy)
 }
 
 impl TextVcfSource {
@@ -1053,7 +1052,7 @@ fn empty_dense_output_from_selection(
     let variants = metadata_return
         .variants
         .then(|| VariantMetadataBuffers::with_capacity(0));
-    TextDenseOutput::new(n_samples, 0, false).finish(0, samples, variants, diagnostics)
+    TextDenseOutput::new(n_samples, 0).finish(0, samples, variants, diagnostics)
 }
 
 fn empty_sparse_output_from_selection(
@@ -1099,7 +1098,7 @@ fn empty_haplotype_dense_output_from_selection(
     let variants = metadata_return
         .variants
         .then(|| VariantMetadataBuffers::with_capacity(0));
-    TextDenseOutput::new(n_samples, 0, false).finish(0, samples, variants, diagnostics)
+    TextDenseOutput::new(n_samples, 0).finish(0, samples, variants, diagnostics)
 }
 
 fn empty_haplotype_sparse_output_from_selection(
@@ -1214,7 +1213,7 @@ fn read_dense_records_with_metadata<R: BufRead>(
     // Variant-major appends have better locality for text VCF's decoded
     // per-record values. Python exposes the public sample-by-variant shape via
     // layout-aware assembly, so avoid strided sample-major writes here.
-    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, false);
+    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity);
     let mut output_variant_count = 0;
     let mut variants = VariantMetadataSink::new(variant_sink_kind, output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
@@ -1293,7 +1292,6 @@ fn read_dense_records_with_metadata<R: BufRead>(
 
         write_dense_text_variant(
             &mut output,
-            output_variant_count,
             decoded.values(),
             decoded.missing_indices(),
             missing_policy,
@@ -1362,7 +1360,7 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
     let output_variant_capacity = dense_output_variant_capacity(variant_window);
     // Keep text VCF dosage output aligned with the genotype path: append
     // retained variants contiguously and let the adapter expose public shape.
-    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, false);
+    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity);
     let mut output_variant_count = 0;
     let mut variants = VariantMetadataSink::new(variant_sink_kind, output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
@@ -1424,7 +1422,6 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
 
         write_dense_text_variant(
             &mut output,
-            output_variant_count,
             decoded.values(),
             decoded.missing_indices(),
             missing_policy,
@@ -1495,7 +1492,7 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
     } = selection;
     let n_samples = samples.len() * 2;
     let output_variant_capacity = dense_output_variant_capacity(variant_window);
-    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, false);
+    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity);
     let mut variants = VariantMetadataSink::new(variant_sink_kind, output_variant_capacity);
     let mut output_variant_count = 0;
     let mut retention = RetainedVariantState::new(variant_window);
@@ -1581,7 +1578,6 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
         // haplotype output flips columns to minor allele later to reduce nnz.
         write_dense_text_variant(
             &mut output,
-            output_variant_count,
             decoded.values(),
             decoded.missing_indices(),
             missing_policy,
