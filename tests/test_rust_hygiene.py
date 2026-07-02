@@ -21,6 +21,8 @@ def test_text_vcf_backend_has_no_row_variant_sink():
     ]
     combined = "\n".join(text_sources)
 
+    assert "TextDenseReadOutput" not in combined
+    assert "TextSparseReadOutput" not in combined
     assert "VariantMetadataSinkKind::Records" not in combined
     assert "TextDenseReadOutput::Records" not in combined
     assert "TextSparseReadOutput::Records" not in combined
@@ -33,6 +35,7 @@ def test_pyo3_adapter_does_not_normalize_row_matrices():
     assert "::from_matrix" not in source
     assert "fn read_dense_matrix(" not in source
     assert "fn read_sparse_matrix(" not in source
+    assert "_include_haplotype_sample_columns" not in source
 
 
 def test_rust_backends_do_not_use_migration_output_names():

@@ -233,7 +233,6 @@ fn phased_vcf_haplotype_sparse_flips_common_alt_allele() {
     assert_eq!(sparse.indices, vec![3]);
     assert_eq!(sparse.data, vec![1.0]);
     let variants = variants(&sparse.variants);
-    assert!(variants.flipped[0]);
     assert_eq!(variant_a0(variants, 0), "G");
     assert_eq!(variant_a1(variants, 0), "A");
 }
@@ -291,7 +290,11 @@ fn compressed_vcf_haplotype_sparse_windowed_matches_existing_semantics() {
         ]
     );
     assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs1", "rs2"]);
-    assert_eq!(variants(&sparse.variants).flipped, vec![true, false]);
+    let variant_metadata = variants(&sparse.variants);
+    assert_eq!(variant_a0(variant_metadata, 0), "G");
+    assert_eq!(variant_a1(variant_metadata, 0), "A");
+    assert_eq!(variant_a0(variant_metadata, 1), "C");
+    assert_eq!(variant_a1(variant_metadata, 1), "T");
 }
 
 #[test]

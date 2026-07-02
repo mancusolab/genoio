@@ -198,7 +198,7 @@ fn append_pvar_metadata_line(
             format!("pvar line {line_number} has empty ALT allele"),
         ));
     }
-    let qual = columns
+    let _qual = columns
         .qual
         .map(|index| parse_optional_qual(path, line_number, fields[index]))
         .transpose()?
@@ -209,17 +209,6 @@ fn append_pvar_metadata_line(
     variants.ids.append_value(fields[columns.id])?;
     variants.a0s.append_value(ref_allele)?;
     variants.a1s.append_value(first_alt)?;
-    variants.ref_alleles.push(Some(ref_allele.to_string()));
-    variants.alt_alleles.push(Some(alt_allele.to_string()));
-    variants.source_a0s.append_value(ref_allele)?;
-    variants.source_a1s.append_value(first_alt)?;
-    variants.flipped.push(false);
-    variants.quals.push(qual);
-    variants.afs.push(None);
-    variants.mafs.push(None);
-    variants.macs.push(None);
-    variants.missing_rates.push(None);
-    variants.n_called.push(None);
     Ok(())
 }
 

@@ -134,7 +134,11 @@ fn compressed_vcf_sparse_windowed_matches_existing_sparse_semantics() {
         vec!["S1", "S3"]
     );
     assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs1", "rs2"]);
-    assert_eq!(variants(&sparse.variants).flipped, vec![false, true]);
+    let sparse_variants = variants(&sparse.variants);
+    assert_eq!(variant_a0(sparse_variants, 0), "A");
+    assert_eq!(variant_a1(sparse_variants, 0), "G");
+    assert_eq!(variant_a0(sparse_variants, 1), "T");
+    assert_eq!(variant_a1(sparse_variants, 1), "C");
 }
 
 #[test]
@@ -187,8 +191,9 @@ fn sparse_reads_flip_common_minor_allele_columns_by_default() {
     assert_eq!(dense.values, vec![2.0, 2.0, 1.0]);
     assert_eq!(sparse_values_dense_output(&sparse), vec![0.0, 0.0, 1.0]);
     let sparse_variants = variants(&sparse.variants);
-    assert!(sparse_variants.flipped[0]);
     assert_eq!(variant_a0(sparse_variants, 0), "G");
     assert_eq!(variant_a1(sparse_variants, 0), "A");
-    assert!(!variants(&dense.variants).flipped[0]);
+    let dense_variants = variants(&dense.variants);
+    assert_eq!(variant_a0(dense_variants, 0), "A");
+    assert_eq!(variant_a1(dense_variants, 0), "G");
 }

@@ -302,8 +302,6 @@ F2 S3 0 0 0 2.0
     assert_eq!(second_sample.mother, None);
     assert_eq!(variant_a0(&metadata.variants, 0), "A");
     assert_eq!(variant_a1(&metadata.variants, 0), "G");
-    assert_eq!(plink_io::string_at(&metadata.variants.source_a0s, 0), "A");
-    assert_eq!(plink_io::string_at(&metadata.variants.source_a1s, 0), "G");
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
     assert!(!metadata.capabilities.phased);

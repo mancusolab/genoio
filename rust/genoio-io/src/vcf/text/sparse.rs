@@ -34,18 +34,6 @@ use super::{
     dense_output_variant_capacity, VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn,
 };
 
-pub(super) enum TextSparseReadOutput {
-    Output(SparseGenotypeMatrix),
-}
-
-impl TextSparseReadOutput {
-    pub(super) fn into_output(self) -> SparseGenotypeMatrix {
-        match self {
-            Self::Output(output) => output,
-        }
-    }
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "sparse VCF loop receives prevalidated output mode, selection, and reader state"
@@ -59,7 +47,7 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
     variant_sink_kind: VariantMetadataSinkKind,
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
-) -> Result<TextSparseReadOutput> {
+) -> Result<SparseGenotypeMatrix> {
     let DenseSampleSelection {
         source_indices,
         samples,
@@ -132,16 +120,11 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
         // Genotype sparse columns store minor-allele dosage by convention.
         let flipped = flip_values_to_minor_allele(decoded.values_mut());
         append_sparse_column(&mut indptr, &mut indices, &mut data, decoded.values())?;
-        if let Some(row_index) = variants.push_view_row(&variant)? {
-            // Stats describe the source allele orientation; flip after
-            // attaching them so AF/MAF stay aligned with sparse values.
-            if let Some(stats) = stats_to_attach {
-                variants.attach_stats(row_index, stats)?;
-            }
-            if flipped {
-                variants.flip_to_minor_allele(row_index)?;
-            }
-        }
+        variants.push_view_with_optional_stats_and_orientation(
+            &variant,
+            stats_to_attach,
+            flipped,
+        )?;
     }
 
     let n_variants = indptr.len().saturating_sub(1);
@@ -158,7 +141,6 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
         variants.into_output()?,
         diagnostics,
     )
-    .map(TextSparseReadOutput::Output)
 }
 
 #[expect(
@@ -174,7 +156,7 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
     variant_sink_kind: VariantMetadataSinkKind,
     selection: DenseSampleSelection,
     reader: &mut noodles::io::Reader<R>,
-) -> Result<TextSparseReadOutput> {
+) -> Result<SparseGenotypeMatrix> {
     let DenseSampleSelection {
         source_indices,
         samples,
@@ -258,16 +240,11 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
         reject_sparse_missing(decoded.has_missing())?;
         let flipped =
             append_haplotype_minor_sparse_column(&mut indptr, &mut indices, &mut data, &decoded)?;
-        if let Some(row_index) = variants.push_view_row(&variant)? {
-            // Haplotype sparse output may emit complement rows for the minor
-            // allele; apply that metadata flip to the just-appended row.
-            if let Some(stats) = stats_to_attach {
-                variants.attach_stats(row_index, stats)?;
-            }
-            if flipped {
-                variants.flip_to_minor_allele(row_index)?;
-            }
-        }
+        variants.push_view_with_optional_stats_and_orientation(
+            &variant,
+            stats_to_attach,
+            flipped,
+        )?;
     }
 
     let n_variants = indptr.len().saturating_sub(1);
@@ -282,7 +259,6 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
         variants.into_output()?,
         diagnostics,
     )
-    .map(TextSparseReadOutput::Output)
 }
 
 /// Append a haplotype sparse column and report whether metadata must be flipped.

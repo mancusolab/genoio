@@ -180,12 +180,13 @@ fn push_bcf_variant_row(
         return Ok(());
     };
     let row_index = variants.len();
-    variants.push_view(variant)?;
+    if flipped {
+        variants.push_flipped_view(variant)?;
+    } else {
+        variants.push_view(variant)?;
+    }
     if let Some(stats) = stats {
         variants.attach_stats(row_index, stats)?;
-    }
-    if flipped {
-        variants.flip_to_minor_allele(row_index)?;
     }
     Ok(())
 }
@@ -1294,6 +1295,14 @@ mod tests {
         string_at(&variants.ids, index)
     }
 
+    fn variant_a0(variants: &VariantMetadataBuffers, index: usize) -> &str {
+        string_at(&variants.a0s, index)
+    }
+
+    fn variant_a1(variants: &VariantMetadataBuffers, index: usize) -> &str {
+        string_at(&variants.a1s, index)
+    }
+
     fn read_vcf_dense_windowed_with_threads_for_test(
         path: &Path,
         requested_samples: Option<&[String]>,
@@ -1800,8 +1809,6 @@ mod tests {
         );
         let variant_metadata = variants(&dense.variants);
         assert_eq!(variant_id(variant_metadata, 0), "rs1");
-        assert_eq!(variant_metadata.macs[0], Some(1));
-        assert_eq!(variant_metadata.n_called[0], Some(1));
     }
 
     #[test]
@@ -2052,7 +2059,10 @@ mod tests {
         assert_eq!(sparse.indptr, vec![0, 1, 2]);
         assert_eq!(sparse.indices, vec![0, 0]);
         assert_eq!(sparse.data, vec![1.0, 1.0]);
-        assert!(variants(&sparse.variants).flipped[0]);
-        assert!(!variants(&sparse.variants).flipped[1]);
+        let variant_metadata = variants(&sparse.variants);
+        assert_eq!(variant_a0(variant_metadata, 0), "G");
+        assert_eq!(variant_a1(variant_metadata, 0), "A");
+        assert_eq!(variant_a0(variant_metadata, 1), "C");
+        assert_eq!(variant_a1(variant_metadata, 1), "T");
     }
 }
