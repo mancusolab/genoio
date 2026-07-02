@@ -269,10 +269,6 @@ impl StringColumnBuffers {
     }
 
     /// Replace one logical row while preserving Arrow Utf8 offsets.
-    ///
-    /// Retained-row allele flips can swap strings after a row has already been
-    /// appended. This keeps the column in canonical Arrow Utf8 layout instead
-    /// of rebuilding the entire metadata buffer.
     pub fn replace_value(&mut self, index: usize, value: &str) -> Result<(), GenoioError> {
         if index >= self.len() {
             return Err(metadata_row_index_error(index, self.len()));
@@ -299,8 +295,8 @@ impl StringColumnBuffers {
             GenoioError::unsupported("metadata string column exceeds Arrow Utf8 offset capacity")
         })?;
 
-        // Allele strings may have different byte lengths, so every following
-        // offset must move by the replacement delta.
+        // Replacement strings may have different byte lengths, so every
+        // following offset must move by the replacement delta.
         self.values.splice(start..end, value.bytes());
         let delta = i64::try_from(new_len)
             .and_then(|new_len| i64::try_from(old_len).map(|old_len| new_len - old_len))
@@ -395,9 +391,6 @@ fn append_utf8_value(
 }
 
 /// Variant metadata with public fields staged in Arrow-compatible column buffers.
-///
-/// Non-public fields are retained as columns so format readers can attach
-/// genotype-derived statistics without leaving the columnar backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantMetadataBuffers {
     pub chroms: StringColumnBuffers,
@@ -405,17 +398,6 @@ pub struct VariantMetadataBuffers {
     pub ids: StringColumnBuffers,
     pub a0s: StringColumnBuffers,
     pub a1s: StringColumnBuffers,
-    pub ref_alleles: Vec<Option<String>>,
-    pub alt_alleles: Vec<Option<String>>,
-    pub source_a0s: StringColumnBuffers,
-    pub source_a1s: StringColumnBuffers,
-    pub flipped: Vec<bool>,
-    pub quals: Vec<Option<f32>>,
-    pub afs: Vec<Option<f32>>,
-    pub mafs: Vec<Option<f32>>,
-    pub macs: Vec<Option<u32>>,
-    pub missing_rates: Vec<Option<f32>>,
-    pub n_called: Vec<Option<u32>>,
 }
 
 impl VariantMetadataBuffers {
@@ -430,23 +412,6 @@ impl VariantMetadataBuffers {
             ids: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(12)),
             a0s: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(2)),
             a1s: StringColumnBuffers::with_capacity(row_capacity, row_capacity.saturating_mul(2)),
-            ref_alleles: Vec::with_capacity(row_capacity),
-            alt_alleles: Vec::with_capacity(row_capacity),
-            source_a0s: StringColumnBuffers::with_capacity(
-                row_capacity,
-                row_capacity.saturating_mul(2),
-            ),
-            source_a1s: StringColumnBuffers::with_capacity(
-                row_capacity,
-                row_capacity.saturating_mul(2),
-            ),
-            flipped: Vec::with_capacity(row_capacity),
-            quals: Vec::with_capacity(row_capacity),
-            afs: Vec::with_capacity(row_capacity),
-            mafs: Vec::with_capacity(row_capacity),
-            macs: Vec::with_capacity(row_capacity),
-            missing_rates: Vec::with_capacity(row_capacity),
-            n_called: Vec::with_capacity(row_capacity),
         }
     }
 
@@ -463,17 +428,6 @@ impl VariantMetadataBuffers {
         self.ids.append_value(id)?;
         self.a0s.append_value(a0)?;
         self.a1s.append_value(a1)?;
-        self.ref_alleles.push(None);
-        self.alt_alleles.push(None);
-        self.source_a0s.append_value(a0)?;
-        self.source_a1s.append_value(a1)?;
-        self.flipped.push(false);
-        self.quals.push(None);
-        self.afs.push(None);
-        self.mafs.push(None);
-        self.macs.push(None);
-        self.missing_rates.push(None);
-        self.n_called.push(None);
         Ok(())
     }
 
@@ -496,19 +450,19 @@ impl VariantMetadataBuffers {
         self.ids.append_value(variant.id())?;
         self.a0s.append_value(variant.a0())?;
         self.a1s.append_value(variant.a1())?;
-        self.ref_alleles
-            .push(variant.ref_allele().map(str::to_owned));
-        self.alt_alleles
-            .push(variant.alt_allele().map(str::to_owned));
-        self.source_a0s.append_value(variant.source_a0())?;
-        self.source_a1s.append_value(variant.source_a1())?;
-        self.flipped.push(variant.flipped());
-        self.quals.push(variant.qual());
-        self.afs.push(variant.af());
-        self.mafs.push(variant.maf());
-        self.macs.push(variant.mac());
-        self.missing_rates.push(variant.missing_rate());
-        self.n_called.push(variant.n_called());
+        Ok(())
+    }
+
+    /// Append one borrowed metadata view with public allele labels swapped.
+    pub fn push_flipped_view<V: VariantMetadataView + ?Sized>(
+        &mut self,
+        variant: &V,
+    ) -> Result<(), GenoioError> {
+        self.chroms.append_value(variant.chrom())?;
+        self.positions.push(i64::from(variant.pos()));
+        self.ids.append_value(variant.id())?;
+        self.a0s.append_value(variant.a1())?;
+        self.a1s.append_value(variant.a0())?;
         Ok(())
     }
 
@@ -519,49 +473,22 @@ impl VariantMetadataBuffers {
     pub fn push_view_with_stats<V: VariantMetadataView + ?Sized>(
         &mut self,
         variant: &V,
-        stats: VariantStats,
+        _stats: VariantStats,
     ) -> Result<(), GenoioError> {
-        self.push_view(variant)?;
-        self.attach_stats(self.len() - 1, stats)
+        self.push_view(variant)
     }
 
-    /// Attach computed genotype statistics to a retained metadata row.
+    /// Validate delayed statistic attachment for a retained metadata row.
     ///
-    /// The row index is in retained-output coordinates, not source-row
-    /// coordinates. This keeps delayed stat attachment aligned with the matrix
-    /// column that survived filtering and windowing.
+    /// Genotype statistics are currently filter/internal state, not public
+    /// Python variant metadata. This method remains so backend loops can attach
+    /// stats through one call site until public stat columns are introduced.
     pub fn attach_stats(
         &mut self,
         row_index: usize,
-        stats: VariantStats,
+        _stats: VariantStats,
     ) -> Result<(), GenoioError> {
-        self.validate_row_index(row_index)?;
-        self.afs[row_index] = stats.af.map(|value| value as f32);
-        self.mafs[row_index] = stats.maf.map(|value| value as f32);
-        // Public variant metadata keeps MAC integer-valued. Dosage filters can
-        // still evaluate fractional MAC internally before this projection.
-        self.macs[row_index] = stats.mac.and_then(exact_u32_from_f64);
-        self.missing_rates[row_index] = Some(stats.missing_rate as f32);
-        self.n_called[row_index] = Some(stats.n_called);
-        Ok(())
-    }
-
-    /// Flip public alleles for a retained row when values are encoded as minor allele.
-    ///
-    /// This mutates only the public allele columns and flip marker. Source
-    /// allele columns remain unchanged so downstream adapters can report both
-    /// public and original source orientation.
-    pub fn flip_to_minor_allele(&mut self, row_index: usize) -> Result<(), GenoioError> {
-        self.validate_row_index(row_index)?;
-        let a0 = string_at(&self.a0s, row_index).to_owned();
-        let a1 = string_at(&self.a1s, row_index).to_owned();
-        self.a0s.replace_value(row_index, &a1)?;
-        self.a1s.replace_value(row_index, &a0)?;
-        self.flipped[row_index] = true;
-        if let Some(af) = self.afs[row_index] {
-            self.afs[row_index] = Some(1.0 - af);
-        }
-        Ok(())
+        self.validate_row_index(row_index)
     }
 
     /// Build Arrow-compatible public variant buffers from normalized records.
@@ -594,14 +521,6 @@ fn metadata_row_index_error(index: usize, len: usize) -> GenoioError {
     GenoioError::internal_contract(format!(
         "metadata row index {index} is outside row count {len}"
     ))
-}
-
-fn exact_u32_from_f64(value: f64) -> Option<u32> {
-    if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= f64::from(u32::MAX) {
-        Some(value as u32)
-    } else {
-        None
-    }
 }
 
 /// Complete source metadata with public variants already staged as column buffers.
@@ -752,20 +671,29 @@ mod tests {
     }
 
     #[test]
+    fn variant_metadata_buffers_store_only_public_output_columns() {
+        let public_columns_size =
+            std::mem::size_of::<StringColumnBuffers>() * 4 + std::mem::size_of::<Vec<i64>>();
+
+        assert_eq!(
+            std::mem::size_of::<VariantMetadataBuffers>(),
+            public_columns_size
+        );
+    }
+
+    #[test]
     fn variant_metadata_buffers_append_borrowed_views() {
         let mut buffers = VariantMetadataBuffers::with_capacity(1);
 
         buffers.push_view(&borrowed_variant()).unwrap();
 
         assert_eq!(buffers.positions, vec![42]);
-        assert_eq!(buffers.ref_alleles, vec![Some("A".to_string())]);
-        assert_eq!(buffers.alt_alleles, vec![Some("G".to_string())]);
-        assert_eq!(buffers.quals, vec![Some(30.0)]);
-        assert_eq!(buffers.afs, vec![None]);
+        assert_eq!(string_at(&buffers.a0s, 0), "A");
+        assert_eq!(string_at(&buffers.a1s, 0), "G");
     }
 
     #[test]
-    fn variant_metadata_buffers_append_views_with_stats() {
+    fn variant_metadata_buffers_accept_stats_without_public_storage() {
         let mut buffers = VariantMetadataBuffers::with_capacity(1);
         let stats = VariantStats {
             af: Some(0.75),
@@ -780,37 +708,20 @@ mod tests {
             .push_view_with_stats(&borrowed_variant(), stats)
             .unwrap();
 
-        assert_eq!(buffers.afs, vec![Some(0.75)]);
-        assert_eq!(buffers.mafs, vec![Some(0.25)]);
-        assert_eq!(buffers.macs, vec![Some(3)]);
-        assert_eq!(buffers.missing_rates, vec![Some(0.125)]);
-        assert_eq!(buffers.n_called, vec![Some(12)]);
+        assert_eq!(buffers.len(), 1);
+        assert_eq!(string_at(&buffers.a0s, 0), "A");
+        assert_eq!(string_at(&buffers.a1s, 0), "G");
     }
 
     #[test]
-    fn variant_metadata_buffers_mutate_retained_rows() {
+    fn variant_metadata_buffers_append_flipped_borrowed_views() {
         let mut buffers = VariantMetadataBuffers::with_capacity(1);
-        buffers.push_view(&borrowed_variant()).unwrap();
+        let variant = borrowed_variant();
 
-        buffers.flip_to_minor_allele(0).unwrap();
-        buffers
-            .attach_stats(
-                0,
-                VariantStats {
-                    af: Some(0.25),
-                    maf: Some(0.25),
-                    mac: Some(1.5),
-                    missing_rate: 0.0,
-                    n_called: 4,
-                    polymorphic: true,
-                },
-            )
-            .unwrap();
+        buffers.push_flipped_view(&variant).unwrap();
 
         assert_eq!(string_at(&buffers.a0s, 0), "G");
         assert_eq!(string_at(&buffers.a1s, 0), "A");
-        assert_eq!(buffers.flipped, vec![true]);
-        assert_eq!(buffers.afs, vec![Some(0.25)]);
-        assert_eq!(buffers.macs, vec![None]);
+        assert_eq!(string_at(&buffers.ids, 0), "rs42");
     }
 }

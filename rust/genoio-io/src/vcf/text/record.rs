@@ -315,8 +315,5 @@ mod tests {
         assert_eq!(variants.ids.values, b"rs1");
         assert_eq!(variants.a0s.values, b"A");
         assert_eq!(variants.a1s.values, b"G");
-        assert_eq!(variants.ref_alleles, vec![Some("A".to_string())]);
-        assert_eq!(variants.alt_alleles, vec![Some("G,T".to_string())]);
-        assert_eq!(variants.quals, vec![Some(30.0)]);
     }
 }

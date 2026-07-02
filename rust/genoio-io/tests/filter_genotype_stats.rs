@@ -229,13 +229,6 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
         dense_missing_sample_major_plink(&dense),
         vec![false, true, false]
     );
-    assert!(plink_variants.afs[0].is_some_and(|af| { (af - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE }));
-    assert!(
-        plink_variants.mafs[0].is_some_and(|maf| { (maf - 0.175).abs() <= PGEN_DOSAGE_TOLERANCE })
-    );
-    assert_eq!(plink_variants.macs[0], None);
-    assert_eq!(plink_variants.missing_rates[0], Some(1.0 / 3.0));
-    assert_eq!(plink_variants.n_called[0], Some(2));
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -264,11 +257,6 @@ fn filter_genotype_stats_vcf_dosage_uses_fractional_mac() {
         dense_missing_sample_major_vcf(&dense),
         vec![false, true, false]
     );
-    assert_eq!(variant_metadata.afs[0], Some(0.175));
-    assert_eq!(variant_metadata.mafs[0], Some(0.175));
-    assert_eq!(variant_metadata.macs[0], None);
-    assert_eq!(variant_metadata.missing_rates[0], Some(1.0 / 3.0));
-    assert_eq!(variant_metadata.n_called[0], Some(2));
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -306,11 +294,6 @@ fn filter_genotype_stats_use_called_genotypes_before_missing_imputation() {
     let variant_metadata = variants(&dense.variants);
     assert_eq!(variant_id(variant_metadata, 0), "rs1");
     assert_eq!(dense.values, vec![0.0, 1.0, 2.0]);
-    assert_eq!(variant_metadata.afs[0], Some(0.5));
-    assert_eq!(variant_metadata.mafs[0], Some(0.5));
-    assert_eq!(variant_metadata.macs[0], Some(3));
-    assert_eq!(variant_metadata.missing_rates[0], Some(0.0));
-    assert_eq!(variant_metadata.n_called[0], Some(3));
     assert_eq!(dense.diagnostics.candidate_variants, 3);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 2);
@@ -350,20 +333,6 @@ fn filter_genotype_stats_plink2_match_expanded_stats_and_attach_metadata() {
         &dense.values,
         &[0.0, 1.0, 2.0, f32::NAN, 0.0, 1.0, 2.0, 1.0, 0.0],
     );
-    assert_eq!(
-        plink_variants.afs,
-        vec![Some(0.5), Some(1.0 / 3.0), Some(0.5)]
-    );
-    assert_eq!(
-        plink_variants.mafs,
-        vec![Some(0.5), Some(1.0 / 3.0), Some(0.5)]
-    );
-    assert_eq!(plink_variants.macs, vec![Some(2), Some(2), Some(3)]);
-    assert_eq!(
-        plink_variants.missing_rates,
-        vec![Some(1.0 / 3.0), Some(0.0), Some(0.0)]
-    );
-    assert_eq!(plink_variants.n_called, vec![Some(2), Some(3), Some(3)]);
     assert_eq!(dense.diagnostics.candidate_variants, 4);
     assert_eq!(dense.diagnostics.retained_variants, 3);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -402,11 +371,6 @@ fn filter_genotype_stats_plink2_variable_width_selected_samples_attach_stats() {
         dense_missing_sample_major_plink(&dense),
         vec![false, false, true, false]
     );
-    assert_eq!(plink_variants.afs, vec![Some(0.5), Some(0.75)]);
-    assert_eq!(plink_variants.mafs, vec![Some(0.5), Some(0.25)]);
-    assert_eq!(plink_variants.macs, vec![Some(1), Some(1)]);
-    assert_eq!(plink_variants.missing_rates, vec![Some(0.5), Some(0.0)]);
-    assert_eq!(plink_variants.n_called, vec![Some(1), Some(2)]);
     assert_eq!(dense.diagnostics.candidate_variants, 5);
     assert_eq!(dense.diagnostics.retained_variants, 2);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 3);

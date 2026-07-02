@@ -158,7 +158,6 @@ fn read_dense_impl(
         output,
         read_options.return_samples,
         read_options.return_variants,
-        false,
     )
 }
 
@@ -190,7 +189,6 @@ fn read_sparse_impl(
         output,
         read_options.return_samples,
         read_options.return_variants,
-        false,
     )
 }
 
@@ -222,7 +220,6 @@ fn read_haplotypes_dense_impl(
         output,
         read_options.return_samples,
         read_options.return_variants,
-        true,
     )
 }
 
@@ -254,7 +251,6 @@ fn read_haplotypes_sparse_impl(
         output,
         read_options.return_samples,
         read_options.return_variants,
-        true,
     )
 }
 
@@ -966,7 +962,6 @@ fn dense_matrix_to_py(
     output: genoio_core::DenseGenotypeMatrix,
     return_samples: bool,
     return_variants: bool,
-    _include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
     let genoio_core::DenseGenotypeMatrix {
         n_samples,
@@ -1026,7 +1021,6 @@ fn sparse_matrix_to_py(
     output: genoio_core::SparseGenotypeMatrix,
     return_samples: bool,
     return_variants: bool,
-    _include_haplotype_sample_columns: bool,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     // Core sparse buffers already use SciPy's int32 index width, so transfer

@@ -9,8 +9,8 @@ use genoio_core::{
 
 pub(crate) use super::output::{
     dense_missing_sample_major_output, dense_values_sample_major_output,
-    sparse_values_dense_output, string_at, strings, variant_alt_allele, variant_id, variant_ids,
-    variant_ref_allele, variants,
+    sparse_values_dense_output, string_at, strings, variant_a0, variant_a1, variant_id,
+    variant_ids, variants,
 };
 pub(crate) use ::genoio_io::{read_plink1_metadata, read_plink2_metadata, Result};
 

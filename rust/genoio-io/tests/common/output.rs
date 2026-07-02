@@ -63,14 +63,6 @@ pub(crate) fn variant_a1(variants: &VariantMetadataBuffers, index: usize) -> &st
     string_at(&variants.a1s, index)
 }
 
-pub(crate) fn variant_ref_allele(variants: &VariantMetadataBuffers, index: usize) -> Option<&str> {
-    variants.ref_alleles[index].as_deref()
-}
-
-pub(crate) fn variant_alt_allele(variants: &VariantMetadataBuffers, index: usize) -> Option<&str> {
-    variants.alt_alleles[index].as_deref()
-}
-
 pub(crate) fn string_at(column: &StringColumnBuffers, index: usize) -> &str {
     let start = column.offsets[index] as usize;
     let end = column.offsets[index + 1] as usize;

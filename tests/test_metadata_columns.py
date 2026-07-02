@@ -34,17 +34,6 @@ def test_variants_frame_builds_from_column_payload():
             "id": ["rs1", "rs2"],
             "a0": ["A", "C"],
             "a1": ["G", "T"],
-            "ref_allele": ["A", "C"],
-            "alt_allele": ["G", "T"],
-            "source_a0": ["A", "C"],
-            "source_a1": ["G", "T"],
-            "flipped": [False, False],
-            "qual": [None, None],
-            "af": [None, None],
-            "maf": [None, None],
-            "mac": [None, None],
-            "missing_rate": [None, None],
-            "n_called": [None, None],
         }
     )
 

@@ -11,8 +11,8 @@ use common::dense::assert_values_with_nan;
 use common::plink_output as genoio_io;
 use common::plink_output::{
     dense_missing_sample_major_output as dense_missing_sample_major,
-    dense_values_sample_major_output as dense_values_sample_major, variant_alt_allele, variant_id,
-    variant_ids, variant_ref_allele, variants,
+    dense_values_sample_major_output as dense_values_sample_major, variant_a0, variant_a1,
+    variant_id, variant_ids, variants,
 };
 use common::{unique_dir, TestDir};
 
@@ -303,9 +303,8 @@ fn plink2_dense_decodes_fixed_width_unphased_biallelic_hardcalls() {
         vec!["S1", "S2", "S3"]
     );
     let variant_metadata = variants(&dense.variants);
-    assert_eq!(variant_ref_allele(variant_metadata, 0), Some("A"));
-    assert_eq!(variant_alt_allele(variant_metadata, 0), Some("G"));
-    assert_eq!(variant_metadata.quals[0], Some(30.0));
+    assert_eq!(variant_a0(variant_metadata, 0), "A");
+    assert_eq!(variant_a1(variant_metadata, 0), "G");
 }
 
 #[test]
@@ -1046,7 +1045,6 @@ fn plink2_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() 
         vec![v2_s1_l, v2_s1_r, v2_s2_l, v2_s2_r, v2_s3_l, v2_s3_r]
     );
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
-    assert!(variant_metadata.afs[0].is_some_and(|af| (af - 0.1).abs() <= 2.0 / 32768.0));
 }
 
 #[test]

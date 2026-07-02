@@ -15,7 +15,9 @@ mod common;
 
 use common::unique_dir;
 use common::vcf_output as genoio_io;
-use common::vcf_output::{sparse_values_dense_output, variant_ids, variants};
+use common::vcf_output::{
+    sparse_values_dense_output, variant_a0, variant_a1, variant_ids, variants,
+};
 
 fn write_vcf(path: &Path) {
     fs::write(
@@ -181,7 +183,8 @@ fn indexed_vcf_region_sparse_uses_permissive_text_backend() {
 
     assert_eq!(variant_ids(variants(&sparse.variants)), vec!["rs20"]);
     assert_eq!(sparse_values_dense_output(&sparse), vec![1.0, 0.0]);
-    assert!(variants(&sparse.variants).flipped[0]);
+    assert_eq!(variant_a0(variants(&sparse.variants), 0), "G");
+    assert_eq!(variant_a1(variants(&sparse.variants), 0), "A");
 }
 
 #[test]

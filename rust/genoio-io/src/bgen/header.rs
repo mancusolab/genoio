@@ -397,24 +397,13 @@ fn read_layout2_variant_identifying_data_metadata(
     }
 
     read_len_prefixed_utf8_u32_with(reader, path, "variant allele", scratch, |a0| {
-        variants.a0s.append_value(a0)?;
-        variants.ref_alleles.push(Some(a0.to_owned()));
-        variants.source_a0s.append_value(a0)
+        variants.a0s.append_value(a0)
     })?;
     read_len_prefixed_utf8_u32_with(reader, path, "variant allele", scratch, |a1| {
-        variants.a1s.append_value(a1)?;
-        variants.alt_alleles.push(Some(a1.to_owned()));
-        variants.source_a1s.append_value(a1)
+        variants.a1s.append_value(a1)
     })?;
 
     variants.positions.push(pos);
-    variants.flipped.push(false);
-    variants.quals.push(None);
-    variants.afs.push(None);
-    variants.mafs.push(None);
-    variants.macs.push(None);
-    variants.missing_rates.push(None);
-    variants.n_called.push(None);
     Ok(())
 }
 

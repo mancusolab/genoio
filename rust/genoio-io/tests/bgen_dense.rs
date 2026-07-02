@@ -14,9 +14,8 @@ mod common;
 
 use common::bgen_output as genoio_io;
 use common::bgen_output::{
-    dense_missing_sample_major_output as dense_missing_sample_major, string_at, variant_a0,
-    variant_a1, variant_alt_allele, variant_chrom, variant_id, variant_ids, variant_ref_allele,
-    variants,
+    dense_missing_sample_major_output as dense_missing_sample_major, variant_a0, variant_a1,
+    variant_chrom, variant_id, variant_ids, variants,
 };
 use common::dense::assert_values_close_with_nan as assert_values_with_nan;
 use common::unique_dir;
@@ -1344,10 +1343,6 @@ fn bgen_haplotype_dosage_genotype_stat_filters_use_collapsed_diploid_dosage() {
         dense_missing_sample_major(&dense),
         vec![false, false, true, true]
     );
-    assert_eq!(variants(&dense.variants).mafs[0], Some(0.5));
-    assert_eq!(variants(&dense.variants).macs[0], Some(1));
-    assert_eq!(variants(&dense.variants).missing_rates[0], Some(0.5));
-    assert_eq!(variants(&dense.variants).n_called[0], Some(1));
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
 }
 
@@ -1521,54 +1516,28 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
             "rs2",
             vec![1.0, f32::NAN],
             vec![false, true],
-            Some(0.5),
-            Some(1),
-            Some(0.5),
-            Some(1),
         ),
         (
             genotype_stat_filter("mac", json!({"min": 1, "max": 1})),
             "rs2",
             vec![1.0, f32::NAN],
             vec![false, true],
-            Some(0.5),
-            Some(1),
-            Some(0.5),
-            Some(1),
         ),
         (
             genotype_stat_filter("missing_rate", json!({"max": 0.0})),
             "rs1",
             vec![0.0, 0.0],
             vec![false, false],
-            Some(0.0),
-            Some(0),
-            Some(0.0),
-            Some(2),
         ),
         (
             genotype_stat_filter("polymorphic", json!({})),
             "rs2",
             vec![1.0, f32::NAN],
             vec![false, true],
-            Some(0.5),
-            Some(1),
-            Some(0.5),
-            Some(1),
         ),
     ];
 
-    for (
-        filter,
-        expected_id,
-        expected_values,
-        expected_missing,
-        expected_maf,
-        expected_mac,
-        expected_missing_rate,
-        expected_n_called,
-    ) in cases
-    {
+    for (filter, expected_id, expected_values, expected_missing) in cases {
         let dense = genoio_io::read_bgen_dosage_dense_windowed(
             &bgen,
             None,
@@ -1584,13 +1553,6 @@ fn bgen_dosage_dense_genotype_stat_filters_match_dosage_values() {
         assert_eq!(variant_id(variants(&dense.variants), 0), expected_id);
         assert_values_with_nan(&dense.values, &expected_values, 2.0 / 255.0);
         assert_eq!(dense_missing_sample_major(&dense), expected_missing);
-        assert_eq!(variants(&dense.variants).mafs[0], expected_maf);
-        assert_eq!(variants(&dense.variants).macs[0], expected_mac);
-        assert_eq!(
-            variants(&dense.variants).missing_rates[0],
-            expected_missing_rate
-        );
-        assert_eq!(variants(&dense.variants).n_called[0], expected_n_called);
         assert_eq!(dense.diagnostics.candidate_variants, 2);
         assert_eq!(dense.diagnostics.retained_variants, 1);
         assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
@@ -2160,17 +2122,6 @@ fn bgen_metadata_reads_embedded_sample_ids_and_variant_rows() {
             .collect::<Vec<_>>(),
         vec![("1", 10, "rs1", "A", "G"), ("2", 20, "rs2", "C", "T")]
     );
-    assert_eq!(variant_ref_allele(&metadata.variants, 0), Some("A"));
-    assert_eq!(variant_alt_allele(&metadata.variants, 0), Some("G"));
-    assert_eq!(string_at(&metadata.variants.source_a0s, 0), "A");
-    assert_eq!(string_at(&metadata.variants.source_a1s, 0), "G");
-    assert!(!metadata.variants.flipped[0]);
-    assert_eq!(metadata.variants.quals[0], None);
-    assert_eq!(metadata.variants.afs[0], None);
-    assert_eq!(metadata.variants.mafs[0], None);
-    assert_eq!(metadata.variants.macs[0], None);
-    assert_eq!(metadata.variants.missing_rates[0], None);
-    assert_eq!(metadata.variants.n_called[0], None);
     assert!(metadata.capabilities.supports_geno);
     assert!(!metadata.capabilities.supports_haplo);
     assert!(!metadata.capabilities.phased);
