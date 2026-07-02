@@ -223,14 +223,8 @@ pub(super) fn decode_gt_record(
             output.counts = Some(counts);
         }
         GtStatsMode::Skip => {
-            scan_selected_gt_calls_at_index(sample_fields, gt_index, source_indices, &mut |call| {
-                if call.is_missing {
-                    output.missing_indices.push(output.values.len());
-                }
-                output.values.push(call.value);
-                Ok(())
-            })
-            .map_err(|reason| gt_error(path, &record_location(), reason))?;
+            scan_selected_gt_values_at_index(sample_fields, gt_index, source_indices, output)
+                .map_err(|reason| gt_error(path, &record_location(), reason))?;
         }
     }
     Ok(())
@@ -450,6 +444,17 @@ fn scan_selected_gt_calls(
     scan_selected_gt_calls_at_index(sample_fields, gt_index, source_indices, emit)
 }
 
+#[cfg(test)]
+fn scan_selected_gt_values(
+    sample_fields: &[u8],
+    source_indices: &[usize],
+    output: &mut GtDecodeBuffers,
+) -> std::result::Result<(), &'static str> {
+    let gt_index = gt_key_index(sample_fields).ok_or("record is missing FORMAT/GT")?;
+    output.clear();
+    scan_selected_gt_values_at_index(sample_fields, gt_index, source_indices, output)
+}
+
 fn scan_selected_gt_calls_at_index(
     sample_fields: &[u8],
     gt_index: usize,
@@ -461,6 +466,21 @@ fn scan_selected_gt_calls_at_index(
     } else {
         scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
             emit(decode_gt_token(token)?)
+        })
+    }
+}
+
+fn scan_selected_gt_values_at_index(
+    sample_fields: &[u8],
+    gt_index: usize,
+    source_indices: &[usize],
+    output: &mut GtDecodeBuffers,
+) -> std::result::Result<(), &'static str> {
+    if gt_index == 0 {
+        scan_selected_gt_first_values(sample_fields, source_indices, output)
+    } else {
+        scan_selected_gt_tokens(sample_fields, gt_index, source_indices, &mut |token| {
+            push_gt_value(token, output)
         })
     }
 }
@@ -502,6 +522,43 @@ fn scan_selected_gt_first_calls(
     Ok(())
 }
 
+fn scan_selected_gt_first_values(
+    sample_fields: &[u8],
+    source_indices: &[usize],
+    output: &mut GtDecodeBuffers,
+) -> std::result::Result<(), &'static str> {
+    let Some(format_end) = sample_fields.iter().position(|&b| b == b'\t') else {
+        return Err("record has FORMAT but no sample columns");
+    };
+    let mut selected_index = 0_usize;
+    let mut sample_index = 0_usize;
+    let mut field_start = format_end + 1;
+
+    while selected_index < source_indices.len() {
+        let target_index = source_indices[selected_index];
+        if field_start > sample_fields.len() {
+            return Err("selected sample index is outside the record");
+        }
+        let field_end = if sample_index == target_index {
+            let (gt_end, selected_field_end) =
+                gt_first_token_and_field_end(sample_fields, field_start);
+            push_gt_value(&sample_fields[field_start..gt_end], output)?;
+            selected_index += 1;
+            selected_field_end
+        } else {
+            next_delimiter(sample_fields, field_start, b'\t')
+        };
+        sample_index += 1;
+        if field_end == sample_fields.len() {
+            field_start = sample_fields.len() + 1;
+        } else {
+            field_start = field_end + 1;
+        }
+    }
+
+    Ok(())
+}
+
 fn gt_first_token_and_field_end(sample_fields: &[u8], start: usize) -> (usize, usize) {
     let mut gt_end = None;
     for (offset, &byte) in sample_fields[start..].iter().enumerate() {
@@ -514,6 +571,30 @@ fn gt_first_token_and_field_end(sample_fields: &[u8], start: usize) -> (usize, u
     }
     let end = sample_fields.len();
     (gt_end.unwrap_or(end), end)
+}
+
+#[inline(always)]
+fn push_gt_value(
+    token: &[u8],
+    output: &mut GtDecodeBuffers,
+) -> std::result::Result<(), &'static str> {
+    match token {
+        b"0/0" | b"0|0" => output.values.push(0.0),
+        b"0/1" | b"1/0" | b"0|1" | b"1|0" => output.values.push(1.0),
+        b"1/1" | b"1|1" => output.values.push(2.0),
+        b"./." | b".|." => {
+            output.missing_indices.push(output.values.len());
+            output.values.push(0.0);
+        }
+        _ => {
+            let call = decode_gt_token(token)?;
+            if call.is_missing {
+                output.missing_indices.push(output.values.len());
+            }
+            output.values.push(call.value);
+        }
+    }
+    Ok(())
 }
 
 fn decode_gt_token(token: &[u8]) -> std::result::Result<GtCall, &'static str> {
@@ -670,6 +751,22 @@ mod tests {
                 GtCall::missing(),
             ]
         );
+    }
+
+    #[test]
+    fn scan_selected_gt_values_pushes_fast_path_without_stats() {
+        let mut output = GtDecodeBuffers::with_capacity(4);
+        scan_selected_gt_values(
+            b"GT:DS\t0/0:0\t0/1:1\t1/1:2\t./.:.",
+            &[0, 2, 3],
+            &mut output,
+        )
+        .expect("valid GT values");
+
+        assert_eq!(output.values(), &[0.0, 2.0, 0.0]);
+        assert_eq!(output.missing_indices(), &[2]);
+        assert_eq!(output.stats(), None);
+        assert!(output.counts().is_none());
     }
 
     #[test]
