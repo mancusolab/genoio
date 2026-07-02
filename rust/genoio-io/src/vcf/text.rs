@@ -31,7 +31,7 @@ use self::gt::{
     GtDecodeBuffers, GtStatsMode, HaplotypeDenseDecodeBuffers,
 };
 use self::header::read_sample_records_from_header;
-use self::output::{can_write_sample_major_directly, TextDenseOutput};
+use self::output::TextDenseOutput;
 use self::record::{
     append_public_variant_metadata_from_text_record, skip_variant_for_region,
     text_variant_view_from_text_record, validate_biallelic_variant,
@@ -621,7 +621,6 @@ fn read_dense_with_metadata_from_input<R: BufRead>(
 ) -> Result<DenseGenotypeMatrix> {
     let TextVcfInput {
         mut reader,
-        source_sample_count,
         selection,
     } = input;
     read_dense_records_with_metadata(
@@ -631,7 +630,7 @@ fn read_dense_with_metadata_from_input<R: BufRead>(
         missing_policy,
         metadata_return,
         variant_sink_kind,
-        DenseReadSource::full_scan(source_sample_count),
+        DenseReadSource::full_scan(),
         &selection,
         &mut reader,
     )
@@ -757,7 +756,6 @@ fn read_dosage_dense_with_metadata_from_input<R: BufRead>(
 ) -> Result<DenseGenotypeMatrix> {
     let TextVcfInput {
         mut reader,
-        source_sample_count,
         selection,
     } = input;
     read_dosage_dense_records_with_metadata(
@@ -767,7 +765,7 @@ fn read_dosage_dense_with_metadata_from_input<R: BufRead>(
         missing_policy,
         metadata_return,
         variant_sink_kind,
-        DenseReadSource::full_scan(source_sample_count),
+        DenseReadSource::full_scan(),
         &selection,
         &mut reader,
     )
@@ -1213,10 +1211,10 @@ fn read_dense_records_with_metadata<R: BufRead>(
     let mut diagnostics = selection.diagnostics.clone();
     let n_samples = selection.samples.len();
     let output_variant_capacity = dense_output_variant_capacity(variant_window);
-    let direct_sample_major = metadata_return.matrix_only()
-        && variant_window.is_some()
-        && can_write_sample_major_directly(selection, source.sample_count, variant_filter);
-    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, direct_sample_major);
+    // Variant-major appends have better locality for text VCF's decoded
+    // per-record values. Python exposes the public sample-by-variant shape via
+    // layout-aware assembly, so avoid strided sample-major writes here.
+    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, false);
     let mut output_variant_count = 0;
     let mut variants = VariantMetadataSink::new(variant_sink_kind, output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);
@@ -1362,10 +1360,9 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
     let mut diagnostics = selection.diagnostics.clone();
     let n_samples = selection.samples.len();
     let output_variant_capacity = dense_output_variant_capacity(variant_window);
-    let direct_sample_major = metadata_return.matrix_only()
-        && variant_window.is_some()
-        && can_write_sample_major_directly(selection, source.sample_count, variant_filter);
-    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, direct_sample_major);
+    // Keep text VCF dosage output aligned with the genotype path: append
+    // retained variants contiguously and let the adapter expose public shape.
+    let mut output = TextDenseOutput::new(n_samples, output_variant_capacity, false);
     let mut output_variant_count = 0;
     let mut variants = VariantMetadataSink::new(variant_sink_kind, output_variant_capacity);
     let mut retention = RetainedVariantState::new(variant_window);

@@ -7,7 +7,7 @@
 
 use genoio_core::{
     DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, GenoioError, SampleMetadataBuffers,
-    VariantFilter, VariantMetadataBuffers,
+    VariantMetadataBuffers,
 };
 
 use crate::error::Result;
@@ -15,23 +15,6 @@ use crate::matrix::{
     apply_dense_missing_policy_to_variant, shrink_sample_major_width,
     write_sample_major_variant_slot,
 };
-
-pub(super) fn can_write_sample_major_directly(
-    selection: &genoio_core::DenseSampleSelection,
-    source_sample_count: usize,
-    variant_filter: Option<&VariantFilter>,
-) -> bool {
-    // Strided sample-major writes avoid a final transpose, but profiling showed
-    // they lose locality for sample subsets and genotype-stat filters. Keep the
-    // direct path to the all-sample, metadata-only case where it pays.
-    !variant_filter.is_some_and(VariantFilter::requires_genotype_stats)
-        && selection.source_indices.len() == source_sample_count
-        && selection
-            .source_indices
-            .iter()
-            .copied()
-            .eq(0..selection.source_indices.len())
-}
 
 pub(super) enum TextDenseOutput {
     SampleMajor {
