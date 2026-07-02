@@ -39,7 +39,6 @@ pub(super) type PlainVcfReader = noodles::io::Reader<BufReader<File>>;
 
 pub(super) struct TextVcfInput<R> {
     pub(super) reader: noodles::io::Reader<R>,
-    pub(super) source_sample_count: usize,
     pub(super) selection: DenseSampleSelection,
 }
 
@@ -53,21 +52,16 @@ pub(super) enum TextVcfSource {
 
 #[derive(Clone, Copy)]
 pub(super) struct DenseReadSource<'a> {
-    pub(super) sample_count: usize,
     pub(super) region: Option<&'a RegionPredicate>,
 }
 
 impl<'a> DenseReadSource<'a> {
-    pub(super) const fn full_scan(sample_count: usize) -> Self {
-        Self {
-            sample_count,
-            region: None,
-        }
+    pub(super) const fn full_scan() -> Self {
+        Self { region: None }
     }
 }
 
 pub(super) struct IndexedTextVcfInput<'a> {
-    source_sample_count: usize,
     pub(super) selection: DenseSampleSelection,
     pub(super) region: &'a RegionPredicate,
 }
@@ -75,7 +69,6 @@ pub(super) struct IndexedTextVcfInput<'a> {
 impl<'a> IndexedTextVcfInput<'a> {
     pub(super) const fn dense_source(&self) -> DenseReadSource<'a> {
         DenseReadSource {
-            sample_count: self.source_sample_count,
             region: Some(self.region),
         }
     }
@@ -139,18 +132,13 @@ fn open_text_vcf_input_from_reader<R: BufRead>(
     mut reader: noodles::io::Reader<R>,
 ) -> Result<TextVcfInput<R>> {
     let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
-    let source_sample_count = all_samples.len();
     let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
     if requested_samples.is_some() {
         for (sample, source_index) in selection.samples.iter_mut().zip(&selection.source_indices) {
             sample.source_sample_index = Some(*source_index);
         }
     }
-    Ok(TextVcfInput {
-        reader,
-        source_sample_count,
-        selection,
-    })
+    Ok(TextVcfInput { reader, selection })
 }
 
 pub(super) fn open_text_sample_selection(
@@ -228,7 +216,6 @@ where
 {
     let chunks = index_chunks_for_region(path, region)?;
     let all_samples = read_sample_records_from_header(path, &mut bgzf_reader)?;
-    let source_sample_count = all_samples.len();
     let selection = select_samples_source_order(&all_samples, requested_samples, path)?;
 
     let Some(chunks) = chunks else {
@@ -241,14 +228,7 @@ where
     // rejects.
     let query = csi::io::Query::new(&mut bgzf_reader, chunks);
     let mut reader = noodles::io::Reader::new(query);
-    read_records(
-        IndexedTextVcfInput {
-            source_sample_count,
-            selection,
-            region,
-        },
-        &mut reader,
-    )
+    read_records(IndexedTextVcfInput { selection, region }, &mut reader)
 }
 
 fn open_bgzf_reader(path: &Path) -> Result<bgzf::io::Reader<File>> {

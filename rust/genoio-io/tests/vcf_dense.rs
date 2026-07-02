@@ -168,6 +168,7 @@ fn vcf_dense_matrix_only_omits_metadata() {
 
     assert_eq!(dense.n_samples, 3);
     assert_eq!(dense.n_variants, 2);
+    assert_eq!(dense.layout, genoio_core::DenseLayout::VariantMajor);
     assert_eq!(
         dense_values_sample_major(&dense),
         vec![0.0, 1.0, 1.0, 0.0, 2.0, 2.0]
