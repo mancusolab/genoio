@@ -9,6 +9,7 @@ reports/
 
 .idea/
 .plans/
+.worktrees/
 data
 build/
 dist/
