@@ -2,6 +2,7 @@
 
 import sys
 from importlib.metadata import metadata, version
+from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,10 @@ def test_python_version_export_matches_installed_metadata():
     import genoio
 
     assert genoio.__version__ == version("genoio")
+
+
+def test_package_declares_inline_type_information():
+    assert files("genoio").joinpath("py.typed").is_file()
 
 
 def test_package_metadata_includes_release_urls_and_license():

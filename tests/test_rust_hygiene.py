@@ -4,8 +4,14 @@ import re
 from pathlib import Path
 
 
+def _combined_source(paths: list[Path]) -> str:
+    ordered_paths = sorted(paths)
+    assert ordered_paths, "expected at least one Rust source file"
+    return "\n".join(f"// source: {path}\n{path.read_text()}" for path in ordered_paths)
+
+
 def test_internal_contract_errors_map_to_private_internal_error():
-    source = Path("rust/genoio-py/src/lib.rs").read_text()
+    source = Path("rust/genoio-py/src/errors.rs").read_text()
     branch_match = re.search(r"GenoioError::InternalContract\s*\{ \.\. \}\s*=>.*", source)
 
     assert branch_match is not None
@@ -30,7 +36,7 @@ def test_text_vcf_backend_has_no_row_variant_sink():
 
 
 def test_pyo3_adapter_does_not_normalize_row_matrices():
-    source = Path("rust/genoio-py/src/lib.rs").read_text()
+    source = _combined_source(list(Path("rust/genoio-py/src").glob("*.rs")))
 
     assert "::from_matrix" not in source
     assert "fn read_dense_matrix(" not in source
@@ -121,7 +127,12 @@ def test_bgen_output_backend_does_not_wrap_row_matrices():
 
 
 def test_bgen_metadata_and_zstd_paths_avoid_decode_hot_spot_allocations():
-    decode_source = Path("rust/genoio-io/src/bgen/decode.rs").read_text()
+    decode_source = _combined_source(
+        [
+            Path("rust/genoio-io/src/bgen/decode.rs"),
+            *Path("rust/genoio-io/src/bgen/decode").rglob("*.rs"),
+        ]
+    )
     header_source = Path("rust/genoio-io/src/bgen/header.rs").read_text()
 
     assert "zstd::stream::decode_all" not in decode_source
