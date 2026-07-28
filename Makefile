@@ -48,7 +48,7 @@ build-wheel: requirements  ## Build a repaired redistributable wheel
 	$(RUST_ENV) $(MATURIN) develop
 
 test: build-dev  ## Run Python tests
-	$(PYTEST) -q
+	$(PYTEST) -p no:capture -q
 
 ty: build-dev  ## Run Python type checks
 	$(TY) check src tests scripts

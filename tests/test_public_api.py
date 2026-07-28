@@ -1,5 +1,6 @@
 # pattern: Imperative Shell
 
+import ast
 import sys
 from importlib.metadata import metadata, version
 from importlib.resources import files
@@ -130,6 +131,20 @@ def test_python_version_export_matches_installed_metadata():
 
 def test_package_declares_inline_type_information():
     assert files("genoio").joinpath("py.typed").is_file()
+
+
+def test_native_stub_matches_runtime_exports():
+    from genoio import _rust
+
+    stub_module = ast.parse(Path("src/genoio/_rust.pyi").read_text())
+    stub_exports = {
+        node.name
+        for node in stub_module.body
+        if isinstance(node, ast.ClassDef | ast.FunctionDef) and not node.name.startswith("_")
+    }
+    runtime_exports = {name for name in dir(_rust) if not name.startswith("_")}
+
+    assert stub_exports == runtime_exports
 
 
 def test_package_metadata_includes_release_urls_and_license():
