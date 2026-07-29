@@ -84,19 +84,33 @@ pub(in crate::vcf) fn read_metadata(path: &Path) -> Result<MetadataOutput> {
     })
 }
 
-struct BcfInput {
-    reader: bcf::io::Reader<noodles_bgzf::io::Reader<File>>,
-    header: noodles::Header,
-    selection: DenseSampleSelection,
+pub(super) struct BcfInput {
+    pub(super) reader: bcf::io::Reader<noodles_bgzf::io::Reader<File>>,
+    pub(super) header: noodles::Header,
+    pub(super) selection: DenseSampleSelection,
 }
 
-fn open_bcf_input(path: &Path, requested_samples: Option<&[String]>) -> Result<BcfInput> {
+pub(super) fn open_bcf_input(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+) -> Result<BcfInput> {
+    open_bcf_input_with_hooks(path, requested_samples, || {}, || {})
+}
+
+pub(super) fn open_bcf_input_with_hooks(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    on_source_open: impl FnOnce(),
+    on_header_parse: impl FnOnce(),
+) -> Result<BcfInput> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf open error: {error}")))?;
+    on_source_open();
     let mut reader = bcf::io::Reader::new(file);
     let header = reader
         .read_header()
         .map_err(|error| GenoioError::invalid_source(path, format!("bcf header error: {error}")))?;
+    on_header_parse();
     let source_samples = sample_records_from_noodles_header(&header);
     let selection = select_samples_source_order(&source_samples, requested_samples, path)?;
     Ok(BcfInput {
@@ -589,7 +603,7 @@ fn read_dense_windowed_with_field(
     )
 }
 
-fn evaluate_bcf_gt_filter<V: VariantMetadataView + ?Sized>(
+pub(super) fn evaluate_bcf_gt_filter<V: VariantMetadataView + ?Sized>(
     decoded: &BcfDenseDecodeBuffers,
     filter: &VariantFilter,
     variant: &V,
@@ -615,7 +629,7 @@ fn evaluate_bcf_gt_filter<V: VariantMetadataView + ?Sized>(
     Ok((filter.evaluate_view(variant, Some(&stats)), Some(stats)))
 }
 
-fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
+pub(super) fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
     path: &Path,
     variant: &V,
 ) -> Result<()> {
@@ -647,7 +661,7 @@ fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
     ))
 }
 
-fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
+pub(super) fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
     let a1_count = values.iter().sum::<f32>();
     let a0_count = 2.0 * values.len() as f32 - a1_count;
     if a1_count <= a0_count {

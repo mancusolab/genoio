@@ -8,8 +8,10 @@
 mod decode;
 mod haplotype;
 mod record;
+mod session;
 mod source;
 
+pub(crate) use session::BcfBlockSession;
 pub(super) use source::{
     read_dense_windowed, read_dosage_dense_windowed, read_haplotypes_dense_windowed,
     read_haplotypes_sparse_windowed, read_metadata, read_sparse_windowed,

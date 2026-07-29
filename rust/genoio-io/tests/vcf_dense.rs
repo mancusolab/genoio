@@ -11,6 +11,7 @@ use genoio_core::{DenseLayout, DenseMissingPolicy};
 
 mod common;
 
+use common::bcf::write_genotype_dosage_fixture;
 use common::dense::assert_values_with_nan;
 use common::unique_dir;
 use common::vcf_output as genoio_io;
@@ -686,6 +687,60 @@ fn pbr_rust_textvcf_001_sequential_plain_gt_and_compressed_ds_persist_across_blo
         assert!(reader
             .next_block()
             .expect("text VCF EOF should be sticky")
+            .is_none());
+    }
+}
+
+#[test]
+fn pbr_rust_bcf_001_dense_gt_and_ds_blocks_match_whole_reads() {
+    let dir = unique_dir("pbr-bcf-dense-blocks");
+    let path = dir.join("dense.bcf");
+    write_genotype_dosage_fixture(&path);
+
+    for (dosage_source, expected_blocks) in [
+        (
+            DosageSource::Hardcall,
+            vec![vec![0.0, 1.0, 1.0, 2.0], vec![2.0, 0.0]],
+        ),
+        (
+            DosageSource::Dosage,
+            vec![vec![0.1, 0.9, 1.2, 1.8], vec![1.9, 0.2]],
+        ),
+    ] {
+        let mut reader = BlockReader::open(
+            BlockSource::Bcf { bcf: path.clone() },
+            BlockReadOptions {
+                matrix_kind: MatrixKind::Genotype,
+                sparse: false,
+                requested_samples: None,
+                variant_filter: None,
+                dosage_source,
+                missing_policy: DenseMissingPolicy::Nan,
+                return_samples: true,
+                return_variants: true,
+            },
+            2,
+        )
+        .expect("persistent BCF reader should open");
+
+        for expected_values in expected_blocks {
+            let BlockOutput::Dense(block) = reader
+                .next_block()
+                .expect("BCF block should decode")
+                .expect("expected BCF block")
+            else {
+                panic!("BCF dense session should return dense output");
+            };
+            assert_eq!(block.layout, DenseLayout::VariantMajor);
+            assert_eq!(block.values, expected_values);
+        }
+        assert!(reader
+            .next_block()
+            .expect("BCF reader should reach EOF")
+            .is_none());
+        assert!(reader
+            .next_block()
+            .expect("BCF EOF should be sticky")
             .is_none());
     }
 }

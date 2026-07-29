@@ -11,6 +11,7 @@ use genoio_core::{DenseMissingPolicy, GenoioError, SparseGenotypeMatrix, Variant
 
 mod common;
 
+use common::bcf::write_genotype_dosage_fixture;
 use common::plink_output as plink_io;
 use common::unique_dir;
 use common::vcf_output as genoio_io;
@@ -215,6 +216,46 @@ fn pbr_rust_textvcf_002_sequential_sparse_genotype_blocks_preserve_csc_parity() 
     {
         let BlockOutput::Sparse(block) = output else {
             panic!("sparse text VCF session should return sparse output");
+        };
+        blocks.push(block);
+    }
+    let (indptr, indices, data) = concatenate_sparse_blocks(&blocks);
+
+    assert_eq!(indptr, expected.indptr);
+    assert_eq!(indices, expected.indices);
+    assert_eq!(data, expected.data);
+    assert_eq!(
+        blocks.iter().map(|block| block.n_cols).collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+}
+
+#[test]
+fn pbr_rust_bcf_001_sparse_gt_blocks_match_whole_reads() {
+    let dir = unique_dir("pbr-bcf-sparse-blocks");
+    let path = dir.join("sparse.bcf");
+    write_genotype_dosage_fixture(&path);
+    let expected =
+        genoio_io::read_vcf_sparse(&path, None, None).expect("whole sparse BCF should decode");
+    let mut reader = BlockReader::open(
+        BlockSource::Bcf { bcf: path },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Genotype,
+            sparse: true,
+            requested_samples: None,
+            variant_filter: None,
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Raise,
+            return_samples: true,
+            return_variants: true,
+        },
+        2,
+    )
+    .expect("persistent sparse BCF reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader.next_block().expect("sparse BCF block should decode") {
+        let BlockOutput::Sparse(block) = output else {
+            panic!("BCF sparse session should return sparse output");
         };
         blocks.push(block);
     }
