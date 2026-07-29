@@ -296,13 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn block_output_width_uses_established_matrix_dimensions() {
+    fn pbr_rust_block_001_block_output_width_uses_established_matrix_dimensions() {
         assert_eq!(dense_output(3).width(), 3);
         assert_eq!(sparse_output(4).width(), 4);
     }
 
     #[test]
-    fn block_output_validation_accepts_partial_and_exact_widths() {
+    fn pbr_rust_block_001_block_output_validation_accepts_partial_and_exact_widths() {
         validate_block_output(Some(&dense_output(2)), 4)
             .expect("partial dense block should be valid");
         validate_block_output(Some(&sparse_output(4)), 4)
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn block_output_validation_rejects_zero_and_over_widths() {
+    fn pbr_rust_block_001_block_output_validation_rejects_zero_and_over_widths() {
         let zero_error = validate_block_output(Some(&dense_output(0)), 4)
             .expect_err("zero-width output should fail");
         let over_error = validate_block_output(Some(&sparse_output(5)), 4)
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_output_retains_owned_matrix_values_metadata_and_diagnostics() {
+    fn pbr_rust_block_001_dense_output_retains_owned_matrix_values_metadata_and_diagnostics() {
         let output = dense_output(2);
 
         let BlockOutput::Dense(matrix) = output else {
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_output_retains_owned_matrix_values_metadata_and_diagnostics() {
+    fn pbr_rust_block_001_sparse_output_retains_owned_matrix_values_metadata_and_diagnostics() {
         let output = sparse_output(2);
 
         let BlockOutput::Sparse(matrix) = output else {
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_block_capacities_follow_requested_dimensions() {
+    fn pbr_rust_alloc_001_checked_block_capacities_follow_requested_dimensions() {
         assert_eq!(
             checked_dense_block_len(3, 4).expect("dense dimensions should fit"),
             12
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_block_capacities_reject_arithmetic_overflow() {
+    fn pbr_rust_alloc_001_checked_block_capacities_reject_arithmetic_overflow() {
         let dense_error = checked_dense_block_len(usize::MAX, 2)
             .expect_err("dense output length overflow should fail");
         let sparse_error = checked_sparse_indptr_len(usize::MAX)
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_snapshot_preserves_cumulative_counts_and_uses_block_width() {
+    fn pbr_rust_diag_001_diagnostics_snapshot_preserves_cumulative_counts_and_uses_block_width() {
         let cumulative = DenseDiagnostics {
             requested_samples: 11,
             retained_samples: 7,
@@ -397,14 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn block_lifecycle_rejects_zero_block_size() {
+    fn pbr_rust_block_001_block_lifecycle_rejects_zero_block_size() {
         let error = BlockLifecycle::new(0).expect_err("zero block size should fail");
 
         assert!(matches!(error, GenoioError::InternalContract { .. }));
     }
 
     #[test]
-    fn block_lifecycle_makes_immediate_eof_sticky() {
+    fn pbr_rust_eof_001_block_lifecycle_makes_immediate_eof_sticky() {
         let mut lifecycle = BlockLifecycle::new(2).expect("positive block size should be valid");
         let mut backend_invocations = 0;
 
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn block_lifecycle_accepts_exact_then_partial_final_output() {
+    fn pbr_rust_block_001_block_lifecycle_accepts_exact_then_partial_final_output() {
         let mut lifecycle = BlockLifecycle::new(3).expect("positive block size should be valid");
         let mut backend_invocations = 0;
         let mut script = VecDeque::from([
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn block_lifecycle_rejects_invalid_nonterminal_widths() {
+    fn pbr_rust_block_001_block_lifecycle_rejects_invalid_nonterminal_widths() {
         let mut lifecycle = BlockLifecycle::new(2).expect("positive block size should be valid");
         let mut backend_invocations = 0;
 
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn block_lifecycle_error_does_not_prefetch_or_consume_later_result() {
+    fn pbr_rust_eof_001_block_lifecycle_error_does_not_prefetch_or_consume_later_result() {
         let mut lifecycle = BlockLifecycle::new(2).expect("positive block size should be valid");
         let mut backend_invocations = 0;
         let mut script = VecDeque::from([
