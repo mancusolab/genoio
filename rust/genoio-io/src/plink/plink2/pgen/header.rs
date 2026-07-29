@@ -20,24 +20,41 @@ use super::{
 };
 
 pub(in crate::plink::plink2) fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
-    read_supported_pgen_header_inner(path, None)
+    let mut file = File::open(path).map_err(|source| GenoioError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    read_supported_pgen_header_inner(path, &mut file, None)
 }
 
 pub(in crate::plink::plink2) fn read_supported_pgen_header_prefix(
     path: &Path,
     requested_variant_ct: usize,
 ) -> Result<PgenHeader> {
-    read_supported_pgen_header_inner(path, Some(requested_variant_ct))
-}
-
-fn read_supported_pgen_header_inner(
-    path: &Path,
-    requested_variant_ct: Option<usize>,
-) -> Result<PgenHeader> {
     let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    read_supported_pgen_header_inner(path, &mut file, Some(requested_variant_ct))
+}
+
+pub(in crate::plink::plink2) fn read_supported_pgen_header_from_file(
+    path: &Path,
+    file: &mut File,
+) -> Result<PgenHeader> {
+    read_supported_pgen_header_inner(path, file, None)
+}
+
+fn read_supported_pgen_header_inner(
+    path: &Path,
+    file: &mut File,
+    requested_variant_ct: Option<usize>,
+) -> Result<PgenHeader> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| GenoioError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut header = [0_u8; PGEN_HEADER_LEN as usize];
     file.read_exact(&mut header)
         .map_err(|source| GenoioError::Io {
@@ -55,7 +72,7 @@ fn read_supported_pgen_header_inner(
     match header[2] {
         PGEN_MODE_FIXED_WIDTH_HARDCALLS => fixed_width_header(
             path,
-            &file,
+            file,
             counts,
             header[11],
             FixedWidthHeaderSpec {
@@ -66,7 +83,7 @@ fn read_supported_pgen_header_inner(
         ),
         PGEN_MODE_FIXED_WIDTH_DOSAGE => fixed_width_header(
             path,
-            &file,
+            file,
             counts,
             header[11],
             FixedWidthHeaderSpec {
@@ -77,7 +94,7 @@ fn read_supported_pgen_header_inner(
         ),
         PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE => fixed_width_header(
             path,
-            &file,
+            file,
             counts,
             header[11],
             FixedWidthHeaderSpec {
@@ -92,13 +109,13 @@ fn read_supported_pgen_header_inner(
             let (record_types, record_offsets) = match prefix_variant_ct {
                 Some(prefix_variant_ct) => read_variable_width_header_body_prefix(
                     path,
-                    &mut file,
+                    file,
                     counts.variant_ct,
                     header[11],
                     prefix_variant_ct,
                 )?,
                 None => {
-                    read_variable_width_header_body(path, &mut file, counts.variant_ct, header[11])?
+                    read_variable_width_header_body(path, file, counts.variant_ct, header[11])?
                 }
             };
             Ok(PgenHeader {

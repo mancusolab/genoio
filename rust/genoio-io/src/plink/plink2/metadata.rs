@@ -16,13 +16,42 @@ use genoio_core::{
 use crate::error::Result;
 use crate::plink::common::{optional_plink_value, PLINK2_MISSING_VALUES};
 
+#[cfg(test)]
+use super::session::Plink2WorkProbe;
+
 pub(super) fn parse_psam(path: &Path) -> Result<Vec<SampleRecord>> {
+    #[cfg(test)]
+    {
+        parse_psam_inner(path, None)
+    }
+    #[cfg(not(test))]
+    {
+        parse_psam_inner(path)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn parse_psam_with_probe(
+    path: &Path,
+    probe: &Plink2WorkProbe,
+) -> Result<Vec<SampleRecord>> {
+    parse_psam_inner(path, Some(probe))
+}
+
+fn parse_psam_inner(
+    path: &Path,
+    #[cfg(test)] probe: Option<&Plink2WorkProbe>,
+) -> Result<Vec<SampleRecord>> {
     let mut header = None;
     let mut records = Vec::new();
     let reader = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.record_psam_open();
+    }
     for (line_index, line) in BufReader::new(reader).lines().enumerate() {
         let line = line.map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
@@ -221,7 +250,7 @@ struct PvarBodyLine {
 
 struct PvarLineReader {
     path: PathBuf,
-    lines: std::iter::Enumerate<std::io::Lines<Box<dyn BufRead>>>,
+    lines: std::iter::Enumerate<std::io::Lines<Box<dyn BufRead + Send>>>,
     columns: Option<PvarColumns>,
     body_started: bool,
     source_index: usize,
@@ -229,9 +258,30 @@ struct PvarLineReader {
 
 impl PvarLineReader {
     fn new(path: &Path) -> Result<Self> {
+        #[cfg(test)]
+        {
+            Self::new_inner(path, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::new_inner(path)
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_probe(path: &Path, probe: &Plink2WorkProbe) -> Result<Self> {
+        Self::new_inner(path, Some(probe))
+    }
+
+    fn new_inner(path: &Path, #[cfg(test)] probe: Option<&Plink2WorkProbe>) -> Result<Self> {
+        let reader = open_pvar_reader(path)?;
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            probe.record_pvar_open();
+        }
         Ok(Self {
             path: path.to_path_buf(),
-            lines: open_pvar_reader(path)?.lines().enumerate(),
+            lines: reader.lines().enumerate(),
             columns: None,
             body_started: false,
             source_index: 0,
@@ -293,6 +343,13 @@ impl PvarRecordReader {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn new_with_probe(path: &Path, probe: &Plink2WorkProbe) -> Result<Self> {
+        Ok(Self {
+            line_reader: PvarLineReader::new_with_probe(path, probe)?,
+        })
+    }
+
     pub(super) fn next_record(&mut self) -> Result<Option<(usize, VariantRecord)>> {
         let Some(line) = self.line_reader.next_line()? else {
             return Ok(None);
@@ -324,7 +381,7 @@ impl PvarRecordReader {
     }
 }
 
-fn open_pvar_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+fn open_pvar_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     let file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,

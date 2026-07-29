@@ -30,8 +30,8 @@ pub(super) use self::haplotype_track::{
 };
 use self::header::fixed_width_dosage_record_len;
 pub(super) use self::header::{
-    open_pgen_payload, read_supported_pgen_header, read_supported_pgen_header_prefix,
-    validate_plink2_dimensions, validate_plink2_sample_count,
+    open_pgen_payload, read_supported_pgen_header, read_supported_pgen_header_from_file,
+    read_supported_pgen_header_prefix, validate_plink2_dimensions, validate_plink2_sample_count,
 };
 use self::io::read_fixed_width_phased_dosage_variant_record;
 pub(super) use self::io::{
