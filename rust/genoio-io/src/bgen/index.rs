@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use genoio_core::{GenoioError, RegionPredicate, VariantFilter};
 use rusqlite::{params, Connection};
 
+#[cfg(test)]
+use super::session::BgenWorkProbe;
 use crate::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,30 @@ pub(super) struct BgenIndexRecord {
 pub(super) fn indexed_region_records(
     bgen: &Path,
     variant_filter: Option<&VariantFilter>,
+) -> Result<Option<Vec<BgenIndexRecord>>> {
+    #[cfg(test)]
+    {
+        indexed_region_records_inner(bgen, variant_filter, None)
+    }
+    #[cfg(not(test))]
+    {
+        indexed_region_records_inner(bgen, variant_filter)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn indexed_region_records_with_probe(
+    bgen: &Path,
+    variant_filter: Option<&VariantFilter>,
+    probe: &BgenWorkProbe,
+) -> Result<Option<Vec<BgenIndexRecord>>> {
+    indexed_region_records_inner(bgen, variant_filter, Some(probe))
+}
+
+fn indexed_region_records_inner(
+    bgen: &Path,
+    variant_filter: Option<&VariantFilter>,
+    #[cfg(test)] probe: Option<&BgenWorkProbe>,
 ) -> Result<Option<Vec<BgenIndexRecord>>> {
     let Some(region) = variant_filter.and_then(VariantFilter::concrete_region_pushdown) else {
         return Ok(None);
@@ -36,7 +62,14 @@ pub(super) fn indexed_region_records(
             "bgen index path is not a file",
         ));
     }
-    query_bgen_index(&index_path, &region).map(Some)
+    #[cfg(test)]
+    {
+        query_bgen_index_inner(&index_path, &region, probe).map(Some)
+    }
+    #[cfg(not(test))]
+    {
+        query_bgen_index(&index_path, &region).map(Some)
+    }
 }
 
 fn bgen_index_path(bgen: &Path) -> PathBuf {
@@ -46,9 +79,28 @@ fn bgen_index_path(bgen: &Path) -> PathBuf {
 }
 
 fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<BgenIndexRecord>> {
+    #[cfg(test)]
+    {
+        query_bgen_index_inner(index_path, region, None)
+    }
+    #[cfg(not(test))]
+    {
+        query_bgen_index_inner(index_path, region)
+    }
+}
+
+fn query_bgen_index_inner(
+    index_path: &Path,
+    region: &RegionPredicate,
+    #[cfg(test)] probe: Option<&BgenWorkProbe>,
+) -> Result<Vec<BgenIndexRecord>> {
     let connection = Connection::open(index_path).map_err(|error| {
         GenoioError::invalid_source(index_path, format!("bgen index open error: {error}"))
     })?;
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.record_index_open();
+    }
     let mut statement = connection
         .prepare(
             // Preserve the BGEN source order contract even when records in the

@@ -11,14 +11,36 @@ use std::path::Path;
 
 use genoio_core::GenoioError;
 
+#[cfg(test)]
+use super::session::Plink1WorkProbe;
 use crate::error::Result;
 use crate::hardcall::PackedHardcalls;
 
 pub(super) fn open_bed_file(path: &Path) -> Result<File> {
+    #[cfg(test)]
+    {
+        open_bed_file_inner(path, None)
+    }
+    #[cfg(not(test))]
+    {
+        open_bed_file_inner(path)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn open_bed_file_with_probe(path: &Path, probe: &Plink1WorkProbe) -> Result<File> {
+    open_bed_file_inner(path, Some(probe))
+}
+
+fn open_bed_file_inner(path: &Path, #[cfg(test)] probe: Option<&Plink1WorkProbe>) -> Result<File> {
     let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.record_bed_open();
+    }
     let mut header = [0_u8; 3];
     file.read_exact(&mut header)
         .map_err(|source| GenoioError::Io {

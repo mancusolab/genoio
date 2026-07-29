@@ -1236,8 +1236,7 @@ fn pbr_rust_bgen_001_rejects_unsupported_bgen_block_representations() {
         },
         2,
     )
-    .err()
-    .expect("sparse bgen blocks should be rejected before source opening");
+    .expect_err("sparse bgen blocks should be rejected before source opening");
     let hardcall_error = BlockReader::open(
         source,
         BlockReadOptions {
@@ -1246,8 +1245,7 @@ fn pbr_rust_bgen_001_rejects_unsupported_bgen_block_representations() {
         },
         2,
     )
-    .err()
-    .expect("hardcall bgen blocks should be rejected before source opening");
+    .expect_err("hardcall bgen blocks should be rejected before source opening");
 
     assert!(matches!(
         sparse_error,

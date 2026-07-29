@@ -108,6 +108,7 @@ impl BgenBlockSession {
                         self.io.read_payload_into(
                             &mut dosage_buffers_mut(&mut self.dosage_buffers)?.probability,
                         )?;
+                        position.validate_if_indexed(&mut self.io)?;
                         self.record_payload_decode();
                         write_dosage_slot(
                             BgenDosageSlotWrite {
@@ -122,7 +123,6 @@ impl BgenBlockSession {
                             },
                             false,
                         )?;
-                        position.validate_if_indexed(&mut self.io)?;
                         output_variant_count += 1;
                     }
                     MetadataRetentionAction::Skip => {
@@ -167,12 +167,14 @@ impl BgenBlockSession {
                     self.io.read_payload_into(
                         &mut dosage_buffers_mut(&mut self.dosage_buffers)?.probability,
                     )?;
+                    position.validate_if_indexed(&mut self.io)?;
                     self.record_payload_decode();
                 }
                 MetadataRetentionAction::DecodeGenotypes => {
                     self.io.read_payload_into(
                         &mut dosage_buffers_mut(&mut self.dosage_buffers)?.probability,
                     )?;
+                    position.validate_if_indexed(&mut self.io)?;
                     self.record_payload_decode();
                     let filter = self.variant_filter.as_ref().ok_or_else(|| {
                         GenoioError::internal_contract(
@@ -197,11 +199,9 @@ impl BgenBlockSession {
                     ) {
                         RetentionAction::Include => {}
                         RetentionAction::Skip => {
-                            position.validate_if_indexed(&mut self.io)?;
                             continue;
                         }
                         RetentionAction::Stop => {
-                            position.validate_if_indexed(&mut self.io)?;
                             break;
                         }
                     }
@@ -221,7 +221,6 @@ impl BgenBlockSession {
                 },
                 matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
             )?;
-            position.validate_if_indexed(&mut self.io)?;
             if let Some(variants) = variants.as_mut() {
                 variants.push_record(&variant)?;
             }

@@ -20,6 +20,8 @@ use super::io::{
     read_len_prefixed_utf8_u16_with, read_len_prefixed_utf8_u32_with, read_u16_le, read_u32_le,
     skip_exact, skip_len_prefixed_string_u16, skip_len_prefixed_string_u32,
 };
+#[cfg(test)]
+use super::session::BgenWorkProbe;
 
 const BGEN_MAGIC: &[u8; 4] = b"bgen";
 const ZERO_MAGIC: &[u8; 4] = &[0, 0, 0, 0];
@@ -32,10 +34,45 @@ pub(super) fn read_bgen_samples(
     sample: Option<&Path>,
     header: &BgenHeader,
 ) -> Result<Vec<SampleRecord>> {
+    #[cfg(test)]
+    {
+        read_bgen_samples_inner(reader, bgen, sample, header, None)
+    }
+    #[cfg(not(test))]
+    {
+        read_bgen_samples_inner(reader, bgen, sample, header)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn read_bgen_samples_with_probe(
+    reader: &mut impl Read,
+    bgen: &Path,
+    sample: Option<&Path>,
+    header: &BgenHeader,
+    probe: &BgenWorkProbe,
+) -> Result<Vec<SampleRecord>> {
+    read_bgen_samples_inner(reader, bgen, sample, header, Some(probe))
+}
+
+fn read_bgen_samples_inner(
+    reader: &mut impl Read,
+    bgen: &Path,
+    sample: Option<&Path>,
+    header: &BgenHeader,
+    #[cfg(test)] probe: Option<&BgenWorkProbe>,
+) -> Result<Vec<SampleRecord>> {
     if header.flags.has_sample_identifiers {
         read_sample_identifier_block(reader, bgen, header.sample_count)
     } else if let Some(sample) = sample {
-        read_companion_sample_file(sample, header.sample_count)
+        #[cfg(test)]
+        {
+            read_companion_sample_file(sample, header.sample_count, probe)
+        }
+        #[cfg(not(test))]
+        {
+            read_companion_sample_file(sample, header.sample_count)
+        }
     } else {
         Err(GenoioError::invalid_source(
             bgen,
@@ -228,11 +265,16 @@ fn read_sample_identifier_block(
 fn read_companion_sample_file(
     path: &Path,
     expected_sample_count: u32,
+    #[cfg(test)] probe: Option<&BgenWorkProbe>,
 ) -> Result<Vec<SampleRecord>> {
     let contents = fs::read_to_string(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.record_sample_open();
+    }
     let capacity = usize::try_from(expected_sample_count)
         .map_err(|_| GenoioError::invalid_source(path, "bgen sample count is out of range"))?;
     let mut records = Vec::with_capacity(capacity);

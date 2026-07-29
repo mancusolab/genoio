@@ -23,9 +23,13 @@ use crate::hardcall::{
 use crate::matrix::shrink_sample_major_width;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
+#[cfg(test)]
+use super::bed::open_bed_file_with_probe;
 use super::bed::{
     infer_bed_variant_count, open_bed_file, read_plink1_variant_packed, Plink1DecoderState,
 };
+#[cfg(test)]
+use super::metadata::parse_fam_with_probe;
 use super::metadata::{parse_fam, BimRecordReader};
 
 /// Persistent PLINK1 hard-call state over one BED/BIM/FAM source set.
@@ -76,8 +80,49 @@ impl Plink1BlockSession {
         retained_skip: usize,
         read_bim_records: bool,
     ) -> Result<Self> {
+        #[cfg(test)]
+        {
+            Self::open_windowed_impl(
+                bed,
+                bim,
+                fam,
+                options,
+                retained_skip,
+                read_bim_records,
+                None,
+            )
+        }
+        #[cfg(not(test))]
+        {
+            Self::open_windowed_impl(bed, bim, fam, options, retained_skip, read_bim_records)
+        }
+    }
+
+    fn open_windowed_impl(
+        bed: PathBuf,
+        bim: PathBuf,
+        fam: PathBuf,
+        options: BlockReadOptions,
+        retained_skip: usize,
+        read_bim_records: bool,
+        #[cfg(test)] probe: Option<Plink1WorkProbe>,
+    ) -> Result<Self> {
         validate_plink1_options(&options)?;
+        #[cfg(test)]
+        let bed_reader = if let Some(probe) = probe.as_ref() {
+            open_bed_file_with_probe(&bed, probe)?
+        } else {
+            open_bed_file(&bed)?
+        };
+        #[cfg(not(test))]
         let bed_reader = open_bed_file(&bed)?;
+        #[cfg(test)]
+        let all_samples = if let Some(probe) = probe.as_ref() {
+            parse_fam_with_probe(&fam, probe)?
+        } else {
+            parse_fam(&fam)?
+        };
+        #[cfg(not(test))]
         let all_samples = parse_fam(&fam)?;
         let selection =
             select_samples_source_order(&all_samples, options.requested_samples.as_deref(), &bed)?;
@@ -85,6 +130,13 @@ impl Plink1BlockSession {
         let bytes_per_variant = n_source_samples.div_ceil(4);
         let n_source_variants =
             infer_bed_variant_count(&bed, &bed_reader, n_source_samples, bytes_per_variant)?;
+        #[cfg(test)]
+        let bim_reader = if let Some(probe) = probe.as_ref() {
+            BimRecordReader::new_with_probe(&bim, probe)?
+        } else {
+            BimRecordReader::new(&bim)?
+        };
+        #[cfg(not(test))]
         let bim_reader = BimRecordReader::new(&bim)?;
         let decoder_state =
             Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
@@ -126,7 +178,7 @@ impl Plink1BlockSession {
             missing_indices: Vec::new(),
             eof,
             #[cfg(test)]
-            probe: None,
+            probe,
         })
     }
 
@@ -138,12 +190,7 @@ impl Plink1BlockSession {
         options: BlockReadOptions,
         probe: Plink1WorkProbe,
     ) -> Result<Self> {
-        let mut session = Self::open(bed, bim, fam, options)?;
-        probe.record_bed_open();
-        probe.record_bim_open();
-        probe.record_fam_open();
-        session.probe = Some(probe);
-        Ok(session)
+        Self::open_windowed_impl(bed, bim, fam, options, 0, true, Some(probe))
     }
 
     pub(crate) fn next_block(&mut self, block_size: usize) -> Result<Option<BlockOutput>> {
@@ -566,7 +613,7 @@ fn validate_plink1_options(options: &BlockReadOptions) -> Result<()> {
 
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
-struct Plink1WorkProbe {
+pub(super) struct Plink1WorkProbe {
     counts: std::sync::Arc<std::sync::Mutex<Plink1WorkCounts>>,
 }
 
@@ -588,15 +635,15 @@ impl Plink1WorkProbe {
         );
     }
 
-    fn record_bed_open(&self) {
+    pub(super) fn record_bed_open(&self) {
         self.update(|counts| counts.bed_opens += 1);
     }
 
-    fn record_bim_open(&self) {
+    pub(super) fn record_bim_open(&self) {
         self.update(|counts| counts.bim_opens += 1);
     }
 
-    fn record_fam_open(&self) {
+    pub(super) fn record_fam_open(&self) {
         self.update(|counts| counts.fam_opens += 1);
     }
 
@@ -740,6 +787,25 @@ mod tests {
         assert_eq!(counts.candidate_visits, 3);
         assert_eq!(counts.payload_decodes, 1);
         assert_eq!(counts.drops, 1);
+    }
+
+    #[test]
+    fn pbr_rust_plink1_001_probe_counts_only_successful_authoritative_opens() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (bed, bim, fam) = write_fixture(dir.path(), &[0x0b], "1 rs1 0 10 G A\n");
+        fs::remove_file(&bim).expect("bim fixture should be removed before opening");
+        let probe = Plink1WorkProbe::default();
+
+        assert!(
+            Plink1BlockSession::open_with_probe(bed, bim, fam, options(None), probe.clone())
+                .is_err(),
+            "missing bim should fail after bed and fam open"
+        );
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.bed_opens, 1);
+        assert_eq!(counts.fam_opens, 1);
+        assert_eq!(counts.bim_opens, 0);
     }
 
     #[test]

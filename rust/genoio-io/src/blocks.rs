@@ -1,5 +1,6 @@
 // pattern: Imperative Shell
 
+use std::fmt;
 use std::path::PathBuf;
 
 use genoio_core::{
@@ -86,6 +87,22 @@ enum BlockBackend {
 pub struct BlockReader {
     backend: BlockBackend,
     lifecycle: BlockLifecycle,
+}
+
+impl fmt::Debug for BlockReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let backend = match &self.backend {
+            BlockBackend::Bgen(_) => "bgen",
+            BlockBackend::Plink1(_) => "plink1",
+        };
+        let lifecycle = if self.lifecycle.eof { "eof" } else { "active" };
+        formatter
+            .debug_struct("BlockReader")
+            .field("backend", &backend)
+            .field("lifecycle", &lifecycle)
+            .field("block_size", &self.lifecycle.block_size)
+            .finish()
+    }
 }
 
 impl BlockReader {

@@ -118,12 +118,14 @@ impl BgenBlockSession {
                     self.io.read_payload_into(
                         &mut haplotype_buffers_mut(&mut self.haplotype_buffers)?.probability,
                     )?;
+                    position.validate_if_indexed(&mut self.io)?;
                     self.record_payload_decode();
                 }
                 MetadataRetentionAction::DecodeGenotypes => {
                     self.io.read_payload_into(
                         &mut haplotype_buffers_mut(&mut self.haplotype_buffers)?.probability,
                     )?;
+                    position.validate_if_indexed(&mut self.io)?;
                     self.record_payload_decode();
                     let buffers = haplotype_buffers_mut(&mut self.haplotype_buffers)?;
                     decode_buffered_haplotype_values(
@@ -153,11 +155,9 @@ impl BgenBlockSession {
                     ) {
                         RetentionAction::Include => {}
                         RetentionAction::Skip => {
-                            position.validate_if_indexed(&mut self.io)?;
                             continue;
                         }
                         RetentionAction::Stop => {
-                            position.validate_if_indexed(&mut self.io)?;
                             break;
                         }
                     }
@@ -180,7 +180,6 @@ impl BgenBlockSession {
                 self.missing_policy,
             )?;
             variant_major_values.extend_from_slice(&buffers.selected_haplotype_values);
-            position.validate_if_indexed(&mut self.io)?;
             if let Some(variants) = variants.as_mut() {
                 variants.push_record(&variant)?;
             }

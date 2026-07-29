@@ -117,6 +117,32 @@ fn collect_plink1_dense_blocks(
     blocks
 }
 
+#[test]
+fn pbr_rust_block_001_block_reader_debug_reports_backend_and_lifecycle_only() {
+    let dir = unique_dir("plink1-block-reader-debug");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 { bed, bim, fam },
+        plink1_block_options(None, None, DenseMissingPolicy::Nan, false),
+        2,
+    )
+    .expect("persistent plink1 reader should open");
+
+    assert_eq!(
+        format!("{reader:?}"),
+        "BlockReader { backend: \"plink1\", lifecycle: \"active\", block_size: 2 }"
+    );
+    while reader
+        .next_block()
+        .expect("persistent plink1 block should decode")
+        .is_some()
+    {}
+    assert_eq!(
+        format!("{reader:?}"),
+        "BlockReader { backend: \"plink1\", lifecycle: \"eof\", block_size: 2 }"
+    );
+}
+
 fn concatenate_dense_blocks_sample_major(blocks: &[DenseGenotypeMatrix]) -> Vec<f32> {
     let Some(first) = blocks.first() else {
         return Vec::new();
@@ -411,8 +437,7 @@ fn pbr_rust_plink1_001_rejects_unsupported_plink1_block_representations() {
         },
         2,
     )
-    .err()
-    .expect("plink1 dosage blocks should be rejected before source opening");
+    .expect_err("plink1 dosage blocks should be rejected before source opening");
     let haplotype_error = BlockReader::open(
         source,
         BlockReadOptions {
@@ -421,8 +446,7 @@ fn pbr_rust_plink1_001_rejects_unsupported_plink1_block_representations() {
         },
         2,
     )
-    .err()
-    .expect("plink1 haplotype blocks should be rejected before source opening");
+    .expect_err("plink1 haplotype blocks should be rejected before source opening");
 
     assert!(matches!(
         dosage_error,

@@ -14,10 +14,38 @@ use genoio_core::{GenoioError, SampleRecord, VariantMetadataBuffers, VariantReco
 use crate::error::Result;
 
 use super::super::common::{optional_plink_value, PLINK1_MISSING_VALUES};
+#[cfg(test)]
+use super::session::Plink1WorkProbe;
 
 pub(super) fn parse_fam(path: &Path) -> Result<Vec<SampleRecord>> {
+    #[cfg(test)]
+    {
+        parse_fam_inner(path, None)
+    }
+    #[cfg(not(test))]
+    {
+        parse_fam_inner(path)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn parse_fam_with_probe(
+    path: &Path,
+    probe: &Plink1WorkProbe,
+) -> Result<Vec<SampleRecord>> {
+    parse_fam_inner(path, Some(probe))
+}
+
+fn parse_fam_inner(
+    path: &Path,
+    #[cfg(test)] probe: Option<&Plink1WorkProbe>,
+) -> Result<Vec<SampleRecord>> {
     let mut records = Vec::new();
-    for (index, line) in open_text_lines(path)?.enumerate() {
+    #[cfg(test)]
+    let lines = open_text_lines_inner(path, probe.map(|probe| (probe, TextFileKind::Fam)))?;
+    #[cfg(not(test))]
+    let lines = open_text_lines(path)?;
+    for (index, line) in lines.enumerate() {
         let line = line.map_err(|source| GenoioError::Io {
             path: path.to_path_buf(),
             source,
@@ -69,9 +97,29 @@ pub(super) struct BimRecordReader {
 
 impl BimRecordReader {
     pub(super) fn new(path: &Path) -> Result<Self> {
+        #[cfg(test)]
+        {
+            Self::new_inner(path, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::new_inner(path)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_probe(path: &Path, probe: &Plink1WorkProbe) -> Result<Self> {
+        Self::new_inner(path, Some(probe))
+    }
+
+    fn new_inner(path: &Path, #[cfg(test)] probe: Option<&Plink1WorkProbe>) -> Result<Self> {
+        #[cfg(test)]
+        let lines = open_text_lines_inner(path, probe.map(|probe| (probe, TextFileKind::Bim)))?;
+        #[cfg(not(test))]
+        let lines = open_text_lines(path)?;
         Ok(Self {
             path: path.to_path_buf(),
-            lines: open_text_lines(path)?.enumerate(),
+            lines: lines.enumerate(),
             source_index: 0,
         })
     }
@@ -130,11 +178,33 @@ fn parse_bim_line(path: &Path, line_number: usize, line: &str) -> Result<Variant
     })
 }
 
+#[cfg(not(test))]
 fn open_text_lines(path: &Path) -> Result<Lines<BufReader<File>>> {
+    open_text_lines_inner(path)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TextFileKind {
+    Bim,
+    Fam,
+}
+
+fn open_text_lines_inner(
+    path: &Path,
+    #[cfg(test)] probe: Option<(&Plink1WorkProbe, TextFileKind)>,
+) -> Result<Lines<BufReader<File>>> {
     let file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    #[cfg(test)]
+    if let Some((probe, kind)) = probe {
+        match kind {
+            TextFileKind::Bim => probe.record_bim_open(),
+            TextFileKind::Fam => probe.record_fam_open(),
+        }
+    }
     Ok(BufReader::new(file).lines())
 }
 
