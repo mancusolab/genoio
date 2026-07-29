@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use genoio_core::{
     select_samples_source_order, DenseDiagnostics, DenseMissingPolicy, DenseSampleSelection,
     GenoioError, SampleMetadataBuffers, SampleRecord, VariantFilter, VariantMetadataBuffers,
-    VariantRecord, VariantWindow,
+    VariantRecord,
 };
 
 use crate::blocks::{BlockOutput, BlockReadOptions, DosageSource, MatrixKind};
@@ -20,13 +20,13 @@ use crate::error::Result;
 
 use super::decode::{
     read_layout2_probability_payload_into, skip_layout2_probability_payload_raw,
-    DosageDecodeBuffers, ProbabilityPayloadBuffers,
+    DosageDecodeBuffers, HaplotypeDecodeBuffers, ProbabilityPayloadBuffers,
 };
 use super::header::{
     read_bgen_samples, read_layout2_variant_identifying_data, read_layout2_variant_metadata,
     skip_layout2_variant_identifying_data, BgenHeader,
 };
-use super::index::{validate_index_record_consumed, BgenIndexRecord};
+use super::index::{indexed_region_records, validate_index_record_consumed, BgenIndexRecord};
 
 const BGEN_READER_BUFFER_SIZE: usize = 1 << 20;
 
@@ -130,7 +130,7 @@ impl BgenReadSession {
     }
 }
 
-/// Persistent sequential BGEN dosage state.
+/// Persistent sequential or indexed BGEN genotype or haplotype dosage state.
 pub(crate) struct BgenBlockSession {
     pub(super) io: BgenReadSession,
     pub(super) selection: DenseSampleSelection,
@@ -139,9 +139,11 @@ pub(crate) struct BgenBlockSession {
     pub(super) missing_policy: DenseMissingPolicy,
     pub(super) return_samples: bool,
     pub(super) return_variants: bool,
-    pub(super) remaining_variants: u32,
+    pub(super) matrix_kind: MatrixKind,
+    pub(super) cursor: BgenVariantCursor,
     pub(super) retained_skip: usize,
-    pub(super) decode_buffers: DosageDecodeBuffers,
+    pub(super) dosage_buffers: Option<DosageDecodeBuffers>,
+    pub(super) haplotype_buffers: Option<HaplotypeDecodeBuffers>,
     pub(super) eof: bool,
     #[cfg(test)]
     probe: Option<BgenWorkProbe>,
@@ -170,8 +172,13 @@ impl BgenBlockSession {
             options.requested_samples.as_deref(),
             &io.bgen,
         )?;
-        io.seek_to_variants()?;
-        let remaining_variants = io.header.variant_count;
+        let cursor = match indexed_region_records(&io.bgen, options.variant_filter.as_ref())? {
+            Some(records) => BgenVariantCursor::indexed(records),
+            None => {
+                io.seek_to_variants()?;
+                BgenVariantCursor::sequential(io.header.variant_count)
+            }
+        };
         let eof = options
             .variant_filter
             .as_ref()
@@ -186,9 +193,13 @@ impl BgenBlockSession {
             missing_policy: options.missing_policy,
             return_samples: options.return_samples,
             return_variants: options.return_variants,
-            remaining_variants,
+            matrix_kind: options.matrix_kind,
+            cursor,
             retained_skip,
-            decode_buffers: DosageDecodeBuffers::default(),
+            dosage_buffers: (options.matrix_kind == MatrixKind::Genotype)
+                .then(DosageDecodeBuffers::default),
+            haplotype_buffers: (options.matrix_kind == MatrixKind::Haplotype)
+                .then(HaplotypeDecodeBuffers::default),
             eof,
             #[cfg(test)]
             probe: None,
@@ -208,13 +219,26 @@ impl BgenBlockSession {
         if sample_was_supplied {
             probe.record_sample_open();
         }
+        if session.cursor.is_indexed() {
+            probe.record_index_open();
+        }
         session.probe = Some(probe);
         Ok(session)
     }
 
     pub(crate) fn next_block(&mut self, block_size: usize) -> Result<Option<BlockOutput>> {
-        self.next_dosage_block(block_size)
-            .map(|matrix| matrix.map(BlockOutput::Dense))
+        match self.matrix_kind {
+            MatrixKind::Genotype => self
+                .next_dosage_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Dense)),
+            MatrixKind::Haplotype => self
+                .next_haplotype_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Dense)),
+        }
+    }
+
+    pub(super) fn source_record_capacity(&self) -> usize {
+        self.cursor.source_record_capacity()
     }
 
     pub(super) fn empty_genotype_output(&self) -> Result<genoio_core::DenseGenotypeMatrix> {
@@ -235,6 +259,34 @@ impl BgenBlockSession {
             variants,
             crate::blocks::block_diagnostics_snapshot(&self.diagnostics, 0),
         )
+    }
+
+    pub(super) fn empty_haplotype_output(&self) -> Result<genoio_core::DenseGenotypeMatrix> {
+        let samples = super::haplotype::expand_selected_samples_to_haplotypes(&self.selection);
+        let samples =
+            SampleMetadataBuffers::optional_from_records(&samples, self.return_samples, true)?;
+        let variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(0));
+        genoio_core::DenseGenotypeMatrix::new_with_layout(
+            self.selection.samples.len() * 2,
+            0,
+            Vec::new(),
+            genoio_core::DenseLayout::VariantMajor,
+            samples,
+            variants,
+            crate::blocks::block_diagnostics_snapshot(&self.diagnostics, 0),
+        )
+    }
+
+    pub(super) fn next_position(&mut self) -> Result<Option<BgenRecordPosition>> {
+        let position = self.cursor.next(&mut self.io)?;
+        if position.is_some() {
+            self.record_candidate_visit();
+        } else {
+            self.eof = true;
+        }
+        Ok(position)
     }
 
     #[cfg(test)]
@@ -288,11 +340,6 @@ fn validate_bgen_options(options: &BlockReadOptions) -> Result<()> {
             "bgen block reads support dosage values only",
         ));
     }
-    if options.matrix_kind != MatrixKind::Genotype {
-        return Err(GenoioError::unsupported(
-            "bgen haplotype block reads are not available yet",
-        ));
-    }
     Ok(())
 }
 
@@ -326,6 +373,10 @@ impl BgenWorkProbe {
 
     fn record_sample_open(&self) {
         self.update(|counts| counts.sample_opens += 1);
+    }
+
+    fn record_index_open(&self) {
+        self.update(|counts| counts.index_opens += 1);
     }
 
     fn record_candidate_visit(&self) {
@@ -362,15 +413,15 @@ struct BgenWorkCounts {
 /// Indexed positions carry the expected byte range so callers can verify that
 /// variant and payload reads consumed the index record exactly.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum BgenRecordPosition<'a> {
+pub(super) enum BgenRecordPosition {
     Sequential,
-    Indexed(&'a BgenIndexRecord),
+    Indexed(BgenIndexRecord),
 }
 
-impl BgenRecordPosition<'_> {
+impl BgenRecordPosition {
     pub(super) fn validate_if_indexed(self, session: &mut BgenReadSession) -> Result<()> {
         if let Self::Indexed(index_record) = self {
-            session.validate_index_record_consumed(index_record)?;
+            session.validate_index_record_consumed(&index_record)?;
         }
         Ok(())
     }
@@ -380,24 +431,24 @@ impl BgenRecordPosition<'_> {
 ///
 /// Indexed reads seek before yielding each record; sequential reads only count
 /// down records already positioned after the header/sample block.
-pub(super) enum BgenVariantCursor<'a> {
+pub(super) enum BgenVariantCursor {
     Sequential {
         remaining: u32,
     },
     Indexed {
-        records: &'a [BgenIndexRecord],
+        records: Vec<BgenIndexRecord>,
         next_index: usize,
     },
 }
 
-impl<'a> BgenVariantCursor<'a> {
+impl BgenVariantCursor {
     pub(super) fn sequential(variant_count: u32) -> Self {
         Self::Sequential {
             remaining: variant_count,
         }
     }
 
-    pub(super) fn indexed(records: &'a [BgenIndexRecord]) -> Self {
+    pub(super) fn indexed(records: Vec<BgenIndexRecord>) -> Self {
         Self::Indexed {
             records,
             next_index: 0,
@@ -407,7 +458,7 @@ impl<'a> BgenVariantCursor<'a> {
     pub(super) fn next(
         &mut self,
         session: &mut BgenReadSession,
-    ) -> Result<Option<BgenRecordPosition<'a>>> {
+    ) -> Result<Option<BgenRecordPosition>> {
         match self {
             Self::Sequential { remaining } => {
                 if *remaining == 0 {
@@ -420,27 +471,27 @@ impl<'a> BgenVariantCursor<'a> {
                 records,
                 next_index,
             } => {
-                let Some(index_record) = records.get(*next_index) else {
+                let Some(&index_record) = records.get(*next_index) else {
                     return Ok(None);
                 };
                 *next_index += 1;
-                session.seek_to_index_record(index_record)?;
+                session.seek_to_index_record(&index_record)?;
                 Ok(Some(BgenRecordPosition::Indexed(index_record)))
             }
         }
     }
-}
 
-/// Indexed read state shared by BGEN dense output loops.
-pub(super) struct BgenIndexedReadContext<'a> {
-    pub(super) session: &'a mut BgenReadSession,
-    pub(super) selection: DenseSampleSelection,
-    pub(super) diagnostics: DenseDiagnostics,
-    pub(super) variant_filter: Option<&'a VariantFilter>,
-    pub(super) variant_window: Option<VariantWindow>,
-    pub(super) missing_policy: DenseMissingPolicy,
-    pub(super) return_samples: bool,
-    pub(super) return_variants: bool,
+    #[cfg(test)]
+    fn is_indexed(&self) -> bool {
+        matches!(self, Self::Indexed { .. })
+    }
+
+    fn source_record_capacity(&self) -> usize {
+        match self {
+            Self::Sequential { remaining } => usize::try_from(*remaining).unwrap_or(usize::MAX),
+            Self::Indexed { records, .. } => records.len(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -477,6 +528,17 @@ mod tests {
     }
 
     fn push_variant(bytes: &mut Vec<u8>, id: &str, chrom: &str, pos: u32, dosage: (u8, u8)) {
+        push_variant_with_phase(bytes, id, chrom, pos, dosage, 0);
+    }
+
+    fn push_variant_with_phase(
+        bytes: &mut Vec<u8>,
+        id: &str,
+        chrom: &str,
+        pos: u32,
+        dosage: (u8, u8),
+        phased: u8,
+    ) {
         push_u16_string(bytes, id);
         push_u16_string(bytes, id);
         push_u16_string(bytes, chrom);
@@ -488,7 +550,7 @@ mod tests {
         let mut probability = Vec::new();
         probability.extend_from_slice(&1_u32.to_le_bytes());
         probability.extend_from_slice(&2_u16.to_le_bytes());
-        probability.extend_from_slice(&[2, 2, 2, 0, 8, dosage.0, dosage.1]);
+        probability.extend_from_slice(&[2, 2, 2, phased, 8, dosage.0, dosage.1]);
         bytes.extend_from_slice(
             &u32::try_from(probability.len())
                 .expect("test probability length should fit u32")
@@ -497,7 +559,10 @@ mod tests {
         bytes.extend_from_slice(&probability);
     }
 
-    fn write_two_variant_bgen_without_embedded_samples(bgen: &Path, sample: &Path) {
+    fn write_two_variant_bgen_without_embedded_samples(
+        bgen: &Path,
+        sample: &Path,
+    ) -> Vec<(u64, u64)> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&20_u32.to_le_bytes());
         bytes.extend_from_slice(&20_u32.to_le_bytes());
@@ -505,14 +570,96 @@ mod tests {
         bytes.extend_from_slice(&1_u32.to_le_bytes());
         bytes.extend_from_slice(b"bgen");
         bytes.extend_from_slice(&FLAG_LAYOUT2.to_le_bytes());
+        let first_start = u64::try_from(bytes.len()).expect("first offset should fit u64");
         push_variant(&mut bytes, "rs1", "1", 10, (255, 0));
+        let first_end = u64::try_from(bytes.len()).expect("first end should fit u64");
+        let second_start = u64::try_from(bytes.len()).expect("second offset should fit u64");
         push_variant(&mut bytes, "rs2", "2", 20, (0, 255));
+        let second_end = u64::try_from(bytes.len()).expect("second end should fit u64");
         fs::write(bgen, bytes).expect("test bgen should be written");
 
         let mut sample_file = fs::File::create(sample).expect("test sample file should open");
         sample_file
             .write_all(b"ID_1 ID_2 missing\n0 0 0\nsample_1 sample_1 0\n")
             .expect("test sample file should be written");
+
+        vec![
+            (first_start, first_end - first_start),
+            (second_start, second_end - second_start),
+        ]
+    }
+
+    fn write_two_variant_phased_bgen_without_embedded_samples(
+        bgen: &Path,
+        sample: &Path,
+    ) -> Vec<(u64, u64)> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&20_u32.to_le_bytes());
+        bytes.extend_from_slice(&20_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(b"bgen");
+        bytes.extend_from_slice(&FLAG_LAYOUT2.to_le_bytes());
+        let first_start = u64::try_from(bytes.len()).expect("first offset should fit u64");
+        push_variant_with_phase(&mut bytes, "rs1", "1", 10, (255, 0), 1);
+        let first_end = u64::try_from(bytes.len()).expect("first end should fit u64");
+        let second_start = u64::try_from(bytes.len()).expect("second offset should fit u64");
+        push_variant_with_phase(&mut bytes, "rs2", "2", 20, (0, 255), 1);
+        let second_end = u64::try_from(bytes.len()).expect("second end should fit u64");
+        fs::write(bgen, bytes).expect("test bgen should be written");
+
+        let mut sample_file = fs::File::create(sample).expect("test sample file should open");
+        sample_file
+            .write_all(b"ID_1 ID_2 missing\n0 0 0\nsample_1 sample_1 0\n")
+            .expect("test sample file should be written");
+
+        vec![
+            (first_start, first_end - first_start),
+            (second_start, second_end - second_start),
+        ]
+    }
+
+    fn bgen_index_path(bgen: &Path) -> std::path::PathBuf {
+        let mut path = bgen.as_os_str().to_os_string();
+        path.push(".bgi");
+        path.into()
+    }
+
+    fn write_bgen_index(bgen: &Path, ranges: &[(u64, u64)], second_size_delta: u64) {
+        let connection =
+            rusqlite::Connection::open(bgen_index_path(bgen)).expect("test bgen index should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE Variant (
+                    chromosome TEXT NOT NULL,
+                    position INT NOT NULL,
+                    file_start_position INT NOT NULL,
+                    size_in_bytes INT NOT NULL
+                );",
+            )
+            .expect("test bgen index schema should be created");
+        for (index, &(start, size)) in ranges.iter().enumerate() {
+            let chromosome = if index == 0 { "1" } else { "2" };
+            let position = i64::try_from((index + 1) * 10).expect("test position should fit i64");
+            let size = if index == 1 {
+                size + second_size_delta
+            } else {
+                size
+            };
+            connection
+                .execute(
+                    "INSERT INTO Variant (
+                        chromosome, position, file_start_position, size_in_bytes
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![
+                        chromosome,
+                        position,
+                        i64::try_from(start).expect("test start should fit i64"),
+                        i64::try_from(size).expect("test size should fit i64")
+                    ],
+                )
+                .expect("test bgen index row should insert");
+        }
     }
 
     fn options(filter: Option<VariantFilter>) -> BlockReadOptions {
@@ -533,7 +680,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let bgen = dir.path().join("tiny.bgen");
         let sample = dir.path().join("tiny.sample");
-        write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
+        let _ranges = write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
         let filter = VariantFilter::from_json_value(json!({
             "op": "predicate",
             "name": "chrom",
@@ -584,7 +731,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let bgen = dir.path().join("tiny.bgen");
         let sample = dir.path().join("tiny.sample");
-        write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
+        let _ranges = write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
         let probe = BgenWorkProbe::default();
 
         {
@@ -608,7 +755,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let bgen = dir.path().join("tiny.bgen");
         let sample = dir.path().join("tiny.sample");
-        write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
+        let _ranges = write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
         let probe = BgenWorkProbe::default();
         let mut session =
             BgenBlockSession::open_with_probe(bgen, Some(sample), options(None), probe.clone())
@@ -621,5 +768,169 @@ mod tests {
         {}
 
         assert_eq!(probe.snapshot().max_dense_output_len, 1);
+    }
+
+    fn region_filter(value: &str) -> VariantFilter {
+        VariantFilter::from_json_value(json!({
+            "op": "predicate",
+            "name": "region",
+            "params": {"value": value}
+        }))
+        .expect("test region filter should parse")
+    }
+
+    #[test]
+    fn pbr_rust_bgen_002_indexed_probe_owns_records_and_stops_at_eof() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let bgen = dir.path().join("tiny.bgen");
+        let sample = dir.path().join("tiny.sample");
+        let ranges = write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
+        write_bgen_index(&bgen, &ranges, 0);
+        let probe = BgenWorkProbe::default();
+
+        {
+            let mut session = BgenBlockSession::open_with_probe(
+                bgen.clone(),
+                Some(sample),
+                options(Some(region_filter("2:1-30"))),
+                probe.clone(),
+            )
+            .expect("indexed bgen session should open");
+            fs::remove_file(bgen_index_path(&bgen))
+                .expect("session should not retain the sqlite index handle");
+            assert!(session
+                .next_block(1)
+                .expect("indexed bgen block should decode from owned records")
+                .is_some());
+            assert!(session
+                .next_block(1)
+                .expect("indexed bgen session should reach EOF")
+                .is_none());
+            let at_eof = probe.snapshot();
+            assert!(session
+                .next_block(1)
+                .expect("indexed bgen EOF should be sticky")
+                .is_none());
+            assert_eq!(probe.snapshot(), at_eof);
+        }
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.bgen_opens, 1);
+        assert_eq!(counts.sample_opens, 1);
+        assert_eq!(counts.index_opens, 1);
+        assert_eq!(counts.candidate_visits, 1);
+        assert_eq!(counts.payload_decodes, 1);
+        assert_eq!(counts.drops, 1);
+    }
+
+    #[test]
+    fn pbr_rust_bgen_002_indexed_cursor_validates_every_consumed_byte_range() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let bgen = dir.path().join("tiny.bgen");
+        let sample = dir.path().join("tiny.sample");
+        let ranges = write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
+        write_bgen_index(&bgen, &ranges, 1);
+        let mut session = BgenBlockSession::open_with_probe(
+            bgen,
+            Some(sample),
+            options(Some(region_filter("2:1-30"))),
+            BgenWorkProbe::default(),
+        )
+        .expect("indexed bgen session should open");
+
+        let error = session
+            .next_block(1)
+            .expect_err("mismatched indexed byte range should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("byte range does not match decoded variant record"),
+            "unexpected indexed byte-range error: {error}"
+        );
+    }
+
+    #[test]
+    fn pbr_rust_bgen_002_indexed_early_drop_stops_work() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let bgen = dir.path().join("tiny.bgen");
+        let sample = dir.path().join("tiny.sample");
+        let ranges = write_two_variant_bgen_without_embedded_samples(&bgen, &sample);
+        write_bgen_index(&bgen, &ranges, 0);
+        let probe = BgenWorkProbe::default();
+
+        {
+            let mut session = BgenBlockSession::open_with_probe(
+                bgen,
+                Some(sample),
+                options(Some(region_filter("1:1-30"))),
+                probe.clone(),
+            )
+            .expect("indexed bgen session should open");
+            assert!(session
+                .next_block(1)
+                .expect("first indexed bgen block should decode")
+                .is_some());
+        }
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.index_opens, 1);
+        assert_eq!(counts.candidate_visits, 1);
+        assert_eq!(counts.payload_decodes, 1);
+        assert_eq!(counts.drops, 1);
+    }
+
+    #[test]
+    fn pbr_rust_bgen_002_pbr_rust_alloc_001_haplotype_session_reuses_bounded_scratch() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let bgen = dir.path().join("tiny.bgen");
+        let sample = dir.path().join("tiny.sample");
+        let _ranges = write_two_variant_phased_bgen_without_embedded_samples(&bgen, &sample);
+        let probe = BgenWorkProbe::default();
+        let mut haplotype_options = options(None);
+        haplotype_options.matrix_kind = MatrixKind::Haplotype;
+        let mut session =
+            BgenBlockSession::open_with_probe(bgen, Some(sample), haplotype_options, probe.clone())
+                .expect("persistent bgen haplotype session should open");
+
+        while session
+            .next_block(1)
+            .expect("persistent bgen haplotype block should decode")
+            .is_some()
+        {}
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.candidate_visits, 2);
+        assert_eq!(counts.payload_decodes, 2);
+        assert_eq!(counts.max_dense_output_len, 2);
+    }
+
+    #[test]
+    fn pbr_rust_bgen_002_indexed_haplotype_probe_counts_one_index_and_selected_range() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let bgen = dir.path().join("tiny.bgen");
+        let sample = dir.path().join("tiny.sample");
+        let ranges = write_two_variant_phased_bgen_without_embedded_samples(&bgen, &sample);
+        write_bgen_index(&bgen, &ranges, 0);
+        let probe = BgenWorkProbe::default();
+        let mut haplotype_options = options(Some(region_filter("2:1-30")));
+        haplotype_options.matrix_kind = MatrixKind::Haplotype;
+        let mut session =
+            BgenBlockSession::open_with_probe(bgen, Some(sample), haplotype_options, probe.clone())
+                .expect("persistent indexed bgen haplotype session should open");
+
+        assert!(session
+            .next_block(1)
+            .expect("indexed bgen haplotype block should decode")
+            .is_some());
+        assert!(session
+            .next_block(1)
+            .expect("indexed bgen haplotype session should reach EOF")
+            .is_none());
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.index_opens, 1);
+        assert_eq!(counts.candidate_visits, 1);
+        assert_eq!(counts.payload_decodes, 1);
     }
 }

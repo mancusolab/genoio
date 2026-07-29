@@ -56,7 +56,7 @@ fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<B
             "SELECT file_start_position, size_in_bytes
              FROM Variant
              WHERE chromosome = ?1 AND position BETWEEN ?2 AND ?3
-             ORDER BY file_start_position",
+             ORDER BY file_start_position ASC, rowid ASC",
         )
         .map_err(|error| {
             GenoioError::invalid_source(
@@ -82,16 +82,20 @@ fn query_bgen_index(index_path: &Path, region: &RegionPredicate) -> Result<Vec<B
         let (file_start_position, size_in_bytes) = row.map_err(|error| {
             GenoioError::invalid_source(index_path, format!("bgen index row error: {error}"))
         })?;
+        let file_start_position = u64::try_from(file_start_position).map_err(|_| {
+            GenoioError::invalid_source(index_path, "bgen index file_start_position is negative")
+        })?;
+        let size_in_bytes = u64::try_from(size_in_bytes).map_err(|_| {
+            GenoioError::invalid_source(index_path, "bgen index size_in_bytes is negative")
+        })?;
+        file_start_position
+            .checked_add(size_in_bytes)
+            .ok_or_else(|| {
+                GenoioError::invalid_source(index_path, "bgen index byte range is out of range")
+            })?;
         records.push(BgenIndexRecord {
-            file_start_position: u64::try_from(file_start_position).map_err(|_| {
-                GenoioError::invalid_source(
-                    index_path,
-                    "bgen index file_start_position is negative",
-                )
-            })?,
-            size_in_bytes: u64::try_from(size_in_bytes).map_err(|_| {
-                GenoioError::invalid_source(index_path, "bgen index size_in_bytes is negative")
-            })?,
+            file_start_position,
+            size_in_bytes,
         });
     }
     Ok(records)
@@ -119,4 +123,89 @@ pub(super) fn validate_index_record_consumed(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use genoio_core::RegionPredicate;
+    use rusqlite::params;
+
+    use super::query_bgen_index;
+
+    fn create_index_database() -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().expect("test directory should be created");
+        let path = directory.path().join("tiny.bgen.bgi");
+        let connection = rusqlite::Connection::open(&path).expect("test index should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE Variant (
+                    chromosome TEXT NOT NULL,
+                    position INT NOT NULL,
+                    file_start_position INT NOT NULL,
+                    size_in_bytes INT NOT NULL
+                );
+                CREATE INDEX variant_source_offset
+                    ON Variant(file_start_position ASC, size_in_bytes DESC);",
+            )
+            .expect("test index schema should be created");
+        (directory, path)
+    }
+
+    fn region() -> RegionPredicate {
+        RegionPredicate {
+            chrom: "1".to_owned(),
+            start: 1,
+            end: 100,
+        }
+    }
+
+    #[test]
+    fn pbr_rust_bgen_003_tied_offsets_use_rowid_as_total_order() {
+        let (_directory, path) = create_index_database();
+        let connection = rusqlite::Connection::open(&path).expect("test index should open");
+        for size in [11_i64, 22_i64] {
+            connection
+                .execute(
+                    "INSERT INTO Variant (
+                        chromosome, position, file_start_position, size_in_bytes
+                     ) VALUES ('1', 10, 50, ?1)",
+                    params![size],
+                )
+                .expect("test index row should insert");
+        }
+        drop(connection);
+
+        let records = query_bgen_index(&path, &region())
+            .expect("tied indexed offsets should query into owned records");
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.size_in_bytes)
+                .collect::<Vec<_>>(),
+            vec![11, 22]
+        );
+    }
+
+    #[test]
+    fn pbr_rust_bgen_003_negative_index_scalars_are_rejected() {
+        let (_directory, path) = create_index_database();
+        let connection = rusqlite::Connection::open(&path).expect("test index should open");
+        connection
+            .execute(
+                "INSERT INTO Variant (
+                    chromosome, position, file_start_position, size_in_bytes
+                 ) VALUES ('1', 10, -1, 20)",
+                [],
+            )
+            .expect("test index row should insert");
+        drop(connection);
+
+        let error =
+            query_bgen_index(&path, &region()).expect_err("negative indexed offset should fail");
+
+        assert!(error
+            .to_string()
+            .contains("file_start_position is negative"));
+    }
 }

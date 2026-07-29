@@ -451,7 +451,7 @@ fn write_bgen_index(path: &Path, rows: &[(&str, u32, &str, &str, &str, u64, u64)
                 file_start_position INT NOT NULL,
                 size_in_bytes INT NOT NULL,
                 PRIMARY KEY (chromosome, position, rsid, allele1, allele2, file_start_position)
-            ) WITHOUT ROWID;",
+            );",
         )
         .expect("bgen index schema should be created");
     for &(chrom, pos, rsid, allele1, allele2, file_start_position, size_in_bytes) in rows {
@@ -1231,6 +1231,210 @@ fn pbr_rust_bgen_001_rejects_unsupported_bgen_block_representations() {
         hardcall_error,
         genoio_core::GenoioError::UnsupportedRepresentation { .. }
     ));
+}
+
+#[test]
+fn pbr_rust_bgen_002_sequential_haplotype_blocks_match_whole_read() {
+    let dir = unique_dir("pbr-bgen-sequential-haplotype");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((255, 0)), Some((128, 64))],
+        [Some((0, 255)), None],
+        [Some((64, 192)), Some((32, 224))],
+    ];
+    write_two_sample_three_variant_phased_dosage_bgen(&bgen, 8, &calls);
+
+    let expected =
+        genoio_io::read_bgen_haplotypes_dosage_dense_windowed(&bgen, None, None, None, None, false)
+            .expect("whole bgen haplotype dosage read should decode");
+    let blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, None, MatrixKind::Haplotype, true),
+        2,
+    );
+
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.n_variants)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&blocks),
+        &dense_values_sample_major(&expected),
+        0.0,
+    );
+    assert_eq!(
+        concatenate_dense_blocks_missing_sample_major(&blocks),
+        dense_missing_sample_major(&expected)
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&blocks),
+        variant_ids(variants(&expected.variants))
+    );
+    assert!(blocks.iter().all(|block| block.samples == expected.samples));
+
+    let requested_samples = vec!["sample_2".to_owned()];
+    let filter = genotype_stat_filter("missing_rate", json!({"max": 0.0}));
+    let filtered_expected = ::genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        Some(&requested_samples),
+        Some(&filter),
+        None,
+        DenseMissingPolicy::Nan,
+        true,
+        true,
+    )
+    .expect("filtered whole bgen haplotype dosage read should decode");
+    let filtered_blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(
+            Some(requested_samples),
+            Some(filter),
+            MatrixKind::Haplotype,
+            true,
+        ),
+        1,
+    );
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&filtered_blocks),
+        &dense_values_sample_major(&filtered_expected),
+        0.0,
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&filtered_blocks),
+        variant_ids(variants(&filtered_expected.variants))
+    );
+    assert!(filtered_blocks
+        .iter()
+        .all(|block| block.samples == filtered_expected.samples));
+
+    let matrix_only_expected =
+        genoio_io::read_bgen_haplotypes_dosage_dense_windowed(&bgen, None, None, None, None, true)
+            .expect("matrix-only whole bgen haplotype dosage read should decode");
+    let matrix_only_blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, None, MatrixKind::Haplotype, false),
+        2,
+    );
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&matrix_only_blocks),
+        &dense_values_sample_major(&matrix_only_expected),
+        0.0,
+    );
+    assert!(matrix_only_blocks
+        .iter()
+        .all(|block| block.samples.is_none() && block.variants.is_none()));
+}
+
+#[test]
+fn pbr_rust_bgen_002_indexed_genotype_blocks_skip_out_of_region_payloads() {
+    let dir = unique_dir("pbr-bgen-indexed-genotype-pushdown");
+    let bgen = dir.join("tiny.bgen");
+    write_indexed_bgen_with_invalid_out_of_region_variant(&bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "2:1-30"}
+    }))
+    .expect("region filter should parse");
+
+    let expected =
+        genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, Some(&filter), None, false)
+            .expect("whole indexed bgen dosage read should decode");
+    let blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, Some(filter), MatrixKind::Genotype, true),
+        1,
+    );
+
+    assert_eq!(blocks.len(), 1);
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&blocks),
+        &dense_values_sample_major(&expected),
+        0.0,
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&blocks),
+        variant_ids(variants(&expected.variants))
+    );
+}
+
+#[test]
+fn pbr_rust_bgen_002_indexed_haplotype_blocks_skip_out_of_region_payloads() {
+    let dir = unique_dir("pbr-bgen-indexed-haplotype-pushdown");
+    let bgen = dir.join("tiny.bgen");
+    write_indexed_phased_bgen_with_invalid_out_of_region_variant(&bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "2:1-30"}
+    }))
+    .expect("region filter should parse");
+
+    let expected = genoio_io::read_bgen_haplotypes_dosage_dense_windowed(
+        &bgen,
+        None,
+        None,
+        Some(&filter),
+        None,
+        false,
+    )
+    .expect("whole indexed bgen haplotype read should decode");
+    let blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, Some(filter), MatrixKind::Haplotype, true),
+        1,
+    );
+
+    assert_eq!(blocks.len(), 1);
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&blocks),
+        &dense_values_sample_major(&expected),
+        0.0,
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&blocks),
+        variant_ids(variants(&expected.variants))
+    );
+}
+
+#[test]
+fn pbr_rust_bgen_002_indexed_blocks_preserve_source_order_not_coordinate_order() {
+    let dir = unique_dir("pbr-bgen-indexed-source-order");
+    let genotype_bgen = dir.join("genotype.bgen");
+    let haplotype_bgen = dir.join("haplotype.bgen");
+    write_indexed_bgen_with_unsorted_region_positions(&genotype_bgen);
+    write_indexed_phased_bgen_with_unsorted_region_positions(&haplotype_bgen);
+    let filter = VariantFilter::from_json_value(json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "22:1-40"}
+    }))
+    .expect("region filter should parse");
+
+    for (bgen, matrix_kind) in [
+        (&genotype_bgen, MatrixKind::Genotype),
+        (&haplotype_bgen, MatrixKind::Haplotype),
+    ] {
+        let blocks = collect_bgen_dense_blocks(
+            bgen,
+            None,
+            bgen_block_options(None, Some(filter.clone()), matrix_kind, true),
+            1,
+        );
+        assert_eq!(
+            concatenate_block_variant_ids(&blocks),
+            vec!["rs_late", "rs_early"]
+        );
+    }
 }
 
 #[test]
