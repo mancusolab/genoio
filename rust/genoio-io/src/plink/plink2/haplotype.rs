@@ -453,7 +453,7 @@ pub fn read_plink2_haplotypes_sparse_windowed(
 }
 
 #[inline]
-fn append_haplotype_sparse_column(
+pub(super) fn append_haplotype_sparse_column(
     indptr: &mut Vec<i32>,
     indices: &mut Vec<i32>,
     data: &mut Vec<f32>,

@@ -28,14 +28,16 @@ use crate::hardcall::{
 use crate::matrix::{apply_dense_missing_policy_to_variant, shrink_sample_major_width};
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
+use super::haplotype::append_haplotype_sparse_column;
 #[cfg(not(test))]
 use super::metadata::{parse_psam, PvarRecordReader};
 #[cfg(test)]
 use super::metadata::{parse_psam_with_probe, PvarRecordReader};
 use super::pgen::{
-    decode_plink2_haplotype_dosage_aux, decode_plink2_variant_dosage_aux,
-    read_plink2_variant_dosage, read_plink2_variant_dosage_main_track,
-    read_plink2_variant_haplotype_dosage_track, read_plink2_variant_packed,
+    decode_plink2_haplotype_dosage_aux, decode_plink2_haplotype_hardcall_aux,
+    decode_plink2_variant_dosage_aux, read_plink2_variant_dosage,
+    read_plink2_variant_dosage_main_track, read_plink2_variant_haplotype_dosage_track,
+    read_plink2_variant_haplotype_main_track, read_plink2_variant_packed,
     read_supported_pgen_header_from_file, validate_plink2_sample_count, PgenDecoderState,
     PgenHaplotypeDecodeState, PgenHeader, PgenLayout,
 };
@@ -202,9 +204,12 @@ impl Plink2BlockSession {
             (MatrixKind::Haplotype, DosageSource::Dosage, false) => self
                 .next_dense_dosage_block(block_size, true)
                 .map(|matrix| matrix.map(BlockOutput::Dense)),
-            (MatrixKind::Haplotype, DosageSource::Hardcall, _) => Err(GenoioError::unsupported(
-                "plink2 block session does not support hardcall haplotypes yet",
-            )),
+            (MatrixKind::Haplotype, DosageSource::Hardcall, false) => self
+                .next_dense_hardcall_haplotype_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Dense)),
+            (MatrixKind::Haplotype, DosageSource::Hardcall, true) => self
+                .next_sparse_hardcall_haplotype_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Sparse)),
             (_, DosageSource::Dosage, true) => Err(GenoioError::unsupported(
                 "plink2 dosage block sessions do not support sparse matrices",
             )),
@@ -433,6 +438,278 @@ impl Plink2BlockSession {
             diagnostics,
         )
         .map(Some)
+    }
+
+    fn next_dense_hardcall_haplotype_block(
+        &mut self,
+        block_size: usize,
+    ) -> Result<Option<DenseGenotypeMatrix>> {
+        if self.eof || block_size == 0 {
+            return Ok(None);
+        }
+
+        let n_rows =
+            self.selection.samples.len().checked_mul(2).ok_or_else(|| {
+                GenoioError::internal_contract("haplotype row count is out of range")
+            })?;
+        let output_len = checked_dense_block_len(n_rows, block_size)?;
+        self.record_dense_allocation(output_len);
+        let mut variant_major_values = Vec::with_capacity(output_len);
+        let mut variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(block_size));
+        let mut retention = RetainedVariantState::new(Some(VariantWindow {
+            start: 0,
+            len: block_size,
+        }));
+        let mut output_variant_count = 0_usize;
+
+        while !retention.window_is_satisfied() {
+            let Some((variant_index, mut variant)) = self.next_source_variant()? else {
+                break;
+            };
+            let main_track_cursor = self.decode_haplotype_main_for_ld_state(variant_index)?;
+            let partial_decision = self
+                .variant_filter
+                .as_ref()
+                .map_or(PartialFilterDecision::Accept, |filter| {
+                    filter.partial_decision(&variant)
+                });
+            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
+                MetadataRetentionAction::Skip => continue,
+                MetadataRetentionAction::Stop => break,
+                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            }
+
+            let cursor = self.require_haplotype_main_track(variant_index, main_track_cursor)?;
+            if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+                let filter = require_genotype_decision_filter(self.variant_filter.as_ref())?;
+                let (retain_variant, stats) = evaluate_packed_hardcall_filter(
+                    &self.decoder_state.packed,
+                    &self.selection.source_indices,
+                    self.all_samples_selected,
+                    filter,
+                    self.genotype_filter_plan,
+                    Some(&variant),
+                    self.return_variants,
+                )?;
+                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => break,
+                }
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
+            }
+
+            decode_plink2_haplotype_hardcall_aux(
+                &self.pgen,
+                &self.header,
+                variant_index,
+                cursor,
+                &self.selection.source_indices,
+                &self.decoder_state,
+                self.haplotype_state.as_deref_mut().ok_or_else(|| {
+                    GenoioError::internal_contract(
+                        "hardcall haplotype session is missing decode state",
+                    )
+                })?,
+            )?;
+            self.record_auxiliary_decode();
+            if let Some(variants) = variants.as_mut() {
+                variants.push_record(&variant)?;
+            }
+            let haplotype_state = self.haplotype_state.as_deref_mut().ok_or_else(|| {
+                GenoioError::internal_contract("hardcall haplotype session is missing decode state")
+            })?;
+            apply_dense_missing_policy_to_variant(
+                &mut haplotype_state.selected_haplotype_values,
+                &haplotype_state.selected_haplotype_missing_indices,
+                self.missing_policy,
+            )?;
+            variant_major_values.extend_from_slice(&haplotype_state.selected_haplotype_values);
+            output_variant_count += 1;
+        }
+
+        self.finish_source_if_at_pgen_end()?;
+        if output_variant_count == 0 {
+            return Ok(None);
+        }
+        let haplotype_samples = expand_selected_samples_to_haplotypes(&self.selection);
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &haplotype_samples,
+            self.return_samples,
+            true,
+        )?;
+        let diagnostics = block_diagnostics_snapshot(&self.diagnostics, output_variant_count);
+        DenseGenotypeMatrix::new_with_layout(
+            n_rows,
+            output_variant_count,
+            variant_major_values,
+            DenseLayout::VariantMajor,
+            samples,
+            variants,
+            diagnostics,
+        )
+        .map(Some)
+    }
+
+    fn next_sparse_hardcall_haplotype_block(
+        &mut self,
+        block_size: usize,
+    ) -> Result<Option<SparseGenotypeMatrix>> {
+        if self.eof || block_size == 0 {
+            return Ok(None);
+        }
+
+        let n_rows =
+            self.selection.samples.len().checked_mul(2).ok_or_else(|| {
+                GenoioError::internal_contract("haplotype row count is out of range")
+            })?;
+        let indptr_len = checked_sparse_indptr_len(block_size)?;
+        self.record_sparse_allocation(indptr_len);
+        let mut indptr = Vec::with_capacity(indptr_len);
+        indptr.push(0);
+        let mut indices = Vec::new();
+        let mut data = Vec::new();
+        let mut variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(block_size));
+        let mut retention = RetainedVariantState::new(Some(VariantWindow {
+            start: 0,
+            len: block_size,
+        }));
+        let mut output_variant_count = 0_usize;
+
+        while !retention.window_is_satisfied() {
+            let Some((variant_index, mut variant)) = self.next_source_variant()? else {
+                break;
+            };
+            let main_track_cursor = self.decode_haplotype_main_for_ld_state(variant_index)?;
+            let partial_decision = self
+                .variant_filter
+                .as_ref()
+                .map_or(PartialFilterDecision::Accept, |filter| {
+                    filter.partial_decision(&variant)
+                });
+            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
+                MetadataRetentionAction::Skip => continue,
+                MetadataRetentionAction::Stop => break,
+                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            }
+
+            let cursor = self.require_haplotype_main_track(variant_index, main_track_cursor)?;
+            if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+                let filter = require_genotype_decision_filter(self.variant_filter.as_ref())?;
+                let (retain_variant, stats) = evaluate_packed_hardcall_filter(
+                    &self.decoder_state.packed,
+                    &self.selection.source_indices,
+                    self.all_samples_selected,
+                    filter,
+                    self.genotype_filter_plan,
+                    Some(&variant),
+                    self.return_variants,
+                )?;
+                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => break,
+                }
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
+            }
+
+            decode_plink2_haplotype_hardcall_aux(
+                &self.pgen,
+                &self.header,
+                variant_index,
+                cursor,
+                &self.selection.source_indices,
+                &self.decoder_state,
+                self.haplotype_state.as_deref_mut().ok_or_else(|| {
+                    GenoioError::internal_contract(
+                        "hardcall haplotype session is missing decode state",
+                    )
+                })?,
+            )?;
+            self.record_auxiliary_decode();
+            let haplotype_state = self.haplotype_state.as_deref().ok_or_else(|| {
+                GenoioError::internal_contract("hardcall haplotype session is missing decode state")
+            })?;
+            append_haplotype_sparse_column(
+                &mut indptr,
+                &mut indices,
+                &mut data,
+                &haplotype_state.selected_haplotype_values,
+                &haplotype_state.selected_haplotype_missing_indices,
+            )?;
+            output_variant_count += 1;
+            if let Some(variants) = variants.as_mut() {
+                variants.push_record(&variant)?;
+            }
+        }
+
+        self.finish_source_if_at_pgen_end()?;
+        if output_variant_count == 0 {
+            return Ok(None);
+        }
+        let haplotype_samples = expand_selected_samples_to_haplotypes(&self.selection);
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &haplotype_samples,
+            self.return_samples,
+            true,
+        )?;
+        let diagnostics = block_diagnostics_snapshot(&self.diagnostics, output_variant_count);
+        SparseGenotypeMatrix::new(
+            n_rows,
+            output_variant_count,
+            indptr,
+            indices,
+            data,
+            samples,
+            variants,
+            diagnostics,
+        )
+        .map(Some)
+    }
+
+    fn decode_haplotype_main_for_ld_state(
+        &mut self,
+        variant_index: usize,
+    ) -> Result<Option<usize>> {
+        if !matches!(self.header.layout, PgenLayout::VariableWidth) {
+            return Ok(None);
+        }
+        let cursor = read_plink2_variant_haplotype_main_track(
+            &self.pgen,
+            &mut self.pgen_reader,
+            &self.header,
+            variant_index,
+            &mut self.decoder_state,
+        )?;
+        self.record_main_decode();
+        Ok(Some(cursor))
+    }
+
+    fn require_haplotype_main_track(
+        &mut self,
+        variant_index: usize,
+        cursor: Option<usize>,
+    ) -> Result<usize> {
+        if let Some(cursor) = cursor {
+            return Ok(cursor);
+        }
+        let cursor = read_plink2_variant_haplotype_main_track(
+            &self.pgen,
+            &mut self.pgen_reader,
+            &self.header,
+            variant_index,
+            &mut self.decoder_state,
+        )?;
+        self.record_main_decode();
+        Ok(cursor)
     }
 
     fn next_dense_dosage_block(
@@ -1207,5 +1484,48 @@ mod tests {
         assert_eq!(counts.main_decodes, 2);
         assert_eq!(counts.auxiliary_decodes, 1);
         assert_eq!(counts.max_dense_output_len, 2);
+    }
+
+    #[test]
+    fn pbr_rust_plink2_004_hardcall_haplotype_probe_is_linear_and_block_bounded() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_variable_fixture(
+            dir.path(),
+            &[0x10, 0x12],
+            &[&[0x04, 0x00], &[0, 0x00]],
+            "#CHROM POS ID REF ALT\n2 1 rejected_base A G\n1 2 retained_ld A G\n",
+        );
+        let probe = Plink2WorkProbe::default();
+        let mut session = Plink2BlockSession::open_with_probe(
+            pgen,
+            pvar,
+            psam,
+            BlockReadOptions {
+                matrix_kind: MatrixKind::Haplotype,
+                ..options(Some(chrom_filter("1")))
+            },
+            probe.clone(),
+        )
+        .expect("persistent hardcall haplotype session should open");
+
+        let block = session
+            .next_block(1)
+            .expect("retained LD haplotype block should decode")
+            .expect("retained haplotype block should exist");
+        let crate::blocks::BlockOutput::Dense(block) = block else {
+            panic!("hardcall haplotype session should return a dense block");
+        };
+        assert_eq!(block.n_samples, 4);
+        assert_eq!(block.n_variants, 1);
+        let counts = probe.snapshot();
+        assert_eq!(counts.candidate_visits, 2);
+        assert_eq!(counts.main_decodes, 2);
+        assert_eq!(counts.auxiliary_decodes, 1);
+        assert_eq!(counts.max_dense_output_len, 4);
+        assert!(session
+            .next_block(1)
+            .expect("hardcall haplotype EOF should be sticky")
+            .is_none());
+        assert_eq!(probe.snapshot(), counts);
     }
 }
