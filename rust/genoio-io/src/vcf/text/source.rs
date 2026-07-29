@@ -34,7 +34,7 @@ type IndexedCompressedVcfReader<'a, R> = noodles::io::Reader<csi::io::Query<'a, 
 pub(super) type IndexedBgzfReader<'a> = IndexedCompressedVcfReader<'a, bgzf::io::Reader<File>>;
 pub(super) type ThreadedIndexedBgzfReader<'a> =
     IndexedCompressedVcfReader<'a, bgzf::io::MultithreadedReader<File>>;
-type IndexChunk = csi::binning_index::index::reference_sequence::bin::Chunk;
+pub(super) type IndexChunk = csi::binning_index::index::reference_sequence::bin::Chunk;
 pub(super) type PlainVcfReader = noodles::io::Reader<BufReader<File>>;
 
 pub(super) struct TextVcfInput<R> {
@@ -126,7 +126,7 @@ pub(super) fn open_text_vcf_input(
     }
 }
 
-fn open_text_vcf_input_from_reader<R: BufRead>(
+pub(super) fn open_text_vcf_input_from_reader<R: BufRead>(
     path: &Path,
     requested_samples: Option<&[String]>,
     mut reader: noodles::io::Reader<R>,
@@ -231,7 +231,7 @@ where
     read_records(IndexedTextVcfInput { selection, region }, &mut reader)
 }
 
-fn open_bgzf_reader(path: &Path) -> Result<bgzf::io::Reader<File>> {
+pub(super) fn open_bgzf_reader(path: &Path) -> Result<bgzf::io::Reader<File>> {
     File::open(path)
         .map(bgzf::io::Reader::new)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))
@@ -254,7 +254,7 @@ fn open_threaded_bgzf_reader(
     ))
 }
 
-fn index_chunks_for_region(
+pub(super) fn index_chunks_for_region(
     path: &Path,
     region: &RegionPredicate,
 ) -> Result<Option<Vec<IndexChunk>>> {

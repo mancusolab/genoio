@@ -83,7 +83,7 @@ enum BlockBackend {
     Bgen(BgenBlockSession),
     Plink1(Plink1BlockSession),
     Plink2(Plink2BlockSession),
-    TextVcf(TextVcfBlockSession),
+    TextVcf(Box<TextVcfBlockSession>),
 }
 
 /// Backend-neutral persistent reader that yields bounded genotype blocks.
@@ -125,7 +125,7 @@ impl BlockReader {
                 BlockBackend::Plink2(Plink2BlockSession::open(pgen, pvar, psam, options)?)
             }
             BlockSource::Vcf { vcf } => {
-                BlockBackend::TextVcf(TextVcfBlockSession::open(vcf, options)?)
+                BlockBackend::TextVcf(Box::new(TextVcfBlockSession::open(vcf, options)?))
             }
             BlockSource::Bcf { .. } => {
                 return Err(GenoioError::unsupported(

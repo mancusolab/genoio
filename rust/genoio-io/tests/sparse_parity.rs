@@ -180,6 +180,56 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
 }
 
 #[test]
+fn pbr_rust_textvcf_002_sequential_sparse_genotype_blocks_preserve_csc_parity() {
+    let dir = unique_dir("pbr-text-vcf-sparse-blocks");
+    let path = dir.join("sparse.vcf");
+    write_vcf(
+        &path,
+        "\
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/1\t0/0\t1/1
+1\t30\trs3\tG\tA\t.\tPASS\t.\tGT\t0/0\t0/0\t0/1
+",
+    );
+    let expected =
+        genoio_io::read_vcf_sparse(&path, None, None).expect("whole sparse VCF should decode");
+    let mut reader = BlockReader::open(
+        BlockSource::Vcf { vcf: path },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Genotype,
+            sparse: true,
+            requested_samples: None,
+            variant_filter: None,
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Raise,
+            return_samples: true,
+            return_variants: true,
+        },
+        2,
+    )
+    .expect("persistent sparse text VCF reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader
+        .next_block()
+        .expect("sparse text VCF block should decode")
+    {
+        let BlockOutput::Sparse(block) = output else {
+            panic!("sparse text VCF session should return sparse output");
+        };
+        blocks.push(block);
+    }
+    let (indptr, indices, data) = concatenate_sparse_blocks(&blocks);
+
+    assert_eq!(indptr, expected.indptr);
+    assert_eq!(indices, expected.indices);
+    assert_eq!(data, expected.data);
+    assert_eq!(
+        blocks.iter().map(|block| block.n_cols).collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+}
+
+#[test]
 fn compressed_vcf_sparse_windowed_matches_existing_sparse_semantics() {
     let dir = unique_dir("vcf-sparse-fast-compressed");
     let path = dir.join("tiny.vcf.gz");

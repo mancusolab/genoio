@@ -262,7 +262,7 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
 }
 
 /// Append a haplotype sparse column and report whether metadata must be flipped.
-fn append_haplotype_minor_sparse_column(
+pub(super) fn append_haplotype_minor_sparse_column(
     indptr: &mut Vec<i32>,
     indices: &mut Vec<i32>,
     data: &mut Vec<f32>,
@@ -282,7 +282,7 @@ fn append_haplotype_minor_sparse_column(
 }
 
 /// Flip genotype dosages in-place when allele 1 is the major allele.
-fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
+pub(super) fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
     let a1_count = values.iter().sum::<f32>();
     let a0_count = 2.0 * values.len() as f32 - a1_count;
     if a1_count <= a0_count {
