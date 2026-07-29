@@ -3,7 +3,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use genoio_core::{DenseLayout, VariantWindow};
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
+use genoio_core::{DenseLayout, DenseMissingPolicy, VariantWindow};
 
 mod common;
 
@@ -286,6 +289,53 @@ fn plink1_dense_window_uses_retained_variant_order_after_filters() {
 
     assert_eq!(variant_ids(variants(&block.variants)), vec!["rs2", "rs4"]);
     assert_values_with_nan(&block.values, &[f32::NAN, 2.0, 0.0, 2.0]);
+}
+
+#[test]
+fn pbr_rust_plink1_001_plink1_block_windows_keep_source_order_without_restarting_candidates() {
+    let dir = unique_dir("pbr-plink1-block-window-order");
+    let (bed, bim, fam) = write_plink_fixture(&dir);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "chrom",
+        "params": {"value": "1"}
+    }))
+    .expect("filter should parse");
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 { bed, bim, fam },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Genotype,
+            sparse: false,
+            requested_samples: None,
+            variant_filter: Some(filter),
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Nan,
+            return_samples: true,
+            return_variants: true,
+        },
+        1,
+    )
+    .expect("persistent plink1 reader should open");
+    let mut ids = Vec::new();
+    let mut candidate_counts = Vec::new();
+
+    while let Some(output) = reader
+        .next_block()
+        .expect("persistent plink1 block should decode")
+    {
+        let BlockOutput::Dense(block) = output else {
+            panic!("plink1 dense session should return dense blocks");
+        };
+        ids.extend(
+            variant_ids(variants(&block.variants))
+                .into_iter()
+                .map(str::to_owned),
+        );
+        candidate_counts.push(block.diagnostics.candidate_variants);
+    }
+
+    assert_eq!(ids, vec!["rs1", "rs2", "rs4"]);
+    assert_eq!(candidate_counts, vec![1, 2, 4]);
 }
 
 #[test]

@@ -5,59 +5,30 @@
 //! filtering, and dense or sparse output assembly. Binary BED decoding and text
 //! metadata parsing live in submodules.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
-    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseLayout,
-    DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan, MetadataOutput,
-    PartialFilterDecision, SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantMetadataBuffers, VariantWindow,
+    select_samples_source_order, DenseGenotypeMatrix, DenseMissingPolicy, GenoioError,
+    GenotypeFilterPlan, MetadataOutput, PartialFilterDecision, SampleMetadataBuffers,
+    SourceCapabilities, SparseGenotypeMatrix, VariantFilter, VariantMetadataBuffers, VariantWindow,
 };
 
 use crate::error::Result;
-use crate::hardcall::{
-    evaluate_packed_hardcall_filter, flush_hardcall_batch_into_sample_major, HardcallBatch,
-};
-use crate::matrix::shrink_sample_major_width;
+use crate::hardcall::evaluate_packed_hardcall_filter;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
 mod bed;
 mod metadata;
+mod session;
+
+pub(crate) use session::Plink1BlockSession;
 
 use bed::{
-    infer_bed_variant_count, open_bed_file, read_plink1_variant_packed,
-    read_plink1_variant_packed_sequential, seek_plink1_variant, validate_bed_payload_len,
-    Plink1DecoderState,
+    open_bed_file, read_plink1_variant_packed, validate_bed_payload_len, Plink1DecoderState,
 };
-use metadata::{
-    count_bim_records, parse_bim_metadata, parse_bim_source_window, parse_fam, BimRecordReader,
-};
-
-fn can_skip_bim_for_matrix_only_genotype_filter(
-    matrix_only: bool,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-) -> Option<(&VariantFilter, VariantWindow)> {
-    if !matrix_only {
-        return None;
-    }
-    let filter = variant_filter?;
-    let window = variant_window?;
-    (filter.requires_genotype_stats() && filter.is_genotype_stats_only())
-        .then_some((filter, window))
-}
-
-struct Plink1DenseContext<'a> {
-    bed: &'a Path,
-    bed_file: File,
-    n_source_samples: usize,
-    n_source_variants: usize,
-    bytes_per_variant: usize,
-    selection: DenseSampleSelection,
-    all_samples_selected: bool,
-}
+use metadata::{count_bim_records, parse_bim_metadata, parse_fam, BimRecordReader};
 
 /// Read PLINK1 metadata with variant metadata staged as columnar buffers.
 pub fn read_plink1_metadata(bed: &Path, bim: &Path, fam: &Path) -> Result<MetadataOutput> {
@@ -91,435 +62,38 @@ pub fn read_plink1_dense_windowed(
     return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
     let matrix_only = !return_samples && !return_variants;
-    if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        return empty_plink1_dense(
-            bed,
-            bim,
-            fam,
-            requested_samples,
-            return_samples,
-            return_variants,
-        );
-    }
-
-    if let (None, Some(window)) = (variant_filter, variant_window) {
-        return read_plink1_dense_source_window(
-            bed,
-            bim,
-            fam,
-            requested_samples,
-            window,
-            missing_policy,
-            return_samples,
-            return_variants,
-        );
-    }
-
-    let bed_file = open_bed_file(bed)?;
-
-    let all_samples = parse_fam(fam)?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
-    let all_samples_selected = requested_samples.is_none();
-    let n_source_samples = all_samples.len();
-    let bytes_per_variant = n_source_samples.div_ceil(4);
-    if let Some((filter, window)) =
-        can_skip_bim_for_matrix_only_genotype_filter(matrix_only, variant_filter, variant_window)
-    {
-        // Matrix-only genotype-stat filters need BED hard calls and FAM sample order,
-        // but not parsed BIM rows. Still require the companion file to exist.
-        fs::metadata(bim).map_err(|source| GenoioError::Io {
-            path: bim.to_path_buf(),
-            source,
-        })?;
-        let n_source_variants =
-            infer_bed_variant_count(bed, &bed_file, n_source_samples, bytes_per_variant)?;
-        let context = Plink1DenseContext {
-            bed,
-            bed_file,
-            n_source_samples,
-            n_source_variants,
-            bytes_per_variant,
-            selection,
-            all_samples_selected,
-        };
-        return read_plink1_dense_matrix_only_genotype_filter(
-            context,
-            filter,
-            window,
-            missing_policy,
-        );
-    }
-    let n_source_variants = count_bim_records(bim)?;
-    let source_variants = BimRecordReader::new(bim)?;
-    let diagnostics = selection.diagnostics.clone();
-    let context = Plink1DenseContext {
-        bed,
-        bed_file,
-        n_source_samples,
-        n_source_variants,
-        bytes_per_variant,
-        selection,
-        all_samples_selected,
-    };
-    read_plink1_dense_with_metadata(
-        context,
-        source_variants,
-        variant_filter,
-        variant_window,
+    let retained_skip = variant_window.map_or(0, |window| window.start);
+    let read_bim_records = !(matrix_only
+        && variant_window.is_some()
+        && variant_filter.is_none_or(|filter| {
+            filter.requires_genotype_stats() && filter.is_genotype_stats_only()
+        }));
+    let options = crate::blocks::BlockReadOptions {
+        matrix_kind: crate::blocks::MatrixKind::Genotype,
+        sparse: false,
+        requested_samples: requested_samples.map(<[String]>::to_vec),
+        variant_filter: variant_filter.cloned(),
+        dosage_source: crate::blocks::DosageSource::Hardcall,
         missing_policy,
         return_samples,
         return_variants,
-        diagnostics,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dense PLINK1 loop keeps decoded source state and metadata controls explicit"
-)]
-fn read_plink1_dense_with_metadata(
-    mut context: Plink1DenseContext<'_>,
-    mut source_variants: BimRecordReader,
-    variant_filter: Option<&VariantFilter>,
-    variant_window: Option<VariantWindow>,
-    missing_policy: DenseMissingPolicy,
-    return_samples: bool,
-    return_variants: bool,
-    mut diagnostics: DenseDiagnostics,
-) -> Result<DenseGenotypeMatrix> {
-    validate_bed_payload_len(
-        context.bed,
-        &context.bed_file,
-        context.n_source_samples,
-        context.n_source_variants,
-        context.bytes_per_variant,
-    )?;
-
-    let output_variant_capacity = variant_window.map_or(context.n_source_variants, |window| {
-        window.len.min(context.n_source_variants)
-    });
-    let mut variants =
-        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
-    let n_samples = context.selection.samples.len();
-    let mut values = vec![0.0; n_samples * output_variant_capacity];
-    let mut batch = HardcallBatch::new(context.n_source_samples);
-    let mut batch_start = 0_usize;
-    let mut variant_values = Vec::with_capacity(n_samples);
-    let mut missing_indices = Vec::new();
-    let mut decoder_state = Plink1DecoderState::new(
-        context.n_source_samples,
-        context.bytes_per_variant,
-        context.selection.samples.len(),
-    );
-    let mut retention = RetainedVariantState::new(variant_window);
-    let mut output_variant_count = 0_usize;
-    let genotype_filter_plan = variant_filter.map_or(
-        GenotypeFilterPlan::Generic,
-        VariantFilter::genotype_filter_plan,
-    );
-    while let Some((variant_index, mut variant)) = source_variants.next_record()? {
-        if variant_index >= context.n_source_variants {
-            return Err(GenoioError::invalid_source(
-                context.bed,
-                "bim variant count exceeds bed variant count",
-            ));
-        }
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-
-        read_plink1_variant_packed(
-            context.bed,
-            &mut context.bed_file,
-            variant_index,
-            context.bytes_per_variant,
-            context.n_source_samples,
-            &mut decoder_state,
-        )?;
-
-        let mut stats = None;
-        if needs_genotype_decision {
-            let filter = variant_filter.ok_or_else(|| {
-                GenoioError::internal_contract("genotype decision requires a variant filter")
-            })?;
-            let (retain_variant, computed_stats) = evaluate_packed_hardcall_filter(
-                &decoder_state.packed,
-                &context.selection.source_indices,
-                context.all_samples_selected,
-                filter,
-                genotype_filter_plan,
-                Some(&variant),
-                return_variants,
-            )?;
-            stats = computed_stats;
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-        }
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
-        }
-        if let Some(variants) = variants.as_mut() {
-            variants.push_record(&variant)?;
-        }
-        batch.push(&decoder_state.packed);
-        output_variant_count += 1;
-        if batch.is_full() {
-            flush_hardcall_batch_into_sample_major(
-                &mut batch,
-                &context.selection.source_indices,
-                &mut batch_start,
-                output_variant_capacity,
-                &mut values,
-                missing_policy,
-                &mut variant_values,
-                &mut missing_indices,
-            )?;
-        }
-        if retention.window_is_satisfied() {
-            break;
-        }
-    }
-    flush_hardcall_batch_into_sample_major(
-        &mut batch,
-        &context.selection.source_indices,
-        &mut batch_start,
-        output_variant_capacity,
-        &mut values,
-        missing_policy,
-        &mut variant_values,
-        &mut missing_indices,
-    )?;
-
-    let n_variants = output_variant_count;
-    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
-    diagnostics.retained_variants = n_variants;
-    let samples = SampleMetadataBuffers::optional_from_records(
-        &context.selection.samples,
-        return_samples,
-        false,
-    )?;
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        n_variants,
-        values,
-        DenseLayout::SampleMajor,
-        samples,
-        variants,
-        diagnostics,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "source-window reader keeps companion files and metadata controls explicit"
-)]
-fn read_plink1_dense_source_window(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    window: VariantWindow,
-    missing_policy: DenseMissingPolicy,
-    return_samples: bool,
-    return_variants: bool,
-) -> Result<DenseGenotypeMatrix> {
-    let mut bed_file = open_bed_file(bed)?;
-    let all_samples = parse_fam(fam)?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
-    let mut diagnostics = selection.diagnostics;
-    let n_source_samples = all_samples.len();
-    let bytes_per_variant = n_source_samples.div_ceil(4);
-    let n_source_variants =
-        infer_bed_variant_count(bed, &bed_file, n_source_samples, bytes_per_variant)?;
-    let n_variants = n_source_variants
-        .saturating_sub(window.start)
-        .min(window.len);
-    let variants = if return_variants {
-        Some(parse_bim_source_window(bim, window.start, n_variants)?)
-    } else {
-        fs::metadata(bim).map_err(|source| GenoioError::Io {
-            path: bim.to_path_buf(),
-            source,
-        })?;
-        None
     };
-
-    let n_samples = selection.samples.len();
-    let mut values = vec![0.0; n_samples * n_variants];
-    let mut decoder_state =
-        Plink1DecoderState::new(n_source_samples, bytes_per_variant, selection.samples.len());
-    let mut batch = HardcallBatch::new(n_source_samples);
-    let mut batch_start = 0_usize;
-    let mut variant_values = Vec::with_capacity(n_samples);
-    let mut missing_indices = Vec::new();
-    seek_plink1_variant(bed, &mut bed_file, window.start, bytes_per_variant)?;
-    for variant_offset in 0..n_variants {
-        read_plink1_variant_packed_sequential(
-            bed,
-            &mut bed_file,
-            bytes_per_variant,
-            n_source_samples,
-            &mut decoder_state,
-        )?;
-        batch.push(&decoder_state.packed);
-        if batch.is_full() {
-            flush_hardcall_batch_into_sample_major(
-                &mut batch,
-                &selection.source_indices,
-                &mut batch_start,
-                n_variants,
-                &mut values,
-                missing_policy,
-                &mut variant_values,
-                &mut missing_indices,
-            )?;
-        }
-        diagnostics.candidate_variants = variant_offset + 1;
-    }
-    flush_hardcall_batch_into_sample_major(
-        &mut batch,
-        &selection.source_indices,
-        &mut batch_start,
-        n_variants,
-        &mut values,
-        missing_policy,
-        &mut variant_values,
-        &mut missing_indices,
+    let mut session = Plink1BlockSession::open_windowed(
+        bed.to_path_buf(),
+        bim.to_path_buf(),
+        fam.to_path_buf(),
+        options,
+        retained_skip,
+        read_bim_records,
     )?;
-
-    diagnostics.retained_variants = n_variants;
-    let samples =
-        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        n_variants,
-        values,
-        DenseLayout::SampleMajor,
-        samples,
-        variants,
-        diagnostics,
-    )
-}
-
-fn read_plink1_dense_matrix_only_genotype_filter(
-    mut context: Plink1DenseContext<'_>,
-    filter: &VariantFilter,
-    window: VariantWindow,
-    missing_policy: DenseMissingPolicy,
-) -> Result<DenseGenotypeMatrix> {
-    let output_variant_capacity = window.len.min(context.n_source_variants);
-    let n_samples = context.selection.samples.len();
-    if output_variant_capacity == 0 {
-        let mut diagnostics = context.selection.diagnostics;
-        diagnostics.retained_variants = 0;
-        return DenseGenotypeMatrix::new_with_layout(
-            n_samples,
-            0,
-            Vec::new(),
-            DenseLayout::SampleMajor,
-            None,
-            None,
-            diagnostics,
-        );
+    let block_size = match variant_window {
+        Some(window) => window.len,
+        None => session.source_record_capacity(),
+    };
+    match session.next_dense_block(block_size)? {
+        Some(matrix) => Ok(matrix),
+        None => session.empty_dense_output(),
     }
-
-    let mut values = vec![0.0; n_samples * output_variant_capacity];
-    let mut decoder_state = Plink1DecoderState::new(
-        context.n_source_samples,
-        context.bytes_per_variant,
-        context.selection.samples.len(),
-    );
-    let mut batch = HardcallBatch::new(context.n_source_samples);
-    let mut batch_start = 0_usize;
-    let mut variant_values = Vec::with_capacity(n_samples);
-    let mut missing_indices = Vec::new();
-    let mut retention = RetainedVariantState::new(Some(window));
-    let mut diagnostics = context.selection.diagnostics;
-    let mut output_variant_count = 0_usize;
-    let genotype_filter_plan = filter.genotype_filter_plan();
-
-    for _ in 0..context.n_source_variants {
-        diagnostics.candidate_variants += 1;
-        read_plink1_variant_packed_sequential(
-            context.bed,
-            &mut context.bed_file,
-            context.bytes_per_variant,
-            context.n_source_samples,
-            &mut decoder_state,
-        )?;
-
-        let (retain_variant, _) = evaluate_packed_hardcall_filter::<genoio_core::VariantRecord>(
-            &decoder_state.packed,
-            &context.selection.source_indices,
-            context.all_samples_selected,
-            filter,
-            genotype_filter_plan,
-            None,
-            false,
-        )?;
-        match retention.genotype_decision(retain_variant, &mut diagnostics) {
-            RetentionAction::Include => {
-                batch.push(&decoder_state.packed);
-                output_variant_count += 1;
-                if batch.is_full() {
-                    flush_hardcall_batch_into_sample_major(
-                        &mut batch,
-                        &context.selection.source_indices,
-                        &mut batch_start,
-                        output_variant_capacity,
-                        &mut values,
-                        missing_policy,
-                        &mut variant_values,
-                        &mut missing_indices,
-                    )?;
-                }
-            }
-            RetentionAction::Skip => {}
-            RetentionAction::Stop => break,
-        }
-        if retention.window_is_satisfied() {
-            break;
-        }
-    }
-
-    flush_hardcall_batch_into_sample_major(
-        &mut batch,
-        &context.selection.source_indices,
-        &mut batch_start,
-        output_variant_capacity,
-        &mut values,
-        missing_policy,
-        &mut variant_values,
-        &mut missing_indices,
-    )?;
-    shrink_sample_major_width(
-        &mut values,
-        n_samples,
-        output_variant_capacity,
-        output_variant_count,
-    );
-    diagnostics.retained_variants = output_variant_count;
-
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        output_variant_count,
-        values,
-        DenseLayout::SampleMajor,
-        None,
-        None,
-        diagnostics,
-    )
 }
 
 #[expect(
@@ -664,39 +238,6 @@ pub fn read_plink1_sparse_windowed(
         samples,
         variants,
         diagnostics,
-    )
-}
-
-fn empty_plink1_dense(
-    bed: &Path,
-    bim: &Path,
-    fam: &Path,
-    requested_samples: Option<&[String]>,
-    return_samples: bool,
-    return_variants: bool,
-) -> Result<DenseGenotypeMatrix> {
-    fs::metadata(bed).map_err(|source| GenoioError::Io {
-        path: bed.to_path_buf(),
-        source,
-    })?;
-    fs::metadata(bim).map_err(|source| GenoioError::Io {
-        path: bim.to_path_buf(),
-        source,
-    })?;
-    let all_samples = parse_fam(fam)?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, bed)?;
-    let n_samples = selection.samples.len();
-    let samples =
-        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
-    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        0,
-        Vec::new(),
-        DenseLayout::SampleMajor,
-        samples,
-        variants,
-        selection.diagnostics,
     )
 }
 

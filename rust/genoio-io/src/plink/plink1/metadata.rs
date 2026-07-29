@@ -60,34 +60,6 @@ pub(super) fn parse_bim_metadata(path: &Path) -> Result<VariantMetadataBuffers> 
     Ok(variants)
 }
 
-pub(super) fn parse_bim_source_window(
-    path: &Path,
-    start: usize,
-    expected_records: usize,
-) -> Result<VariantMetadataBuffers> {
-    let mut variants = VariantMetadataBuffers::with_capacity(expected_records);
-    let end = start.saturating_add(expected_records);
-    let mut reader = BimRecordReader::new(path)?;
-    while let Some((source_index, variant)) = reader.next_record()? {
-        if source_index >= end {
-            break;
-        }
-        if source_index >= start {
-            variants.push_record(&variant)?;
-        }
-    }
-    if variants.len() != expected_records {
-        return Err(GenoioError::invalid_source(
-            path,
-            format!(
-                "bim source window contains {} variants but expected {expected_records}",
-                variants.len()
-            ),
-        ));
-    }
-    Ok(variants)
-}
-
 pub(super) fn count_bim_records(path: &Path) -> Result<usize> {
     let mut count = 0_usize;
     for line in open_text_lines(path)? {
