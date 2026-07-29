@@ -2,12 +2,16 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, VariantMetadataBuffers, VariantMetadataView, VariantStats};
+use genoio_core::{
+    DenseDiagnostics, GenoioError, PartialFilterDecision, VariantFilter, VariantMetadataBuffers,
+    VariantMetadataView, VariantStats,
+};
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
 use noodles_vcf::variant::record::{AlternateBases as _, Ids as _};
 
 use crate::error::Result;
+use crate::retention::{MetadataRetentionAction, RetainedVariantState};
 
 use super::super::finite_qual;
 
@@ -23,6 +27,17 @@ pub(super) struct BcfVariantView<'a> {
     alternate_bases: bcf::record::AlternateBases<'a>,
     multi_alt_allele: Option<String>,
     qual: Option<f32>,
+}
+
+pub(super) struct PreparedBcfCandidate<'a> {
+    pub(super) variant: BcfVariantView<'a>,
+    pub(super) needs_genotype_decision: bool,
+}
+
+pub(super) enum BcfCandidateAction<'a> {
+    Skip,
+    Stop,
+    Decode(PreparedBcfCandidate<'a>),
 }
 
 impl VariantMetadataView for BcfVariantView<'_> {
@@ -109,6 +124,63 @@ pub(super) fn bcf_variant_view_from_record<'a>(
         multi_alt_allele,
         qual,
     })
+}
+
+/// Apply candidate-local metadata policy shared by stateless and persistent BCF reads.
+pub(super) fn prepare_bcf_candidate<'a>(
+    path: &Path,
+    header: &'a noodles::Header,
+    record: &'a bcf::Record,
+    variant_filter: Option<&VariantFilter>,
+    retention: &mut RetainedVariantState,
+    diagnostics: &mut DenseDiagnostics,
+) -> Result<BcfCandidateAction<'a>> {
+    let variant = bcf_variant_view_from_record(path, header, record)?;
+    let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+        filter.partial_decision_view(&variant)
+    });
+    match retention.metadata_decision(partial_decision, diagnostics) {
+        MetadataRetentionAction::Skip => return Ok(BcfCandidateAction::Skip),
+        MetadataRetentionAction::Stop => return Ok(BcfCandidateAction::Stop),
+        MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+    }
+    validate_biallelic_variant(path, &variant)?;
+    Ok(BcfCandidateAction::Decode(PreparedBcfCandidate {
+        variant,
+        needs_genotype_decision: matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
+    }))
+}
+
+pub(super) fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
+    path: &Path,
+    variant: &V,
+) -> Result<()> {
+    if variant
+        .alt_allele()
+        .is_some_and(|alt| !alt.is_empty() && !alt.contains(','))
+    {
+        return Ok(());
+    }
+
+    if variant.alt_allele().is_some_and(|alt| alt.contains(',')) {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!(
+                "vcf dense reads require biallelic records; record {}:{} has multi-ALT alleles: multi-ALT records are not supported",
+                variant.chrom(),
+                variant.pos()
+            ),
+        ));
+    }
+
+    Err(GenoioError::invalid_source(
+        path,
+        format!(
+            "vcf dense reads require biallelic records; record {}:{} is not biallelic",
+            variant.chrom(),
+            variant.pos()
+        ),
+    ))
 }
 
 pub(super) fn push_bcf_variant_row(

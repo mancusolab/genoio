@@ -13,23 +13,20 @@ use std::path::Path;
 
 use genoio_core::{
     append_sparse_column, append_sparse_value, finish_sparse_column, reject_sparse_missing,
-    should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError,
-    PartialFilterDecision, RegionPredicate, SampleMetadataBuffers, SparseGenotypeMatrix,
-    VariantFilter, VariantWindow,
+    should_flip_haplotype_to_minor_allele, DenseSampleSelection, GenoioError, RegionPredicate,
+    SampleMetadataBuffers, SparseGenotypeMatrix, VariantFilter, VariantWindow,
 };
 use noodles_vcf as noodles;
 
 use crate::error::Result;
-use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+use crate::retention::{RetainedVariantState, RetentionAction};
 
 use super::super::haplotype_sample_records;
 use super::gt::{
     decode_gt_record, decode_phased_gt_sparse_record, GtDecodeBuffers, GtStatsMode,
     HaplotypeSparseDecodeBuffers,
 };
-use super::record::{
-    skip_variant_for_region, text_variant_view_from_text_record, validate_biallelic_variant,
-};
+use super::record::{prepare_text_candidate, TextCandidateAction};
 use super::{
     dense_output_variant_capacity, VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn,
 };
@@ -75,22 +72,20 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let variant = text_variant_view_from_text_record(path, &record)?;
-        if skip_variant_for_region(&variant, source_region) {
-            continue;
-        }
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-        validate_biallelic_variant(path, &variant)?;
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_text_candidate(
+            path,
+            &record,
+            source_region,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            TextCandidateAction::Skip => continue,
+            TextCandidateAction::Stop => break,
+            TextCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         // Decode into reusable dense scratch first. CSC output still needs the
         // dense column briefly for missing-value rejection and minor-allele
         // flipping to preserve the public sparse contract.
@@ -191,22 +186,20 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let variant = text_variant_view_from_text_record(path, &record)?;
-        if skip_variant_for_region(&variant, source_region) {
-            continue;
-        }
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-        validate_biallelic_variant(path, &variant)?;
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_text_candidate(
+            path,
+            &record,
+            source_region,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            TextCandidateAction::Skip => continue,
+            TextCandidateAction::Stop => break,
+            TextCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         let mut stats_to_attach = None;
         if needs_genotype_decision {
             // Apply genotype-stat filters before phased decoding so rejected

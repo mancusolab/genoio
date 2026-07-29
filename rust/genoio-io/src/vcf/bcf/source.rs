@@ -14,8 +14,8 @@ use std::path::Path;
 use genoio_core::{
     append_sparse_column, reject_sparse_missing, select_samples_source_order, DenseGenotypeMatrix,
     DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
-    PartialFilterDecision, SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
+    SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -24,7 +24,7 @@ use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::hardcall::evaluate_hardcall_counts_filter;
 use crate::matrix::apply_dense_missing_policy_to_variant;
-use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+use crate::retention::{RetainedVariantState, RetentionAction};
 
 use super::super::text::append_public_variant_metadata_from_noodles_variant_record;
 use super::super::{
@@ -33,7 +33,7 @@ use super::super::{
 };
 use super::decode::{decode_ds_record, decode_gt_record, BcfDenseDecodeBuffers, BcfStatsMode};
 use super::haplotype::{decode_phased_haplotype_record, BcfHaplotypeDecodeBuffers};
-use super::record::{bcf_variant_view_from_record, push_bcf_variant_row};
+use super::record::{prepare_bcf_candidate, push_bcf_variant_row, BcfCandidateAction};
 
 const BCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
 
@@ -156,19 +156,20 @@ pub(in crate::vcf) fn read_sparse_windowed(
             break;
         }
 
-        let variant = bcf_variant_view_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision_view(&variant)
-        });
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-
-        validate_biallelic_variant(path, &variant)?;
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_bcf_candidate(
+            path,
+            &header,
+            &record,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            BcfCandidateAction::Skip => continue,
+            BcfCandidateAction::Stop => break,
+            BcfCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         decode_gt_record(
             path,
             &header,
@@ -246,20 +247,20 @@ pub(in crate::vcf) fn read_haplotypes_dense_windowed(
             break;
         }
 
-        let variant = bcf_variant_view_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-
-        validate_biallelic_variant(path, &variant)?;
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_bcf_candidate(
+            path,
+            &header,
+            &record,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            BcfCandidateAction::Skip => continue,
+            BcfCandidateAction::Stop => break,
+            BcfCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         let filter_result = if needs_genotype_decision {
             let filter = variant_filter.ok_or_else(|| {
                 GenoioError::internal_contract("genotype decision requires a variant filter")
@@ -363,19 +364,20 @@ pub(in crate::vcf) fn read_haplotypes_sparse_windowed(
             break;
         }
 
-        let variant = bcf_variant_view_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision_view(&variant)
-        });
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-
-        validate_biallelic_variant(path, &variant)?;
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_bcf_candidate(
+            path,
+            &header,
+            &record,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            BcfCandidateAction::Skip => continue,
+            BcfCandidateAction::Stop => break,
+            BcfCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         let stats = if needs_genotype_decision {
             decode_gt_record(
                 path,
@@ -513,20 +515,20 @@ fn read_dense_windowed_with_field(
             break;
         }
 
-        let variant = bcf_variant_view_from_record(path, &header, &record)?;
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-
-        validate_biallelic_variant(path, &variant)?;
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_bcf_candidate(
+            path,
+            &header,
+            &record,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            BcfCandidateAction::Skip => continue,
+            BcfCandidateAction::Stop => break,
+            BcfCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         match field {
             DenseField::Gt => decode_gt_record(
                 path,
@@ -627,38 +629,6 @@ pub(super) fn evaluate_bcf_gt_filter<V: VariantMetadataView + ?Sized>(
         GenoioError::internal_contract(format!("bcf {context} filter missing stats"))
     })?;
     Ok((filter.evaluate_view(variant, Some(&stats)), Some(stats)))
-}
-
-pub(super) fn validate_biallelic_variant<V: VariantMetadataView + ?Sized>(
-    path: &Path,
-    variant: &V,
-) -> Result<()> {
-    if variant
-        .alt_allele()
-        .is_some_and(|alt| !alt.is_empty() && !alt.contains(','))
-    {
-        return Ok(());
-    }
-
-    if variant.alt_allele().is_some_and(|alt| alt.contains(',')) {
-        return Err(GenoioError::invalid_source(
-            path,
-            format!(
-                "vcf dense reads require biallelic records; record {}:{} has multi-ALT alleles: multi-ALT records are not supported",
-                variant.chrom(),
-                variant.pos()
-            ),
-        ));
-    }
-
-    Err(GenoioError::invalid_source(
-        path,
-        format!(
-            "vcf dense reads require biallelic records; record {}:{} is not biallelic",
-            variant.chrom(),
-            variant.pos()
-        ),
-    ))
 }
 
 pub(super) fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {

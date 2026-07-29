@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use genoio_core::{
     append_sparse_column, reject_sparse_missing, DenseDiagnostics, DenseGenotypeMatrix,
-    DenseLayout, DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataBuffers,
-    SparseGenotypeMatrix, VariantFilter, VariantMetadataBuffers, VariantWindow,
+    DenseLayout, DenseSampleSelection, GenoioError, SampleMetadataBuffers, SparseGenotypeMatrix,
+    VariantFilter, VariantMetadataBuffers, VariantWindow,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as noodles;
@@ -18,19 +18,19 @@ use crate::blocks::{
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::matrix::apply_dense_missing_policy_to_variant;
-use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+use crate::retention::{RetainedVariantState, RetentionAction};
 
 use super::super::haplotype_sample_records;
 use super::decode::{decode_ds_record, decode_gt_record, BcfDenseDecodeBuffers, BcfStatsMode};
 use super::haplotype::{decode_phased_haplotype_record, BcfHaplotypeDecodeBuffers};
-use super::record::{bcf_variant_view_from_record, push_bcf_variant_row};
+use super::record::{prepare_bcf_candidate, push_bcf_variant_row, BcfCandidateAction};
 #[cfg(not(test))]
 use super::source::open_bcf_input;
 #[cfg(test)]
 use super::source::open_bcf_input_with_hooks;
 use super::source::{
     evaluate_bcf_gt_filter, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
-    validate_biallelic_variant, BcfInput,
+    BcfInput,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,22 +191,20 @@ impl BcfBlockSession {
             if !self.read_next_record()? {
                 break;
             }
-            let variant = bcf_variant_view_from_record(&self.path, &self.header, &self.record)?;
-            let partial_decision = self
-                .variant_filter
-                .as_ref()
-                .map_or(PartialFilterDecision::Accept, |filter| {
-                    filter.partial_decision_view(&variant)
-                });
-            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
-                MetadataRetentionAction::Skip => continue,
-                MetadataRetentionAction::Stop => break,
-                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            }
-            validate_biallelic_variant(&self.path, &variant)?;
-
-            let needs_genotype_decision =
-                matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+            let prepared = match prepare_bcf_candidate(
+                &self.path,
+                &self.header,
+                &self.record,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+            )? {
+                BcfCandidateAction::Skip => continue,
+                BcfCandidateAction::Stop => break,
+                BcfCandidateAction::Decode(prepared) => prepared,
+            };
+            let variant = prepared.variant;
+            let needs_genotype_decision = prepared.needs_genotype_decision;
             match field {
                 DenseField::Gt => {
                     decode_gt_record(
@@ -300,22 +298,20 @@ impl BcfBlockSession {
             if !self.read_next_record()? {
                 break;
             }
-            let variant = bcf_variant_view_from_record(&self.path, &self.header, &self.record)?;
-            let partial_decision = self
-                .variant_filter
-                .as_ref()
-                .map_or(PartialFilterDecision::Accept, |filter| {
-                    filter.partial_decision_view(&variant)
-                });
-            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
-                MetadataRetentionAction::Skip => continue,
-                MetadataRetentionAction::Stop => break,
-                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            }
-            validate_biallelic_variant(&self.path, &variant)?;
-
-            let needs_genotype_decision =
-                matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+            let prepared = match prepare_bcf_candidate(
+                &self.path,
+                &self.header,
+                &self.record,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+            )? {
+                BcfCandidateAction::Skip => continue,
+                BcfCandidateAction::Stop => break,
+                BcfCandidateAction::Decode(prepared) => prepared,
+            };
+            let variant = prepared.variant;
+            let needs_genotype_decision = prepared.needs_genotype_decision;
             decode_gt_record(
                 &self.path,
                 &self.header,
@@ -372,22 +368,20 @@ impl BcfBlockSession {
             if !self.read_next_record()? {
                 break;
             }
-            let variant = bcf_variant_view_from_record(&self.path, &self.header, &self.record)?;
-            let partial_decision = self
-                .variant_filter
-                .as_ref()
-                .map_or(PartialFilterDecision::Accept, |filter| {
-                    filter.partial_decision_view(&variant)
-                });
-            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
-                MetadataRetentionAction::Skip => continue,
-                MetadataRetentionAction::Stop => break,
-                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            }
-            validate_biallelic_variant(&self.path, &variant)?;
-
-            let needs_genotype_decision =
-                matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+            let prepared = match prepare_bcf_candidate(
+                &self.path,
+                &self.header,
+                &self.record,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+            )? {
+                BcfCandidateAction::Skip => continue,
+                BcfCandidateAction::Stop => break,
+                BcfCandidateAction::Decode(prepared) => prepared,
+            };
+            let variant = prepared.variant;
+            let needs_genotype_decision = prepared.needs_genotype_decision;
             let mut stats_to_attach = None;
             if needs_genotype_decision {
                 decode_gt_record(
@@ -464,22 +458,20 @@ impl BcfBlockSession {
             if !self.read_next_record()? {
                 break;
             }
-            let variant = bcf_variant_view_from_record(&self.path, &self.header, &self.record)?;
-            let partial_decision = self
-                .variant_filter
-                .as_ref()
-                .map_or(PartialFilterDecision::Accept, |filter| {
-                    filter.partial_decision_view(&variant)
-                });
-            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
-                MetadataRetentionAction::Skip => continue,
-                MetadataRetentionAction::Stop => break,
-                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            }
-            validate_biallelic_variant(&self.path, &variant)?;
-
-            let needs_genotype_decision =
-                matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+            let prepared = match prepare_bcf_candidate(
+                &self.path,
+                &self.header,
+                &self.record,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+            )? {
+                BcfCandidateAction::Skip => continue,
+                BcfCandidateAction::Stop => break,
+                BcfCandidateAction::Decode(prepared) => prepared,
+            };
+            let variant = prepared.variant;
+            let needs_genotype_decision = prepared.needs_genotype_decision;
             let mut stats_to_attach = None;
             if needs_genotype_decision {
                 decode_gt_record(
@@ -845,7 +837,10 @@ mod tests {
     use noodles_core::Position;
     use noodles_vcf::{
         header::record::value::{
-            map::{Contig, Format},
+            map::{
+                format::{Number, Type},
+                Contig, Format,
+            },
             Map,
         },
         variant::{
@@ -882,13 +877,49 @@ mod tests {
             .build()
     }
 
+    fn record_with_ds(
+        chrom: &str,
+        id: &str,
+        pos: usize,
+        genotypes: [&str; 2],
+        dosages: [Option<f32>; 2],
+    ) -> noodles_vcf::variant::RecordBuf {
+        let ids: Ids = [id.to_owned()].into_iter().collect();
+        let keys: Keys = [String::from(key::GENOTYPE), "DS".to_owned()]
+            .into_iter()
+            .collect();
+        let samples = Samples::new(
+            keys,
+            genotypes
+                .into_iter()
+                .zip(dosages)
+                .map(|(gt, ds)| vec![Some(Value::from(gt)), ds.map(Value::from)])
+                .collect(),
+        );
+        noodles_vcf::variant::RecordBuf::builder()
+            .set_reference_sequence_name(chrom)
+            .set_variant_start(Position::try_from(pos).expect("position should be valid"))
+            .set_ids(ids)
+            .set_reference_bases("A")
+            .set_alternate_bases(AlternateBases::from(vec!["G".to_owned()]))
+            .set_samples(samples)
+            .build()
+    }
+
     fn write_fixture(path: &Path, records: &[noodles_vcf::variant::RecordBuf]) {
         let file = fs::File::create(path).expect("test BCF should be created");
         let mut writer = noodles_bcf::io::Writer::new(file);
+        let ds_format = Map::<Format>::builder()
+            .set_number(Number::Count(1))
+            .set_type(Type::Float)
+            .set_description("Expected alternate allele dosage")
+            .build()
+            .expect("DS format should build");
         let header = noodles_vcf::Header::builder()
             .add_contig("1", Map::<Contig>::new())
             .add_contig("2", Map::<Contig>::new())
             .add_format(key::GENOTYPE, Map::<Format>::from(key::GENOTYPE))
+            .add_format("DS", ds_format)
             .add_sample_name("s1")
             .add_sample_name("s2")
             .build();
@@ -924,10 +955,376 @@ mod tests {
         .expect("chromosome filter should parse")
     }
 
+    fn stateless_block(
+        path: &Path,
+        options: &BlockReadOptions,
+        start: usize,
+        len: usize,
+    ) -> BlockOutput {
+        let window = Some(VariantWindow { start, len });
+        match (options.matrix_kind, options.sparse, options.dosage_source) {
+            (MatrixKind::Genotype, false, DosageSource::Hardcall) => BlockOutput::Dense(
+                crate::vcf::bcf::source::read_dense_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.missing_policy,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless dense GT window should decode"),
+            ),
+            (MatrixKind::Genotype, false, DosageSource::Dosage) => BlockOutput::Dense(
+                crate::vcf::bcf::source::read_dosage_dense_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.missing_policy,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless dense DS window should decode"),
+            ),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall) => BlockOutput::Sparse(
+                crate::vcf::bcf::source::read_sparse_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless sparse GT window should decode"),
+            ),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall) => BlockOutput::Dense(
+                crate::vcf::bcf::source::read_haplotypes_dense_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.missing_policy,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless dense haplotype window should decode"),
+            ),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall) => BlockOutput::Sparse(
+                crate::vcf::bcf::source::read_haplotypes_sparse_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless sparse haplotype window should decode"),
+            ),
+            _ => panic!("unsupported stateless BCF test mode"),
+        }
+    }
+
+    fn output_width(output: &BlockOutput) -> usize {
+        match output {
+            BlockOutput::Dense(matrix) => matrix.n_variants,
+            BlockOutput::Sparse(matrix) => matrix.n_cols,
+        }
+    }
+
     #[test]
     fn pbr_rust_bcf_001_concrete_session_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<BcfBlockSession>();
+    }
+
+    #[test]
+    fn pbr_rust_bcf_001_002_five_mode_blocks_match_stateless_windows_and_probes() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let path = dir.path().join("matrix.bcf");
+        write_fixture(
+            &path,
+            &[
+                record_with_ds("1", "rs1", 10, ["0|0", "0|1"], [Some(0.1), Some(0.9)]),
+                record_with_ds(
+                    "2",
+                    "metadata_drop",
+                    20,
+                    ["0|1", "1|1"],
+                    [Some(1.2), Some(1.8)],
+                ),
+                record_with_ds("1", "rs3", 30, ["1|1", "0|0"], [Some(1.9), Some(0.2)]),
+                record_with_ds("1", "rs4", 40, ["0|1", "0|0"], [Some(0.8), Some(0.1)]),
+            ],
+        );
+        let modes = [
+            (MatrixKind::Genotype, false, DosageSource::Hardcall),
+            (MatrixKind::Genotype, false, DosageSource::Dosage),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall),
+        ];
+
+        for (matrix_kind, sparse, dosage_source) in modes {
+            for block_size in [1, 2, 3] {
+                let probe = BcfWorkProbe::default();
+                let mut mode_options = options(Some(chrom_filter("1")));
+                mode_options.matrix_kind = matrix_kind;
+                mode_options.sparse = sparse;
+                mode_options.dosage_source = dosage_source;
+                mode_options.missing_policy = if sparse {
+                    DenseMissingPolicy::Raise
+                } else {
+                    DenseMissingPolicy::Impute
+                };
+                mode_options.requested_samples = Some(vec!["s2".to_owned(), "s1".to_owned()]);
+                let mut session = BcfBlockSession::open_with_probe(
+                    path.clone(),
+                    mode_options.clone(),
+                    probe.clone(),
+                )
+                .expect("BCF mode session should open");
+                let mut start = 0;
+                while let Some(actual) = session
+                    .next_block(block_size)
+                    .expect("BCF mode block should decode")
+                {
+                    let expected = stateless_block(&path, &mode_options, start, block_size);
+                    assert_eq!(
+                        actual, expected,
+                        "persistent BCF output must equal the stateless window oracle"
+                    );
+                    start += output_width(&actual);
+                }
+                assert_eq!(start, 3);
+                let at_eof = probe.snapshot();
+                assert!(session
+                    .next_block(block_size)
+                    .expect("BCF mode EOF should be sticky")
+                    .is_none());
+                assert_eq!(probe.snapshot(), at_eof);
+                drop(session);
+
+                let counts = probe.snapshot();
+                assert_eq!(counts.source_opens, 1);
+                assert_eq!(counts.header_parses, 1);
+                assert_eq!(counts.read_record_calls, 5);
+                assert_eq!(counts.candidate_visits, 4);
+                match (matrix_kind, dosage_source) {
+                    (MatrixKind::Genotype, DosageSource::Hardcall) => {
+                        assert_eq!(counts.gt_decodes, 3);
+                        assert_eq!(counts.phase_decodes, 0);
+                    }
+                    (MatrixKind::Genotype, DosageSource::Dosage) => {
+                        assert_eq!(counts.ds_decodes, 3);
+                    }
+                    (MatrixKind::Haplotype, DosageSource::Hardcall) => {
+                        assert_eq!(counts.gt_decodes, 0);
+                        assert_eq!(counts.phase_decodes, 3);
+                    }
+                    (_, DosageSource::Dosage) => unreachable!(),
+                }
+                assert_eq!(
+                    counts.max_dense_output_len,
+                    if sparse {
+                        0
+                    } else {
+                        let rows = if matrix_kind == MatrixKind::Haplotype {
+                            4
+                        } else {
+                            2
+                        };
+                        rows * block_size
+                    }
+                );
+                assert_eq!(
+                    counts.max_sparse_indptr_len,
+                    if sparse { block_size + 1 } else { 0 }
+                );
+                assert_eq!(counts.drops, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn pbr_rust_bcf_001_002_missing_policy_and_sparse_rejection_are_delayed() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let path = dir.path().join("missing.bcf");
+        write_fixture(
+            &path,
+            &[
+                record_with_ds("1", "valid", 10, ["0|0", "0|1"], [Some(0.1), Some(0.9)]),
+                record_with_ds("1", "missing", 20, ["0|.", "0|1"], [None, Some(1.0)]),
+                record_with_ds("1", "tail", 30, ["1|1", "0|0"], [Some(1.9), Some(0.2)]),
+            ],
+        );
+
+        for (matrix_kind, dosage_source) in [
+            (MatrixKind::Genotype, DosageSource::Hardcall),
+            (MatrixKind::Genotype, DosageSource::Dosage),
+        ] {
+            for missing_policy in [DenseMissingPolicy::Nan, DenseMissingPolicy::Impute] {
+                let mut mode_options = options(None);
+                mode_options.matrix_kind = matrix_kind;
+                mode_options.dosage_source = dosage_source;
+                mode_options.missing_policy = missing_policy;
+                let mut session = BcfBlockSession::open(path.clone(), mode_options)
+                    .expect("dense missing-policy session should open");
+                let BlockOutput::Dense(matrix) = session
+                    .next_block(3)
+                    .expect("dense missing-policy block should decode")
+                    .expect("dense missing-policy block should exist")
+                else {
+                    panic!("dense missing-policy route should return dense output");
+                };
+                if missing_policy == DenseMissingPolicy::Nan {
+                    assert!(matrix.values.iter().any(|value| value.is_nan()));
+                } else {
+                    assert!(matrix.values.iter().all(|value| value.is_finite()));
+                }
+            }
+        }
+
+        for (matrix_kind, sparse, dosage_source) in [
+            (MatrixKind::Genotype, false, DosageSource::Hardcall),
+            (MatrixKind::Genotype, false, DosageSource::Dosage),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall),
+        ] {
+            let probe = BcfWorkProbe::default();
+            let mut mode_options = options(None);
+            mode_options.matrix_kind = matrix_kind;
+            mode_options.sparse = sparse;
+            mode_options.dosage_source = dosage_source;
+            mode_options.missing_policy = DenseMissingPolicy::Raise;
+            let mut session =
+                BcfBlockSession::open_with_probe(path.clone(), mode_options, probe.clone())
+                    .expect("delayed missing-error session should open");
+            assert!(session
+                .next_block(1)
+                .expect("first valid BCF block should decode")
+                .is_some());
+            let error = session
+                .next_block(1)
+                .expect_err("second BCF block should expose retained missing data");
+            if matrix_kind == MatrixKind::Haplotype {
+                assert!(error.to_string().contains("unphased"));
+            } else {
+                assert!(error.to_string().contains("missing"));
+            }
+            let after_error = probe.snapshot();
+            assert!(session
+                .next_block(1)
+                .expect("failed BCF session should be sticky")
+                .is_none());
+            assert_eq!(probe.snapshot(), after_error);
+            assert_eq!(after_error.read_record_calls, 2);
+            assert_eq!(after_error.candidate_visits, 2);
+        }
+    }
+
+    #[test]
+    fn pbr_rust_bcf_001_002_matrix_only_all_filtered_early_drop_and_setup_errors() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let path = dir.path().join("lifecycle.bcf");
+        write_fixture(
+            &path,
+            &[
+                record_with_ds("1", "rs1", 10, ["0|0", "0|1"], [Some(0.1), Some(0.9)]),
+                record_with_ds("1", "rs2", 20, ["0|1", "1|1"], [Some(1.2), Some(1.8)]),
+                record_with_ds("1", "rs3", 30, ["1|1", "0|0"], [Some(1.9), Some(0.2)]),
+            ],
+        );
+        let modes = [
+            (MatrixKind::Genotype, false, DosageSource::Hardcall),
+            (MatrixKind::Genotype, false, DosageSource::Dosage),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall),
+        ];
+
+        for (matrix_kind, sparse, dosage_source) in modes {
+            let early_probe = BcfWorkProbe::default();
+            let mut matrix_only = options(None);
+            matrix_only.matrix_kind = matrix_kind;
+            matrix_only.sparse = sparse;
+            matrix_only.dosage_source = dosage_source;
+            matrix_only.return_samples = false;
+            matrix_only.return_variants = false;
+            let mut early =
+                BcfBlockSession::open_with_probe(path.clone(), matrix_only, early_probe.clone())
+                    .expect("matrix-only BCF session should open");
+            let first = early
+                .next_block(1)
+                .expect("matrix-only BCF block should decode")
+                .expect("matrix-only BCF block should exist");
+            match first {
+                BlockOutput::Dense(matrix) => {
+                    assert!(matrix.samples.is_none());
+                    assert!(matrix.variants.is_none());
+                }
+                BlockOutput::Sparse(matrix) => {
+                    assert!(matrix.samples.is_none());
+                    assert!(matrix.variants.is_none());
+                }
+            }
+            drop(early);
+            let early_counts = early_probe.snapshot();
+            assert_eq!(early_counts.read_record_calls, 1);
+            assert_eq!(early_counts.candidate_visits, 1);
+            assert_eq!(early_counts.drops, 1);
+
+            let filtered_probe = BcfWorkProbe::default();
+            let mut all_filtered = options(Some(chrom_filter("absent")));
+            all_filtered.matrix_kind = matrix_kind;
+            all_filtered.sparse = sparse;
+            all_filtered.dosage_source = dosage_source;
+            let mut filtered = BcfBlockSession::open_with_probe(
+                path.clone(),
+                all_filtered,
+                filtered_probe.clone(),
+            )
+            .expect("all-filtered BCF session should open");
+            assert!(filtered
+                .next_block(1)
+                .expect("all-filtered BCF session should reach EOF")
+                .is_none());
+            let counts = filtered_probe.snapshot();
+            assert_eq!(counts.read_record_calls, 4);
+            assert_eq!(counts.candidate_visits, 3);
+            assert_eq!(counts.gt_decodes, 0);
+            assert_eq!(counts.ds_decodes, 0);
+            assert_eq!(counts.phase_decodes, 0);
+        }
+
+        let missing_probe = BcfWorkProbe::default();
+        let missing_path = dir.path().join("missing-source.bcf");
+        assert!(BcfBlockSession::open_with_probe(
+            missing_path,
+            options(None),
+            missing_probe.clone()
+        )
+        .is_err());
+        assert_eq!(missing_probe.snapshot(), BcfWorkCounts::default());
+
+        let invalid_probe = BcfWorkProbe::default();
+        let invalid_path = dir.path().join("invalid-header.bcf");
+        fs::write(&invalid_path, b"not a BCF header\n")
+            .expect("invalid BCF fixture should be written");
+        assert!(BcfBlockSession::open_with_probe(
+            invalid_path,
+            options(None),
+            invalid_probe.clone()
+        )
+        .is_err());
+        assert_eq!(
+            invalid_probe.snapshot(),
+            BcfWorkCounts {
+                source_opens: 1,
+                ..BcfWorkCounts::default()
+            }
+        );
     }
 
     #[test]

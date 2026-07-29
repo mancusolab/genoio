@@ -14,16 +14,15 @@ use std::path::Path;
 
 use genoio_core::{
     DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
-    PartialFilterDecision, RegionPredicate, SampleMetadataBuffers, SourceCapabilities,
-    SparseGenotypeMatrix, VariantFilter, VariantMetadataBuffers, VariantMetadataView, VariantStats,
-    VariantWindow,
+    RegionPredicate, SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix,
+    VariantFilter, VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
 };
 use noodles_vcf as noodles;
 
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::hardcall::evaluate_hardcall_counts_filter;
-use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+use crate::retention::{RetainedVariantState, RetentionAction};
 
 use self::ds::{decode_ds_record, DsDecodeBuffers};
 use self::gt::{
@@ -33,8 +32,7 @@ use self::gt::{
 use self::header::read_sample_records_from_header;
 use self::output::TextDenseOutput;
 use self::record::{
-    append_public_variant_metadata_from_text_record, skip_variant_for_region,
-    text_variant_view_from_text_record, validate_biallelic_variant,
+    append_public_variant_metadata_from_text_record, prepare_text_candidate, TextCandidateAction,
 };
 use self::source::{
     ensure_text_indexed_vcf_supported, ensure_text_vcf_supported, open_compressed_reader,
@@ -1233,25 +1231,22 @@ fn read_dense_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let variant = text_variant_view_from_text_record(path, &record)?;
-        // Tabix/CSI chunks can include neighboring records from the same BGZF
-        // block. Keep the text backend's exact region contract independent of the
-        // lower-level chunk boundaries.
-        if skip_variant_for_region(&variant, source.region) {
-            continue;
-        }
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-        validate_biallelic_variant(path, &variant)?;
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        // Indexed chunks can include neighboring records; shared candidate
+        // preparation retains exact region post-filtering before any decode.
+        let prepared = match prepare_text_candidate(
+            path,
+            &record,
+            source.region,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            TextCandidateAction::Skip => continue,
+            TextCandidateAction::Stop => break,
+            TextCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         // `record.samples()` borrows noodles' reusable record buffer, so decode
         // selected GTs completely before the next `read_record` call.
         let stats_mode = match (needs_genotype_decision, metadata_return.matrix_only()) {
@@ -1380,23 +1375,22 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
             break;
         }
 
-        let variant = text_variant_view_from_text_record(path, &record)?;
-        if skip_variant_for_region(&variant, source.region) {
-            continue;
-        }
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-        validate_biallelic_variant(path, &variant)?;
+        let prepared = match prepare_text_candidate(
+            path,
+            &record,
+            source.region,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            TextCandidateAction::Skip => continue,
+            TextCandidateAction::Stop => break,
+            TextCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
 
         decode_ds_record(path, &record, &selection.source_indices, &mut decoded)?;
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         if needs_genotype_decision {
             let filter = variant_filter.ok_or_else(|| {
                 GenoioError::internal_contract("genotype decision requires a variant filter")
@@ -1513,22 +1507,20 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
             break;
         }
 
-        let variant = text_variant_view_from_text_record(path, &record)?;
-        if skip_variant_for_region(&variant, source_region) {
-            continue;
-        }
-        let partial_decision = variant_filter
-            .map(|filter| filter.partial_decision_view(&variant))
-            .unwrap_or(PartialFilterDecision::Accept);
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => break,
-        }
-        validate_biallelic_variant(path, &variant)?;
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+        let prepared = match prepare_text_candidate(
+            path,
+            &record,
+            source_region,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+        )? {
+            TextCandidateAction::Skip => continue,
+            TextCandidateAction::Stop => break,
+            TextCandidateAction::Decode(prepared) => prepared,
+        };
+        let variant = prepared.variant;
+        let needs_genotype_decision = prepared.needs_genotype_decision;
         if needs_genotype_decision {
             // Genotype-stat filters are evaluated on diploid dosage before
             // enforcing phased output. This lets filters drop unphased records
