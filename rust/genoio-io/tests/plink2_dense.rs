@@ -484,6 +484,163 @@ fn pbr_rust_plink2_001_header_and_later_pvar_errors_keep_their_boundaries() {
         .contains("invalid position"));
 }
 
+#[test]
+fn pbr_rust_plink2_002_ld_base_survives_a_rejected_record_across_blocks() {
+    let dir = unique_dir("pbr-plink2-ld-rejected-base");
+    let pgen_bytes = variable_width_pgen(&[0, 0, 2], &[&[0x24], &[0x06], &[0]], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "\
+#CHROM POS ID REF ALT
+1 10 rs1 A G
+2 20 rejected_base C T
+1 30 rs3 G A
+",
+    );
+    let filter = VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "chrom",
+        "params": {"value": "1"}
+    }))
+    .expect("metadata filter should parse");
+
+    let expected_dense = genoio_io::read_plink2_dense(&pgen, &pvar, &psam, None, Some(&filter))
+        .expect("whole LD-compressed dense read should decode");
+    let dense_blocks = collect_plink2_blocks(
+        &pgen,
+        &pvar,
+        &psam,
+        plink2_block_options(
+            false,
+            None,
+            Some(filter.clone()),
+            DenseMissingPolicy::Nan,
+            true,
+        ),
+        1,
+    )
+    .into_iter()
+    .map(|block| match block {
+        BlockOutput::Dense(matrix) => matrix,
+        BlockOutput::Sparse(_) => panic!("dense PLINK2 reader returned a sparse block"),
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        dense_blocks
+            .iter()
+            .map(|block| block.n_variants)
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    assert_values_with_nan(
+        &concatenate_plink2_dense_blocks(&dense_blocks),
+        &dense_values_sample_major(&expected_dense),
+    );
+    assert_eq!(
+        dense_values_sample_major(&dense_blocks[1]),
+        vec![2.0, 1.0, 0.0]
+    );
+
+    let expected_sparse = genoio_io::read_plink2_sparse(&pgen, &pvar, &psam, None, Some(&filter))
+        .expect("whole LD-compressed sparse read should decode");
+    let sparse_blocks = collect_plink2_blocks(
+        &pgen,
+        &pvar,
+        &psam,
+        plink2_block_options(true, None, Some(filter), DenseMissingPolicy::Raise, true),
+        1,
+    )
+    .into_iter()
+    .map(|block| match block {
+        BlockOutput::Sparse(matrix) => matrix,
+        BlockOutput::Dense(_) => panic!("sparse PLINK2 reader returned a dense block"),
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        concatenate_plink2_sparse_blocks(&sparse_blocks),
+        csc_to_dense(&expected_sparse)
+    );
+}
+
+#[test]
+fn pbr_rust_plink2_002_variable_width_pvar_errors_are_delayed_and_counts_are_validated() {
+    let dir = unique_dir("pbr-plink2-variable-pvar-boundaries");
+    let pgen_bytes = variable_width_pgen(&[0, 0, 0], &[&[0x24], &[0x11], &[0x06]], 3);
+    let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
+        &dir,
+        &pgen_bytes,
+        "#CHROM POS ID REF ALT\n1 10 rs1 A G\n1 bad rs2 C T\n1 30 rs3 G A\n",
+    );
+    let options = plink2_block_options(false, None, None, DenseMissingPolicy::Nan, true);
+    let mut malformed = BlockReader::open(
+        BlockSource::Plink2 {
+            pgen: pgen.clone(),
+            pvar: pvar.clone(),
+            psam: psam.clone(),
+        },
+        options.clone(),
+        1,
+    )
+    .expect("malformed-later PVAR session should open");
+    assert!(malformed
+        .next_block()
+        .expect("first valid variable-width block should decode")
+        .is_some());
+    assert!(malformed
+        .next_block()
+        .expect_err("malformed later variable-width PVAR row should fail when reached")
+        .to_string()
+        .contains("invalid position"));
+
+    write_text(&pvar, "#CHROM POS ID REF ALT\n1 10 rs1 A G\n1 20 rs2 C T\n");
+    let mut short = BlockReader::open(
+        BlockSource::Plink2 {
+            pgen: pgen.clone(),
+            pvar: pvar.clone(),
+            psam: psam.clone(),
+        },
+        options.clone(),
+        2,
+    )
+    .expect("short-PVAR session should open");
+    assert!(short
+        .next_block()
+        .expect("available short-PVAR prefix should decode")
+        .is_some());
+    assert!(short
+        .next_block()
+        .expect_err("short PVAR should fail when the missing row is reached")
+        .to_string()
+        .contains("fewer"));
+
+    write_text(
+        &pvar,
+        "#CHROM POS ID REF ALT\n1 10 rs1 A G\n1 20 rs2 C T\n1 30 rs3 G A\n1 40 extra A G\n",
+    );
+    let mut long = BlockReader::open(BlockSource::Plink2 { pgen, pvar, psam }, options, 3)
+        .expect("long-PVAR session should open");
+    assert!(long
+        .next_block()
+        .expect_err("long PVAR should fail at terminal count validation")
+        .to_string()
+        .contains("exceeds"));
+}
+
+#[test]
+fn pbr_rust_plink2_002_invalid_variable_width_header_table_fails_during_open() {
+    let (_dir, pgen, pvar, psam) =
+        write_bad_variable_width_block_offset_fixture("pbr-plink2-session-bad-header-table");
+    let error = BlockReader::open(
+        BlockSource::Plink2 { pgen, pvar, psam },
+        plink2_block_options(false, None, None, DenseMissingPolicy::Nan, true),
+        1,
+    )
+    .expect_err("invalid variable-width header table should fail during session open");
+
+    assert!(error.to_string().contains("block offset"));
+}
+
 fn write_bad_variable_width_block_offset_fixture(
     name: &str,
 ) -> (TestDir, PathBuf, PathBuf, PathBuf) {

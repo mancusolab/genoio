@@ -59,6 +59,7 @@ pub(crate) struct Plink2BlockSession {
     selected_values: Vec<f32>,
     missing_indices: Vec<usize>,
     eof: bool,
+    failed: bool,
     #[cfg(test)]
     probe: Option<Plink2WorkProbe>,
 }
@@ -98,11 +99,6 @@ impl Plink2BlockSession {
             probe.record_pgen_open();
         }
         let header = read_supported_pgen_header_from_file(&pgen, &mut pgen_reader)?;
-        if matches!(header.layout, PgenLayout::VariableWidth) {
-            return Err(GenoioError::unsupported(
-                "variable-width plink2 block reads are not implemented yet",
-            ));
-        }
 
         #[cfg(test)]
         let all_samples = if let Some(probe) = probe.as_ref() {
@@ -159,6 +155,7 @@ impl Plink2BlockSession {
             selected_values,
             missing_indices: Vec::new(),
             eof,
+            failed: false,
             #[cfg(test)]
             probe,
         })
@@ -176,13 +173,20 @@ impl Plink2BlockSession {
     }
 
     pub(crate) fn next_block(&mut self, block_size: usize) -> Result<Option<BlockOutput>> {
-        if self.sparse {
+        if self.eof || self.failed {
+            return Ok(None);
+        }
+        let result = if self.sparse {
             self.next_sparse_block(block_size)
                 .map(|matrix| matrix.map(BlockOutput::Sparse))
         } else {
             self.next_dense_block(block_size)
                 .map(|matrix| matrix.map(BlockOutput::Dense))
+        };
+        if result.is_err() {
+            self.failed = true;
         }
+        result
     }
 
     fn next_dense_block(&mut self, block_size: usize) -> Result<Option<DenseGenotypeMatrix>> {
@@ -636,6 +640,44 @@ mod tests {
         (pgen, pvar, psam)
     }
 
+    fn write_variable_fixture(
+        dir: &Path,
+        record_types: &[u8],
+        records: &[&[u8]],
+        variants: &str,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let pgen = dir.join("variable.pgen");
+        let pvar = dir.join("variable.pvar");
+        let psam = dir.join("variable.psam");
+        let header_len = 12 + 8 + record_types.len() + records.len();
+        let mut pgen_bytes = vec![0x6c, 0x1b, 0x10];
+        pgen_bytes.extend(
+            u32::try_from(records.len())
+                .expect("test variant count fits u32")
+                .to_le_bytes(),
+        );
+        pgen_bytes.extend(2_u32.to_le_bytes());
+        pgen_bytes.push(0x04);
+        pgen_bytes.extend(
+            u64::try_from(header_len)
+                .expect("test header length fits u64")
+                .to_le_bytes(),
+        );
+        pgen_bytes.extend(record_types);
+        pgen_bytes.extend(
+            records.iter().map(|record| {
+                u8::try_from(record.len()).expect("test record length fits one byte")
+            }),
+        );
+        for record in records {
+            pgen_bytes.extend(*record);
+        }
+        fs::write(&pgen, pgen_bytes).expect("variable pgen fixture should be written");
+        write_text(&pvar, variants);
+        write_text(&psam, "#IID\nS1\nS2\n");
+        (pgen, pvar, psam)
+    }
+
     fn options(filter: Option<VariantFilter>) -> BlockReadOptions {
         BlockReadOptions {
             matrix_kind: MatrixKind::Genotype,
@@ -797,5 +839,94 @@ mod tests {
     fn pbr_rust_plink2_001_session_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<Plink2BlockSession>();
+        assert_send::<crate::blocks::BlockReader>();
+    }
+
+    #[test]
+    fn pbr_rust_plink2_002_probe_tracks_rejected_non_ld_base_without_prefetch() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_variable_fixture(
+            dir.path(),
+            &[0, 0, 2],
+            &[&[0x04], &[0x02], &[0]],
+            "#CHROM POS ID REF ALT\n1 1 rs1 A G\n2 2 base A G\n1 3 rs3 A G\n",
+        );
+        let probe = Plink2WorkProbe::default();
+        let mut session = Plink2BlockSession::open_with_probe(
+            pgen,
+            pvar,
+            psam,
+            options(Some(chrom_filter("1"))),
+            probe.clone(),
+        )
+        .expect("persistent variable-width plink2 session should open");
+
+        assert!(session
+            .next_block(1)
+            .expect("first variable-width block should decode")
+            .is_some());
+        let after_first = probe.snapshot();
+        assert_eq!(after_first.candidate_visits, 1);
+        assert_eq!(after_first.main_decodes, 1);
+
+        let second = session
+            .next_block(1)
+            .expect("LD-dependent variable-width block should decode")
+            .expect("second retained block should exist");
+        let crate::blocks::BlockOutput::Dense(second) = second else {
+            panic!("dense session should return a dense block");
+        };
+        assert_eq!(second.values, vec![2.0, 0.0]);
+        let after_second = probe.snapshot();
+        assert_eq!(after_second.candidate_visits, 3);
+        assert_eq!(after_second.main_decodes, 3);
+        assert_eq!(after_second.auxiliary_decodes, 0);
+    }
+
+    #[test]
+    fn pbr_rust_plink2_002_failed_decode_preserves_ld_base_and_terminates_without_prefetch() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_variable_fixture(
+            dir.path(),
+            &[0, 4, 2],
+            &[&[0x04], &[1], &[0]],
+            "#CHROM POS ID REF ALT\n1 1 rs1 A G\n1 2 bad A G\n1 3 rs3 A G\n",
+        );
+        let probe = Plink2WorkProbe::default();
+        let mut session =
+            Plink2BlockSession::open_with_probe(pgen, pvar, psam, options(None), probe.clone())
+                .expect("persistent variable-width plink2 session should open");
+
+        assert!(session
+            .next_block(1)
+            .expect("first variable-width block should decode")
+            .is_some());
+        let error = session
+            .next_block(1)
+            .expect_err("malformed later main track should fail");
+        assert!(matches!(
+            error,
+            genoio_core::GenoioError::InvalidSource { .. }
+        ));
+        let at_error = probe.snapshot();
+        assert_eq!(at_error.candidate_visits, 2);
+        assert_eq!(at_error.main_decodes, 1);
+        assert!(session
+            .next_block(1)
+            .expect("failed session should be terminal")
+            .is_none());
+        assert_eq!(probe.snapshot(), at_error);
+
+        // Resume only inside this private test to prove the failed non-LD
+        // decode did not replace the prior valid LD base.
+        session.failed = false;
+        let third = session
+            .next_block(1)
+            .expect("test-only resumed session should decode prior-base LD record")
+            .expect("third retained block should exist");
+        let crate::blocks::BlockOutput::Dense(third) = third else {
+            panic!("dense session should return a dense block");
+        };
+        assert_eq!(third.values, vec![0.0, 1.0]);
     }
 }

@@ -146,6 +146,36 @@ fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -
     bytes
 }
 
+fn variable_width_two_block_pgen(n_samples: u32) -> Vec<u8> {
+    const FIRST_BLOCK_VARIANTS: usize = 65_536;
+    let n_variants = FIRST_BLOCK_VARIANTS + 1;
+    let header_len = 12 + 16 + FIRST_BLOCK_VARIANTS * 2 + 2;
+    let mut bytes = vec![0x6c, 0x1b, 0x10];
+    bytes.extend(
+        u32::try_from(n_variants)
+            .expect("test variant count fits u32")
+            .to_le_bytes(),
+    );
+    bytes.extend(n_samples.to_le_bytes());
+    bytes.push(0x04);
+    bytes.extend(
+        u64::try_from(header_len)
+            .expect("test header length fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(
+        u64::try_from(header_len + FIRST_BLOCK_VARIANTS)
+            .expect("test second block offset fits u64")
+            .to_le_bytes(),
+    );
+    bytes.extend(std::iter::repeat_n(0_u8, FIRST_BLOCK_VARIANTS));
+    bytes.extend(std::iter::repeat_n(1_u8, FIRST_BLOCK_VARIANTS));
+    bytes.push(0);
+    bytes.push(1);
+    bytes.extend(std::iter::repeat_n(0_u8, n_variants));
+    bytes
+}
+
 fn write_plink2_filter_window_stop_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let pgen = dir.join("tiny.pgen");
     let pvar = dir.join("tiny.pvar");
@@ -472,6 +502,66 @@ fn plink2_dense_filtered_window_stops_after_requested_retained_variants() {
     assert_eq!(variant_ids(variants(&block.variants)), vec!["rs1"]);
     assert_eq!(block.values, vec![1.0, 0.0, 1.0]);
     assert_eq!(block.diagnostics.candidate_variants, 1);
+}
+
+#[test]
+fn pbr_rust_plink2_002_persistent_session_crosses_variable_width_header_blocks() {
+    const FIRST_BLOCK_VARIANTS: usize = 65_536;
+    let dir = unique_dir("pbr-plink2-variable-header-blocks");
+    let pgen = dir.join("two_blocks.pgen");
+    let pvar = dir.join("two_blocks.pvar");
+    let psam = dir.join("two_blocks.psam");
+    fs::write(&pgen, variable_width_two_block_pgen(3))
+        .expect("two-block pgen fixture should be written");
+    let pvar_body = (0..=FIRST_BLOCK_VARIANTS)
+        .map(|index| format!("1 {} rs{} A G\n", index + 1, index + 1))
+        .collect::<String>();
+    write_text(&pvar, &format!("#CHROM POS ID REF ALT\n{pvar_body}"));
+    write_text(&psam, "#IID\nS1\nS2\nS3\n");
+    let options = BlockReadOptions {
+        matrix_kind: MatrixKind::Genotype,
+        sparse: false,
+        requested_samples: None,
+        variant_filter: None,
+        dosage_source: DosageSource::Hardcall,
+        missing_policy: DenseMissingPolicy::Nan,
+        return_samples: true,
+        return_variants: true,
+    };
+    let mut reader = BlockReader::open(
+        BlockSource::Plink2 { pgen, pvar, psam },
+        options,
+        FIRST_BLOCK_VARIANTS,
+    )
+    .expect("persistent two-block plink2 reader should open");
+
+    let first = reader
+        .next_block()
+        .expect("first PGEN header block should decode")
+        .expect("first output block should exist");
+    let BlockOutput::Dense(first) = first else {
+        panic!("dense PLINK2 reader returned a sparse block");
+    };
+    assert_eq!(first.n_variants, FIRST_BLOCK_VARIANTS);
+    assert_eq!(
+        variant_ids(variants(&first.variants)).last().copied(),
+        Some("rs65536")
+    );
+
+    let second = reader
+        .next_block()
+        .expect("second PGEN header block should decode")
+        .expect("second output block should exist");
+    let BlockOutput::Dense(second) = second else {
+        panic!("dense PLINK2 reader returned a sparse block");
+    };
+    assert_eq!(second.n_variants, 1);
+    assert_eq!(variant_ids(variants(&second.variants)), vec!["rs65537"]);
+    assert_eq!(second.values, vec![0.0, 0.0, 0.0]);
+    assert!(reader
+        .next_block()
+        .expect("two-block PLINK2 session should reach EOF")
+        .is_none());
 }
 
 #[test]
