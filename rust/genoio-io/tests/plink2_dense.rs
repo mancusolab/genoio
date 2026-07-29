@@ -83,23 +83,43 @@ fn fixed_width_pgen(records: &[u8], n_samples: u32, n_variants: u32) -> Vec<u8> 
 }
 
 fn variable_width_pgen(record_types: &[u8], records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    const VARIANT_BLOCK_SIZE: usize = 65_536;
+
+    assert_eq!(
+        record_types.len(),
+        records.len(),
+        "test record types and payloads must align"
+    );
     let n_variants = u32::try_from(records.len()).expect("test variant count fits u32");
-    let header_len = 12 + 8 + record_types.len() + records.len();
+    let block_ct = records.len().div_ceil(VARIANT_BLOCK_SIZE);
+    let header_len = 12 + block_ct * 8 + record_types.len() + records.len();
     let mut bytes = vec![0x6c, 0x1b, 0x10];
     bytes.extend(n_variants.to_le_bytes());
     bytes.extend(n_samples.to_le_bytes());
     bytes.push(0x04);
-    bytes.extend(
-        u64::try_from(header_len)
-            .expect("test header length fits u64")
-            .to_le_bytes(),
-    );
-    bytes.extend(record_types);
-    bytes.extend(
-        records
+    let mut block_offset = header_len;
+    for block_records in records.chunks(VARIANT_BLOCK_SIZE) {
+        bytes.extend(
+            u64::try_from(block_offset)
+                .expect("test block offset fits u64")
+                .to_le_bytes(),
+        );
+        block_offset += block_records
             .iter()
-            .map(|record| u8::try_from(record.len()).expect("test record length fits one byte")),
-    );
+            .map(|record| record.len())
+            .sum::<usize>();
+    }
+    for (block_types, block_records) in record_types
+        .chunks(VARIANT_BLOCK_SIZE)
+        .zip(records.chunks(VARIANT_BLOCK_SIZE))
+    {
+        bytes.extend(block_types);
+        bytes.extend(
+            block_records.iter().map(|record| {
+                u8::try_from(record.len()).expect("test record length fits one byte")
+            }),
+        );
+    }
     for record in records {
         bytes.extend(*record);
     }
@@ -124,6 +144,20 @@ fn fixed_width_phased_dosage_pgen(records: &[&[u8]], n_samples: u32) -> Vec<u8> 
     // phased-dosage track, without a per-variant vrtype byte.
     let n_variants = u32::try_from(records.len()).expect("test variant count fits u32");
     let mut bytes = vec![0x6c, 0x1b, 0x04];
+    bytes.extend(n_variants.to_le_bytes());
+    bytes.extend(n_samples.to_le_bytes());
+    bytes.push(0);
+    for record in records {
+        bytes.extend(*record);
+    }
+    bytes
+}
+
+fn fixed_width_dosage_pgen(records: &[&[u8]], n_samples: u32) -> Vec<u8> {
+    // PGEN fixed-width mode 0x03 stores each variant's hardcall main track
+    // followed by one full unphased dosage value per sample.
+    let n_variants = u32::try_from(records.len()).expect("test variant count fits u32");
+    let mut bytes = vec![0x6c, 0x1b, 0x03];
     bytes.extend(n_variants.to_le_bytes());
     bytes.extend(n_samples.to_le_bytes());
     bytes.push(0);
@@ -306,6 +340,25 @@ fn concatenate_plink2_sparse_blocks(blocks: &[SparseGenotypeMatrix]) -> Vec<f32>
         }
     }
     values
+}
+
+fn assert_dense_matrix_matches_oracle(
+    actual: &DenseGenotypeMatrix,
+    expected: &DenseGenotypeMatrix,
+) {
+    assert_eq!(actual.n_samples, expected.n_samples);
+    assert_eq!(actual.n_variants, expected.n_variants);
+    assert_values_with_nan(
+        &dense_values_sample_major(actual),
+        &dense_values_sample_major(expected),
+    );
+    assert_eq!(
+        dense_missing_sample_major(actual),
+        dense_missing_sample_major(expected)
+    );
+    assert_eq!(actual.samples, expected.samples);
+    assert_eq!(actual.variants, expected.variants);
+    assert_eq!(actual.diagnostics, expected.diagnostics);
 }
 
 #[test]
@@ -662,6 +715,64 @@ fn pbr_rust_plink2_002_invalid_variable_width_header_table_fails_during_open() {
 }
 
 #[test]
+fn pbr_rust_plink2_002_ld_record_at_variant_block_start_fails_during_header_parse() {
+    const VARIANT_BLOCK_SIZE: usize = 65_536;
+
+    for compression in [2_u8, 3] {
+        let dir = unique_dir(&format!(
+            "pbr-plink2-invalid-ld-{compression}-at-variant-block-start"
+        ));
+        let mut record_types = vec![0_u8; VARIANT_BLOCK_SIZE + 1];
+        record_types[VARIANT_BLOCK_SIZE] = compression;
+        let records = vec![&[0_u8][..]; VARIANT_BLOCK_SIZE + 1];
+        let pgen_bytes = variable_width_pgen(&record_types, &records, 3);
+        let (pgen, pvar, psam) =
+            write_plink2_fixture_with_variants(&dir, &pgen_bytes, "#CHROM POS ID REF ALT\n");
+
+        let session_error = BlockReader::open(
+            BlockSource::Plink2 {
+                pgen: pgen.clone(),
+                pvar: pvar.clone(),
+                psam: psam.clone(),
+            },
+            plink2_block_options(false, None, None, DenseMissingPolicy::Nan, true),
+            1,
+        )
+        .expect_err("LD at the first record of a later PGEN variant block must fail during open");
+        assert!(matches!(
+            session_error,
+            genoio_core::GenoioError::InvalidSource { .. }
+        ));
+        assert!(session_error
+            .to_string()
+            .contains("first record of a variant block"));
+
+        let prefix_error = ::genoio_io::read_plink2_dense_windowed(
+            &pgen,
+            &pvar,
+            &psam,
+            None,
+            None,
+            Some(VariantWindow {
+                start: VARIANT_BLOCK_SIZE,
+                len: 1,
+            }),
+            DenseMissingPolicy::Nan,
+            false,
+            false,
+        )
+        .expect_err("prefix header parsing must enforce the same variant-block LD boundary");
+        assert!(matches!(
+            prefix_error,
+            genoio_core::GenoioError::InvalidSource { .. }
+        ));
+        assert!(prefix_error
+            .to_string()
+            .contains("first record of a variant block"));
+    }
+}
+
+#[test]
 fn pbr_rust_plink2_003_genotype_and_haplotype_dosage_blocks_match_whole_reads() {
     let dir = unique_dir("pbr-plink2-dosage-block-parity");
     let (pgen, pvar, psam) = write_plink2_fixture_with_variants(
@@ -765,13 +876,47 @@ fn pbr_rust_plink2_003_fixed_width_and_rejected_ld_base_dosage_semantics_are_per
     record_2.extend(scaled_phase_delta(0.0, 0.0));
     record_2.extend(scaled_phase_delta(0.1, 0.1));
     record_2.extend(scaled_phase_delta(0.2, 0.2));
-    let fixed = fixed_width_phased_dosage_pgen(&[&record_1, &record_2], 3);
+    let mut record_3 = vec![0x30];
+    record_3.extend(scaled_dosage(0.4));
+    record_3.extend(scaled_dosage(1.0));
+    record_3.extend(u16::MAX.to_le_bytes());
+    record_3.extend(scaled_phase_delta(0.1, 0.3));
+    record_3.extend(scaled_phase_delta(0.5, 0.5));
+    record_3.extend(scaled_phase_delta(0.0, 0.0));
+    let fixed = fixed_width_phased_dosage_pgen(&[&record_1, &record_2, &record_3], 3);
     let (fixed_pgen, fixed_pvar, fixed_psam) = write_plink2_fixture_with_variants(
         &dir,
         &fixed,
-        "#CHROM POS ID REF ALT\n1 10 rs1 A G\n1 20 rs2 C T\n",
+        "\
+#CHROM POS ID REF ALT QUAL
+1 10 rs1 A G 30
+1 20 rs2 C T 40
+2 30 rs3 G A 50
+",
     );
+    let requested_samples = vec!["S3".to_owned(), "S1".to_owned()];
     for matrix_kind in [MatrixKind::Genotype, MatrixKind::Haplotype] {
+        let expected = match matrix_kind {
+            MatrixKind::Genotype => genoio_io::read_plink2_dosage_dense_windowed(
+                &fixed_pgen,
+                &fixed_pvar,
+                &fixed_psam,
+                Some(&requested_samples),
+                None,
+                None,
+                false,
+            ),
+            MatrixKind::Haplotype => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+                &fixed_pgen,
+                &fixed_pvar,
+                &fixed_psam,
+                Some(&requested_samples),
+                None,
+                None,
+                false,
+            ),
+        }
+        .expect("fixed-width phased-dosage whole read should decode");
         let blocks = collect_plink2_blocks(
             &fixed_pgen,
             &fixed_pvar,
@@ -779,15 +924,84 @@ fn pbr_rust_plink2_003_fixed_width_and_rejected_ld_base_dosage_semantics_are_per
             plink2_mode_block_options(
                 matrix_kind,
                 false,
-                None,
+                Some(requested_samples.clone()),
                 None,
                 DosageSource::Dosage,
                 DenseMissingPolicy::Nan,
                 true,
             ),
-            1,
+            2,
+        )
+        .into_iter()
+        .map(|block| match block {
+            BlockOutput::Dense(matrix) => matrix,
+            BlockOutput::Sparse(_) => panic!("fixed-width dosage session returned sparse output"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.n_variants)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
         );
-        assert_eq!(blocks.len(), 2);
+        let actual_values = concatenate_plink2_dense_blocks(&blocks);
+        assert_values_with_nan(&actual_values, &dense_values_sample_major(&expected));
+        assert_eq!(
+            actual_values
+                .iter()
+                .map(|value| value.is_nan())
+                .collect::<Vec<_>>(),
+            dense_missing_sample_major(&expected)
+        );
+        assert!(blocks.iter().all(|block| block.samples == expected.samples));
+        assert!(blocks.iter().all(|block| {
+            block
+                .variants
+                .as_ref()
+                .is_some_and(|variants| variants.len() == block.n_variants)
+        }));
+        assert_eq!(
+            blocks
+                .iter()
+                .flat_map(|block| variant_ids(variants(&block.variants)))
+                .collect::<Vec<_>>(),
+            variant_ids(variants(&expected.variants))
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .flat_map(|block| {
+                    let metadata = variants(&block.variants);
+                    (0..metadata.len())
+                        .map(|index| variant_a0(metadata, index))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            (0..variants(&expected.variants).len())
+                .map(|index| variant_a0(variants(&expected.variants), index))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .flat_map(|block| {
+                    let metadata = variants(&block.variants);
+                    (0..metadata.len())
+                        .map(|index| variant_a1(metadata, index))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            (0..variants(&expected.variants).len())
+                .map(|index| variant_a1(variants(&expected.variants), index))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(blocks[0].diagnostics.candidate_variants, 2);
+        assert_eq!(blocks[0].diagnostics.retained_variants, 2);
+        let mut expected_final_diagnostics = expected.diagnostics.clone();
+        expected_final_diagnostics.retained_variants = 1;
+        assert_eq!(blocks[1].diagnostics, expected_final_diagnostics);
     }
 
     let rejected_dir = unique_dir("pbr-plink2-rejected-dosage-ld-base");
@@ -1026,130 +1240,265 @@ fn pbr_rust_plink2_004_hardcall_haplotype_errors_remain_record_lazy() {
 
 #[test]
 fn pbr_rust_plink2_004_complete_mode_matrix_uses_real_session_branches() {
-    let hardcall_dir = unique_dir("pbr-plink2-complete-mode-hardcall");
-    let hardcall = explicit_phased_hardcall_pgen(&[&[0x21, 0x00]], 3);
-    let (hardcall_pgen, hardcall_pvar, hardcall_psam) = write_plink2_fixture_with_variants(
-        &hardcall_dir,
-        &hardcall,
-        "#CHROM POS ID REF ALT\n1 10 rs1 A G\n",
-    );
-    for (matrix_kind, sparse) in [
-        (MatrixKind::Genotype, false),
-        (MatrixKind::Genotype, true),
-        (MatrixKind::Haplotype, false),
-        (MatrixKind::Haplotype, true),
-    ] {
-        assert_eq!(
-            collect_plink2_blocks(
-                &hardcall_pgen,
-                &hardcall_pvar,
-                &hardcall_psam,
-                plink2_mode_block_options(
-                    matrix_kind,
-                    sparse,
-                    None,
-                    None,
-                    DosageSource::Hardcall,
-                    DenseMissingPolicy::Raise,
-                    true,
-                ),
-                1,
-            )
-            .len(),
-            1
-        );
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Storage {
+        FixedHardcall,
+        FixedDosage,
+        FixedPhasedDosage,
+        VariableWidth,
     }
 
-    let dosage_dir = unique_dir("pbr-plink2-complete-mode-dosage");
-    let mut phased_dosage = vec![0x25];
-    phased_dosage.extend(scaled_dosage(1.0));
-    phased_dosage.extend(scaled_dosage(0.5));
-    phased_dosage.extend(scaled_dosage(2.0));
-    phased_dosage.extend(scaled_phase_delta(0.25, 0.75));
-    phased_dosage.extend(scaled_phase_delta(0.0, 0.5));
-    phased_dosage.extend(scaled_phase_delta(1.0, 1.0));
-    let dosage = explicit_phased_dosage_pgen(&[&phased_dosage], 3);
-    let (dosage_pgen, dosage_pvar, dosage_psam) = write_plink2_fixture_with_variants(
-        &dosage_dir,
-        &dosage,
-        "#CHROM POS ID REF ALT\n1 10 rs1 A G\n",
-    );
-    for matrix_kind in [MatrixKind::Genotype, MatrixKind::Haplotype] {
-        assert_eq!(
-            collect_plink2_blocks(
-                &dosage_pgen,
-                &dosage_pvar,
-                &dosage_psam,
-                plink2_mode_block_options(
-                    matrix_kind,
-                    false,
-                    None,
-                    None,
-                    DosageSource::Dosage,
-                    DenseMissingPolicy::Nan,
-                    true,
-                ),
-                1,
-            )
-            .len(),
-            1
-        );
+    struct Fixture {
+        storage: Storage,
+        hardcall: (PathBuf, PathBuf, PathBuf),
+        dosage: (PathBuf, PathBuf, PathBuf),
     }
 
-    let sparse_dosage_error = BlockReader::open(
-        BlockSource::Plink2 {
-            pgen: dosage_pgen,
-            pvar: dosage_pvar,
-            psam: dosage_psam,
-        },
-        plink2_mode_block_options(
-            MatrixKind::Genotype,
-            true,
-            None,
-            None,
-            DosageSource::Dosage,
-            DenseMissingPolicy::Raise,
-            true,
-        ),
-        1,
-    )
-    .expect_err("sparse PLINK2 dosage should remain unsupported");
-    assert!(matches!(
-        sparse_dosage_error,
-        genoio_core::GenoioError::UnsupportedRepresentation { .. }
-    ));
-
-    let unsupported_dir = unique_dir("pbr-plink2-complete-mode-unsupported");
-    let fixed_hardcall = fixed_width_pgen(&[0x21], 3, 1);
-    let (fixed_pgen, fixed_pvar, fixed_psam) = write_plink2_fixture_with_variants(
-        &unsupported_dir,
-        &fixed_hardcall,
-        "#CHROM POS ID REF ALT\n1 10 rs1 A G\n",
+    let variants = "#CHROM POS ID REF ALT QUAL\n1 10 rs1 A G 30\n";
+    let fixed_hardcall_dir = unique_dir("pbr-plink2-mode-matrix-fixed-hardcall");
+    let fixed_hardcall = write_plink2_fixture_with_variants(
+        &fixed_hardcall_dir,
+        &fixed_width_pgen(&[0x21], 3, 1),
+        variants,
     );
-    let mut unsupported_haplotype = BlockReader::open(
-        BlockSource::Plink2 {
-            pgen: fixed_pgen,
-            pvar: fixed_pvar,
-            psam: fixed_psam,
+
+    let mut dosage_record = vec![0x21];
+    dosage_record.extend(scaled_dosage(1.0));
+    dosage_record.extend(scaled_dosage(0.5));
+    dosage_record.extend(scaled_dosage(2.0));
+    let fixed_dosage_dir = unique_dir("pbr-plink2-mode-matrix-fixed-dosage");
+    let fixed_dosage = write_plink2_fixture_with_variants(
+        &fixed_dosage_dir,
+        &fixed_width_dosage_pgen(&[&dosage_record], 3),
+        variants,
+    );
+
+    let mut phased_dosage_record = dosage_record.clone();
+    phased_dosage_record.extend(scaled_phase_delta(0.25, 0.75));
+    phased_dosage_record.extend(scaled_phase_delta(0.0, 0.5));
+    phased_dosage_record.extend(scaled_phase_delta(1.0, 1.0));
+    let fixed_phased_dir = unique_dir("pbr-plink2-mode-matrix-fixed-phased-dosage");
+    let fixed_phased = write_plink2_fixture_with_variants(
+        &fixed_phased_dir,
+        &fixed_width_phased_dosage_pgen(&[&phased_dosage_record], 3),
+        variants,
+    );
+
+    let variable_hardcall_dir = unique_dir("pbr-plink2-mode-matrix-variable-hardcall");
+    let variable_hardcall = write_plink2_fixture_with_variants(
+        &variable_hardcall_dir,
+        &explicit_phased_hardcall_pgen(&[&[0x21, 0x00]], 3),
+        variants,
+    );
+    let variable_dosage_dir = unique_dir("pbr-plink2-mode-matrix-variable-dosage");
+    let variable_dosage = write_plink2_fixture_with_variants(
+        &variable_dosage_dir,
+        &explicit_phased_dosage_pgen(&[&phased_dosage_record], 3),
+        variants,
+    );
+
+    let fixtures = [
+        Fixture {
+            storage: Storage::FixedHardcall,
+            hardcall: fixed_hardcall.clone(),
+            dosage: fixed_hardcall,
         },
-        plink2_mode_block_options(
-            MatrixKind::Haplotype,
-            false,
-            None,
-            None,
-            DosageSource::Hardcall,
-            DenseMissingPolicy::Nan,
-            true,
-        ),
-        1,
-    )
-    .expect("fixed-width hardcall haplotype session should remain record-lazy");
-    assert!(matches!(
-        unsupported_haplotype
-            .next_block()
-            .expect_err("fixed-width hardcall haplotypes should remain unsupported"),
-        genoio_core::GenoioError::UnsupportedRepresentation { .. }
-    ));
+        Fixture {
+            storage: Storage::FixedDosage,
+            hardcall: fixed_dosage.clone(),
+            dosage: fixed_dosage,
+        },
+        Fixture {
+            storage: Storage::FixedPhasedDosage,
+            hardcall: fixed_phased.clone(),
+            dosage: fixed_phased,
+        },
+        Fixture {
+            storage: Storage::VariableWidth,
+            hardcall: variable_hardcall,
+            dosage: variable_dosage,
+        },
+    ];
+
+    let mut case_count = 0_usize;
+    for fixture in fixtures {
+        for matrix_kind in [MatrixKind::Genotype, MatrixKind::Haplotype] {
+            for dosage_source in [DosageSource::Hardcall, DosageSource::Dosage] {
+                for sparse in [false, true] {
+                    case_count += 1;
+                    let (pgen, pvar, psam) = match dosage_source {
+                        DosageSource::Hardcall => &fixture.hardcall,
+                        DosageSource::Dosage => &fixture.dosage,
+                    };
+                    let options = plink2_mode_block_options(
+                        matrix_kind,
+                        sparse,
+                        None,
+                        None,
+                        dosage_source,
+                        if sparse {
+                            DenseMissingPolicy::Raise
+                        } else {
+                            DenseMissingPolicy::Nan
+                        },
+                        true,
+                    );
+                    let case = format!(
+                        "{:?}/{matrix_kind:?}/{dosage_source:?}/{}",
+                        fixture.storage,
+                        if sparse { "sparse" } else { "dense" }
+                    );
+
+                    if sparse && dosage_source == DosageSource::Dosage {
+                        let error = BlockReader::open(
+                            BlockSource::Plink2 {
+                                pgen: pgen.clone(),
+                                pvar: pvar.clone(),
+                                psam: psam.clone(),
+                            },
+                            options,
+                            1,
+                        )
+                        .expect_err(&format!("{case} must fail at construction"));
+                        assert!(
+                            matches!(
+                                error,
+                                genoio_core::GenoioError::UnsupportedRepresentation { .. }
+                            ),
+                            "{case}: unexpected construction error {error}"
+                        );
+                        continue;
+                    }
+
+                    let supported = match (matrix_kind, dosage_source) {
+                        (MatrixKind::Genotype, DosageSource::Hardcall) => true,
+                        (MatrixKind::Haplotype, DosageSource::Hardcall) => {
+                            fixture.storage == Storage::VariableWidth
+                        }
+                        (MatrixKind::Genotype, DosageSource::Dosage) => {
+                            fixture.storage != Storage::FixedHardcall
+                        }
+                        (MatrixKind::Haplotype, DosageSource::Dosage) => matches!(
+                            fixture.storage,
+                            Storage::FixedPhasedDosage | Storage::VariableWidth
+                        ),
+                    };
+                    let mut reader = BlockReader::open(
+                        BlockSource::Plink2 {
+                            pgen: pgen.clone(),
+                            pvar: pvar.clone(),
+                            psam: psam.clone(),
+                        },
+                        options,
+                        1,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{case} should pass session construction: {error}")
+                    });
+
+                    if !supported {
+                        let error = reader
+                            .next_block()
+                            .expect_err(&format!("{case} must fail at the lazy record boundary"));
+                        assert!(
+                            matches!(
+                                error,
+                                genoio_core::GenoioError::UnsupportedRepresentation { .. }
+                            ),
+                            "{case}: unexpected lazy error {error}"
+                        );
+                        continue;
+                    }
+
+                    let actual = reader
+                        .next_block()
+                        .unwrap_or_else(|error| panic!("{case} should decode: {error}"))
+                        .unwrap_or_else(|| panic!("{case} should yield one block"));
+                    match (matrix_kind, dosage_source, sparse, actual) {
+                        (
+                            MatrixKind::Genotype,
+                            DosageSource::Hardcall,
+                            false,
+                            BlockOutput::Dense(actual),
+                        ) => {
+                            let expected =
+                                genoio_io::read_plink2_dense(pgen, pvar, psam, None, None)
+                                    .expect("stateless genotype hardcall oracle should decode");
+                            assert_dense_matrix_matches_oracle(&actual, &expected);
+                        }
+                        (
+                            MatrixKind::Genotype,
+                            DosageSource::Hardcall,
+                            true,
+                            BlockOutput::Sparse(actual),
+                        ) => {
+                            let expected =
+                                genoio_io::read_plink2_sparse(pgen, pvar, psam, None, None)
+                                    .expect("stateless sparse genotype oracle should decode");
+                            assert_eq!(actual, expected, "{case}");
+                        }
+                        (
+                            MatrixKind::Haplotype,
+                            DosageSource::Hardcall,
+                            false,
+                            BlockOutput::Dense(actual),
+                        ) => {
+                            let expected = genoio_io::read_plink2_haplotypes_dense_windowed(
+                                pgen, pvar, psam, None, None, None, false,
+                            )
+                            .expect("stateless hardcall haplotype oracle should decode");
+                            assert_dense_matrix_matches_oracle(&actual, &expected);
+                        }
+                        (
+                            MatrixKind::Haplotype,
+                            DosageSource::Hardcall,
+                            true,
+                            BlockOutput::Sparse(actual),
+                        ) => {
+                            let expected = genoio_io::read_plink2_haplotypes_sparse_windowed(
+                                pgen, pvar, psam, None, None, None,
+                            )
+                            .expect("stateless sparse haplotype oracle should decode");
+                            assert_eq!(actual, expected, "{case}");
+                        }
+                        (
+                            MatrixKind::Genotype,
+                            DosageSource::Dosage,
+                            false,
+                            BlockOutput::Dense(actual),
+                        ) => {
+                            let expected = genoio_io::read_plink2_dosage_dense_windowed(
+                                pgen, pvar, psam, None, None, None, false,
+                            )
+                            .expect("stateless genotype dosage oracle should decode");
+                            assert_dense_matrix_matches_oracle(&actual, &expected);
+                        }
+                        (
+                            MatrixKind::Haplotype,
+                            DosageSource::Dosage,
+                            false,
+                            BlockOutput::Dense(actual),
+                        ) => {
+                            let expected = genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+                                pgen, pvar, psam, None, None, None, false,
+                            )
+                            .expect("stateless haplotype dosage oracle should decode");
+                            assert_dense_matrix_matches_oracle(&actual, &expected);
+                        }
+                        other => panic!("{case}: unexpected output branch {other:?}"),
+                    }
+                    assert!(
+                        reader
+                            .next_block()
+                            .unwrap_or_else(|error| panic!("{case} EOF should be clean: {error}"))
+                            .is_none(),
+                        "{case}: expected one-record EOF"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(case_count, 32);
 }
 
 fn write_bad_variable_width_block_offset_fixture(

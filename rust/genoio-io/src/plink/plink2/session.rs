@@ -1112,7 +1112,7 @@ struct Plink2WorkCounts {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::path::{Path, PathBuf};
 
     use genoio_core::{DenseMissingPolicy, VariantFilter};
@@ -1282,6 +1282,46 @@ mod tests {
         let counts = probe.snapshot();
         assert_eq!(counts.candidate_visits, 3);
         assert_eq!(counts.main_decodes, 1);
+    }
+
+    #[test]
+    fn pbr_rust_plink2_001_later_fixed_width_payload_io_failure_is_lazy_and_terminal() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_fixed_fixture(dir.path(), &[0x04, 0x08, 0x00]);
+        let probe = Plink2WorkProbe::default();
+        let mut session = Plink2BlockSession::open_with_probe(
+            pgen.clone(),
+            pvar,
+            psam,
+            options(None),
+            probe.clone(),
+        )
+        .expect("complete fixed-width payload should pass construction validation");
+
+        assert!(session
+            .next_block(1)
+            .expect("first fixed-width block should decode before later truncation")
+            .is_some());
+        OpenOptions::new()
+            .write(true)
+            .open(&pgen)
+            .expect("external fixture handle should open")
+            // The test fixture has a 12-byte header and one byte per record.
+            .set_len(13)
+            .expect("external fixture handle should truncate the later payload");
+
+        let error = session
+            .next_block(1)
+            .expect_err("retained PGEN handle should observe the later payload truncation");
+        assert!(matches!(error, genoio_core::GenoioError::Io { .. }));
+        let at_error = probe.snapshot();
+        assert_eq!(at_error.candidate_visits, 2);
+        assert_eq!(at_error.main_decodes, 1);
+        assert!(session
+            .next_block(1)
+            .expect("failed fixed-width session should be terminal")
+            .is_none());
+        assert_eq!(probe.snapshot(), at_error);
     }
 
     #[test]
