@@ -95,13 +95,6 @@ impl BlockOutput {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the lifecycle state added later in this phase"
-    )
-)]
 fn validate_block_output(output: Option<&BlockOutput>, block_size: usize) -> Result<()> {
     let Some(output) = output else {
         return Ok(());
@@ -113,6 +106,49 @@ fn validate_block_output(output: Option<&BlockOutput>, block_size: usize) -> Res
         )));
     }
     Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct BlockLifecycle {
+    block_size: usize,
+    eof: bool,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by concrete block sessions introduced in later phases"
+    )
+)]
+impl BlockLifecycle {
+    pub(crate) fn new(block_size: usize) -> Result<Self> {
+        if block_size == 0 {
+            return Err(GenoioError::internal_contract(
+                "block size must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            block_size,
+            eof: false,
+        })
+    }
+
+    pub(crate) fn next_block<F>(&mut self, read_next: F) -> Result<Option<BlockOutput>>
+    where
+        F: FnOnce(usize) -> Result<Option<BlockOutput>>,
+    {
+        if self.eof {
+            return Ok(None);
+        }
+
+        let output = read_next(self.block_size)?;
+        validate_block_output(output.as_ref(), self.block_size)?;
+        if output.is_none() {
+            self.eof = true;
+        }
+        Ok(output)
+    }
 }
 
 #[cfg_attr(
@@ -162,6 +198,8 @@ pub(crate) fn block_diagnostics_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use genoio_core::{
         DenseDiagnostics, DenseGenotypeMatrix, DenseLayout, GenoioError, SampleMetadataBuffers,
         SampleRecord, SparseGenotypeMatrix, VariantMetadataBuffers,
@@ -356,5 +394,129 @@ mod tests {
             }
         );
         assert_eq!(cumulative.retained_variants, 19);
+    }
+
+    #[test]
+    fn block_lifecycle_rejects_zero_block_size() {
+        let error = BlockLifecycle::new(0).expect_err("zero block size should fail");
+
+        assert!(matches!(error, GenoioError::InternalContract { .. }));
+    }
+
+    #[test]
+    fn block_lifecycle_makes_immediate_eof_sticky() {
+        let mut lifecycle = BlockLifecycle::new(2).expect("positive block size should be valid");
+        let mut backend_invocations = 0;
+
+        let first = lifecycle
+            .next_block(|_| {
+                backend_invocations += 1;
+                Ok(None)
+            })
+            .expect("immediate EOF should be valid");
+        let second = lifecycle
+            .next_block(|_| {
+                backend_invocations += 1;
+                Ok(Some(dense_output(1)))
+            })
+            .expect("sticky EOF should be valid");
+
+        assert!(first.is_none());
+        assert!(second.is_none());
+        assert_eq!(backend_invocations, 1);
+    }
+
+    #[test]
+    fn block_lifecycle_accepts_exact_then_partial_final_output() {
+        let mut lifecycle = BlockLifecycle::new(3).expect("positive block size should be valid");
+        let mut backend_invocations = 0;
+        let mut script = VecDeque::from([
+            Ok(Some(dense_output(3))),
+            Ok(Some(sparse_output(2))),
+            Ok(None),
+        ]);
+
+        let mut next = || {
+            lifecycle.next_block(|block_size| {
+                backend_invocations += 1;
+                assert_eq!(block_size, 3);
+                script.pop_front().expect("script should contain a result")
+            })
+        };
+
+        assert_eq!(
+            next()
+                .expect("exact-width output should be valid")
+                .map(|output| output.width()),
+            Some(3)
+        );
+        assert_eq!(
+            next()
+                .expect("partial-final output should be valid")
+                .map(|output| output.width()),
+            Some(2)
+        );
+        assert!(next().expect("EOF should be valid").is_none());
+        assert_eq!(backend_invocations, 3);
+    }
+
+    #[test]
+    fn block_lifecycle_rejects_invalid_nonterminal_widths() {
+        let mut lifecycle = BlockLifecycle::new(2).expect("positive block size should be valid");
+        let mut backend_invocations = 0;
+
+        let zero_error = lifecycle
+            .next_block(|_| {
+                backend_invocations += 1;
+                Ok(Some(dense_output(0)))
+            })
+            .expect_err("zero-width output should fail");
+        let over_error = lifecycle
+            .next_block(|_| {
+                backend_invocations += 1;
+                Ok(Some(sparse_output(3)))
+            })
+            .expect_err("over-width output should fail");
+
+        assert!(matches!(zero_error, GenoioError::InternalContract { .. }));
+        assert!(matches!(over_error, GenoioError::InternalContract { .. }));
+        assert_eq!(backend_invocations, 2);
+    }
+
+    #[test]
+    fn block_lifecycle_error_does_not_prefetch_or_consume_later_result() {
+        let mut lifecycle = BlockLifecycle::new(2).expect("positive block size should be valid");
+        let mut backend_invocations = 0;
+        let mut script = VecDeque::from([
+            Err(GenoioError::invalid_source(
+                "<script>",
+                "scripted backend failure",
+            )),
+            Ok(Some(dense_output(1))),
+            Ok(None),
+        ]);
+
+        let error = lifecycle
+            .next_block(|_| {
+                backend_invocations += 1;
+                script.pop_front().expect("script should contain a result")
+            })
+            .expect_err("backend error should be returned");
+
+        assert!(matches!(error, GenoioError::InvalidSource { .. }));
+        assert_eq!(backend_invocations, 1);
+        assert_eq!(script.len(), 2);
+
+        let output = lifecycle
+            .next_block(|_| {
+                backend_invocations += 1;
+                script.pop_front().expect("script should contain a result")
+            })
+            .expect("later scripted result should remain available")
+            .expect("later scripted result should be a block");
+
+        assert_eq!(output.width(), 1);
+        assert_eq!(backend_invocations, 2);
+        assert_eq!(script.len(), 1);
     }
 }
