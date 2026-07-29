@@ -11,6 +11,7 @@ use genoio_core::{
 use crate::bgen::BgenBlockSession;
 use crate::error::Result;
 use crate::plink::{Plink1BlockSession, Plink2BlockSession};
+use crate::vcf::TextVcfBlockSession;
 
 /// Owned source paths for one persistent block-reader session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +83,7 @@ enum BlockBackend {
     Bgen(BgenBlockSession),
     Plink1(Plink1BlockSession),
     Plink2(Plink2BlockSession),
+    TextVcf(TextVcfBlockSession),
 }
 
 /// Backend-neutral persistent reader that yields bounded genotype blocks.
@@ -96,6 +98,7 @@ impl fmt::Debug for BlockReader {
             BlockBackend::Bgen(_) => "bgen",
             BlockBackend::Plink1(_) => "plink1",
             BlockBackend::Plink2(_) => "plink2",
+            BlockBackend::TextVcf(_) => "text-vcf",
         };
         let lifecycle = if self.lifecycle.eof { "eof" } else { "active" };
         formatter
@@ -121,7 +124,10 @@ impl BlockReader {
             BlockSource::Plink2 { pgen, pvar, psam } => {
                 BlockBackend::Plink2(Plink2BlockSession::open(pgen, pvar, psam, options)?)
             }
-            BlockSource::Vcf { .. } | BlockSource::Bcf { .. } => {
+            BlockSource::Vcf { vcf } => {
+                BlockBackend::TextVcf(TextVcfBlockSession::open(vcf, options)?)
+            }
+            BlockSource::Bcf { .. } => {
                 return Err(GenoioError::unsupported(
                     "persistent block reads are not implemented for this source yet",
                 ));
@@ -137,6 +143,7 @@ impl BlockReader {
             BlockBackend::Bgen(session) => session.next_block(block_size),
             BlockBackend::Plink1(session) => session.next_block(block_size),
             BlockBackend::Plink2(session) => session.next_block(block_size),
+            BlockBackend::TextVcf(session) => session.next_block(block_size),
         })
     }
 }

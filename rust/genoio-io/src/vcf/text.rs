@@ -54,10 +54,12 @@ mod gt;
 mod header;
 mod output;
 mod record;
+mod session;
 mod source;
 mod sparse;
 
 pub(in crate::vcf) use self::record::append_public_variant_metadata_from_noodles_variant_record;
+pub(crate) use self::session::TextVcfBlockSession;
 
 pub(super) const VCF_TEXT_BUFFER_SIZE: usize = 1 << 20;
 const VCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
