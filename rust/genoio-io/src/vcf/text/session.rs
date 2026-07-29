@@ -1115,7 +1115,9 @@ mod tests {
     use std::io::{BufRead, Read, Write};
     use std::path::{Path, PathBuf};
 
-    use genoio_core::{DenseMissingPolicy, RegionPredicate, VariantFilter};
+    use genoio_core::{
+        DenseLayout, DenseMissingPolicy, RegionPredicate, VariantFilter, VariantWindow,
+    };
     use noodles_core::Position;
     use noodles_csi::binning_index::index::header::ReferenceSequenceNames;
     use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
@@ -1172,6 +1174,92 @@ mod tests {
             "params": {"value": region}
         }))
         .expect("region filter should parse")
+    }
+
+    fn sequential_parity_filter(missing_rate_max: f32) -> VariantFilter {
+        VariantFilter::from_json_value(serde_json::json!({
+            "op": "and",
+            "left": {
+                "op": "predicate",
+                "name": "chrom",
+                "params": {"value": "1"}
+            },
+            "right": {
+                "op": "predicate",
+                "name": "missing_rate",
+                "params": {"max": missing_rate_max}
+            }
+        }))
+        .expect("sequential metadata and genotype-stat filter should parse")
+    }
+
+    fn indexed_parity_filter(missing_rate_max: f32) -> VariantFilter {
+        VariantFilter::from_json_value(serde_json::json!({
+            "op": "and",
+            "left": {
+                "op": "predicate",
+                "name": "region",
+                "params": {"value": "1:10-50"}
+            },
+            "right": {
+                "op": "predicate",
+                "name": "missing_rate",
+                "params": {"max": missing_rate_max}
+            }
+        }))
+        .expect("indexed region and genotype-stat filter should parse")
+    }
+
+    const PARITY_CORE_RECORDS: &str = "\
+1\t10\tkeep1\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|1:0.9
+1\t20\tmissing\tT\tC\t.\tPASS\t.\tGT:DS\t.|.:.\t0|1:1.0
+2\t25\tmetadata_drop\tA\tC\t.\tPASS\t.\tGT:DS\tbad:bad\tbad:bad
+1\t30\tflipped\tC\tT\t.\tPASS\t.\tGT:DS\t1|1:1.8\t0|1:1.1
+1\t40\tkeep3\tG\tA\t.\tPASS\t.\tGT:DS\t0|1:0.8\t0|0:0.2
+1\t50\tkeep4\tT\tG\t.\tPASS\t.\tGT:DS\t1|0:0.9\t0|1:1.1
+";
+
+    const PARITY_INDEXED_RECORDS: &str = "\
+1\t5\tbefore\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|0:0.1
+1\t10\tkeep1\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|1:0.9
+1\t20\tmissing\tT\tC\t.\tPASS\t.\tGT:DS\t.|.:.\t0|1:1.0
+1\t30\tflipped\tC\tT\t.\tPASS\t.\tGT:DS\t1|1:1.8\t0|1:1.1
+1\t40\tkeep3\tG\tA\t.\tPASS\t.\tGT:DS\t0|1:0.8\t0|0:0.2
+1\t50\tkeep4\tT\tG\t.\tPASS\t.\tGT:DS\t1|0:0.9\t0|1:1.1
+1\t60\tafter\tC\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|0:0.1
+";
+
+    fn write_bgzf_fixture(path: &Path, records: &str, build_index: bool) {
+        let file = fs::File::create(path).expect("BGZF parity fixture should be created");
+        let mut writer = noodles_bgzf::io::Writer::new(file);
+        writer
+            .write_all(
+                b"##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n",
+            )
+            .expect("BGZF parity header should be written");
+        writer
+            .flush()
+            .expect("BGZF parity header block should flush");
+        for record in records.lines() {
+            writer
+                .write_all(record.as_bytes())
+                .expect("BGZF parity record should be written");
+            writer
+                .write_all(b"\n")
+                .expect("BGZF parity record terminator should be written");
+            writer
+                .flush()
+                .expect("each parity record should cross a BGZF block boundary");
+        }
+        writer
+            .try_finish()
+            .expect("BGZF parity fixture should finish");
+        if build_index {
+            build_tabix_index(path);
+        }
     }
 
     fn build_tabix_index(path: &Path) {
@@ -1357,6 +1445,248 @@ mod tests {
                 .positions
                 .clone(),
         }
+    }
+
+    fn stateless_text_block(
+        path: &Path,
+        options: &BlockReadOptions,
+        start: usize,
+        len: usize,
+    ) -> BlockOutput {
+        let window = Some(VariantWindow { start, len });
+        match (options.matrix_kind, options.sparse, options.dosage_source) {
+            (MatrixKind::Genotype, false, DosageSource::Hardcall) => BlockOutput::Dense(
+                crate::vcf::read_vcf_dense_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.missing_policy,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless text dense GT window should decode"),
+            ),
+            (MatrixKind::Genotype, false, DosageSource::Dosage) => BlockOutput::Dense(
+                crate::vcf::read_vcf_dosage_dense_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.missing_policy,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless text dense DS window should decode"),
+            ),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall) => BlockOutput::Sparse(
+                crate::vcf::read_vcf_sparse_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless text sparse GT window should decode"),
+            ),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall) => BlockOutput::Dense(
+                crate::vcf::read_vcf_haplotypes_dense_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.missing_policy,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless text dense haplotype window should decode"),
+            ),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall) => BlockOutput::Sparse(
+                crate::vcf::read_vcf_haplotypes_sparse_windowed(
+                    path,
+                    options.requested_samples.as_deref(),
+                    options.variant_filter.as_ref(),
+                    window,
+                    options.return_samples,
+                    options.return_variants,
+                )
+                .expect("stateless text sparse haplotype window should decode"),
+            ),
+            _ => panic!("unsupported stateless text VCF test mode"),
+        }
+    }
+
+    fn output_width(output: &BlockOutput) -> usize {
+        match output {
+            BlockOutput::Dense(matrix) => matrix.n_variants,
+            BlockOutput::Sparse(matrix) => matrix.n_cols,
+        }
+    }
+
+    fn assert_f32_slices_match(actual: &[f32], expected: &[f32], context: &str) {
+        assert_eq!(actual.len(), expected.len(), "{context}: value length");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual.is_nan() && expected.is_nan()) || actual == expected,
+                "{context}: value {index} differs: actual={actual:?}, expected={expected:?}"
+            );
+        }
+    }
+
+    fn assert_block_output_matches(actual: &BlockOutput, expected: &BlockOutput, context: &str) {
+        match (actual, expected) {
+            (BlockOutput::Dense(actual), BlockOutput::Dense(expected)) => {
+                assert_eq!(actual.n_samples, expected.n_samples, "{context}: rows");
+                assert_eq!(actual.n_variants, expected.n_variants, "{context}: columns");
+                assert_eq!(actual.layout, expected.layout, "{context}: dense layout");
+                assert_f32_slices_match(&actual.values, &expected.values, context);
+                assert_eq!(
+                    actual.samples, expected.samples,
+                    "{context}: sample metadata"
+                );
+                assert_eq!(
+                    actual.variants, expected.variants,
+                    "{context}: variant metadata"
+                );
+                assert_eq!(
+                    actual.diagnostics, expected.diagnostics,
+                    "{context}: diagnostics"
+                );
+            }
+            (BlockOutput::Sparse(actual), BlockOutput::Sparse(expected)) => {
+                assert_eq!(actual.n_rows, expected.n_rows, "{context}: rows");
+                assert_eq!(actual.n_cols, expected.n_cols, "{context}: columns");
+                assert_eq!(actual.indptr, expected.indptr, "{context}: CSC indptr");
+                assert_eq!(actual.indices, expected.indices, "{context}: CSC indices");
+                assert_f32_slices_match(&actual.data, &expected.data, context);
+                assert_eq!(
+                    actual.samples, expected.samples,
+                    "{context}: sample metadata"
+                );
+                assert_eq!(
+                    actual.variants, expected.variants,
+                    "{context}: variant metadata"
+                );
+                assert_eq!(
+                    actual.diagnostics, expected.diagnostics,
+                    "{context}: diagnostics"
+                );
+            }
+            _ => panic!("{context}: persistent and stateless output kinds differ"),
+        }
+    }
+
+    fn assert_first_parity_block_contract(
+        output: &BlockOutput,
+        matrix_kind: MatrixKind,
+        sparse: bool,
+        dosage_source: DosageSource,
+    ) {
+        let (samples, variants, diagnostics) = match output {
+            BlockOutput::Dense(matrix) => {
+                assert_eq!(matrix.layout, DenseLayout::VariantMajor);
+                let expected = match (matrix_kind, dosage_source) {
+                    (MatrixKind::Genotype, DosageSource::Hardcall) => {
+                        vec![0.0, 1.0, f32::NAN, 1.0, 2.0, 1.0]
+                    }
+                    (MatrixKind::Genotype, DosageSource::Dosage) => {
+                        vec![0.1, 0.9, f32::NAN, 1.0, 1.8, 1.1]
+                    }
+                    (MatrixKind::Haplotype, DosageSource::Hardcall) => vec![
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        f32::NAN,
+                        f32::NAN,
+                        0.0,
+                        1.0,
+                        1.0,
+                        1.0,
+                        0.0,
+                        1.0,
+                    ],
+                    (MatrixKind::Haplotype, DosageSource::Dosage) => unreachable!(),
+                };
+                assert_f32_slices_match(
+                    &matrix.values,
+                    &expected,
+                    "independent dense fixture contract",
+                );
+                (
+                    matrix
+                        .samples
+                        .as_ref()
+                        .expect("parity block should include sample metadata"),
+                    matrix
+                        .variants
+                        .as_ref()
+                        .expect("parity block should include variant metadata"),
+                    &matrix.diagnostics,
+                )
+            }
+            BlockOutput::Sparse(matrix) => {
+                assert!(sparse);
+                assert_eq!(matrix.indptr, vec![0, 1, 2, 3]);
+                assert_eq!(
+                    matrix.indices,
+                    if matrix_kind == MatrixKind::Haplotype {
+                        vec![3, 2, 1]
+                    } else {
+                        vec![1, 1, 0]
+                    }
+                );
+                assert_eq!(matrix.data, vec![1.0, 1.0, 1.0]);
+                (
+                    matrix
+                        .samples
+                        .as_ref()
+                        .expect("parity block should include sample metadata"),
+                    matrix
+                        .variants
+                        .as_ref()
+                        .expect("parity block should include variant metadata"),
+                    &matrix.diagnostics,
+                )
+            }
+        };
+
+        let sample_ids = samples
+            .iter()
+            .map(|sample| sample.iid.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sample_ids,
+            if matrix_kind == MatrixKind::Haplotype {
+                vec!["S1", "S1", "S2", "S2"]
+            } else {
+                vec!["S1", "S2"]
+            },
+            "requested samples must remain in source order"
+        );
+        assert_eq!(
+            variants.positions,
+            if sparse {
+                vec![10, 30, 40]
+            } else {
+                vec![10, 20, 30]
+            }
+        );
+        assert_eq!(
+            variants.a0s.values,
+            if sparse { b"ATG" } else { b"ATC" },
+            "sparse output must swap public alleles when encoding the minor allele"
+        );
+        assert_eq!(
+            variants.a1s.values,
+            if sparse { b"GCA" } else { b"GCT" },
+            "public allele orientation must follow the stored values"
+        );
+        assert_eq!(diagnostics.requested_samples, 2);
+        assert_eq!(diagnostics.retained_samples, 2);
+        assert_eq!(diagnostics.missing_samples, 0);
+        assert_eq!(diagnostics.retained_variants, 3);
     }
 
     #[test]
@@ -1603,62 +1933,17 @@ mod tests {
     #[test]
     fn pbr_rust_textvcf_002_tabix_and_csi_mode_matrix_crosses_bgzf_and_block_boundaries() {
         let modes = [
-            (
-                MatrixKind::Genotype,
-                false,
-                DosageSource::Hardcall,
-                3,
-                0,
-                0,
-                4,
-                0,
-            ),
-            (
-                MatrixKind::Genotype,
-                false,
-                DosageSource::Dosage,
-                0,
-                3,
-                0,
-                4,
-                0,
-            ),
-            (
-                MatrixKind::Genotype,
-                true,
-                DosageSource::Hardcall,
-                3,
-                0,
-                0,
-                0,
-                3,
-            ),
-            (
-                MatrixKind::Haplotype,
-                false,
-                DosageSource::Hardcall,
-                0,
-                0,
-                3,
-                8,
-                0,
-            ),
-            (
-                MatrixKind::Haplotype,
-                true,
-                DosageSource::Hardcall,
-                0,
-                0,
-                3,
-                0,
-                3,
-            ),
+            (MatrixKind::Genotype, false, DosageSource::Hardcall),
+            (MatrixKind::Genotype, false, DosageSource::Dosage),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall),
         ];
 
         for use_csi in [false, true] {
             let dir = tempfile::tempdir().expect("test directory should be created");
             let path = dir.path().join("matrix.vcf.gz");
-            write_indexed_fixture(&path);
+            write_bgzf_fixture(&path, PARITY_INDEXED_RECORDS, true);
             if use_csi {
                 build_csi_index(&path);
                 fs::remove_file(PathBuf::from(format!("{}.tbi", path.to_string_lossy())))
@@ -1669,7 +1954,7 @@ mod tests {
                 &RegionPredicate {
                     chrom: "1".to_owned(),
                     start: 10,
-                    end: 30,
+                    end: 50,
                 },
             )
             .expect("indexed chunks should resolve")
@@ -1680,48 +1965,63 @@ mod tests {
                 "noodles should merge the touching per-record index chunks"
             );
 
-            for (
-                matrix_kind,
-                sparse,
-                dosage_source,
-                expected_gt,
-                expected_ds,
-                expected_phase,
-                expected_dense_allocation,
-                expected_sparse_allocation,
-            ) in modes
-            {
+            for (matrix_kind, sparse, dosage_source) in modes {
                 let probe = TextVcfWorkProbe::default();
-                let mut mode_options = options(Some(region_filter("1:10-30")));
+                let missing_rate_max = if sparse { 0.0 } else { 0.5 };
+                let mut mode_options = options(Some(indexed_parity_filter(missing_rate_max)));
                 mode_options.matrix_kind = matrix_kind;
                 mode_options.sparse = sparse;
                 mode_options.dosage_source = dosage_source;
-                mode_options.missing_policy = DenseMissingPolicy::Raise;
+                mode_options.missing_policy = if sparse {
+                    DenseMissingPolicy::Raise
+                } else {
+                    DenseMissingPolicy::Nan
+                };
                 mode_options.requested_samples = Some(vec!["S2".to_owned(), "S1".to_owned()]);
-                let mut session =
-                    TextVcfBlockSession::open_with_probe(path.clone(), mode_options, probe.clone())
-                        .expect("indexed mode session should open");
+                let mut session = TextVcfBlockSession::open_with_probe(
+                    path.clone(),
+                    mode_options.clone(),
+                    probe.clone(),
+                )
+                .expect("indexed mode session should open");
 
-                let first = session
-                    .next_block(2)
-                    .expect("first indexed mode block should decode")
-                    .expect("first indexed mode block should exist");
-                let second = session
-                    .next_block(2)
-                    .expect("second indexed mode block should decode")
-                    .expect("second indexed mode block should exist");
+                let mut start = 0;
+                let mut widths = Vec::new();
+                let mut positions = Vec::new();
+                while let Some(actual) = session
+                    .next_block(3)
+                    .expect("indexed mode block should decode")
+                {
+                    let context =
+                        format!("{matrix_kind:?}/{sparse}/{dosage_source:?} indexed block {start}");
+                    let expected = stateless_text_block(&path, &mode_options, start, 3);
+                    assert_block_output_matches(&actual, &expected, &context);
+                    if start == 0 {
+                        assert_first_parity_block_contract(
+                            &actual,
+                            matrix_kind,
+                            sparse,
+                            dosage_source,
+                        );
+                    }
+                    let width = output_width(&actual);
+                    start += width;
+                    widths.push(width);
+                    positions.extend(output_positions(&actual));
+                }
+                assert_eq!(widths, if sparse { vec![3, 1] } else { vec![3, 2] });
                 assert_eq!(
-                    [output_positions(&first), output_positions(&second)].concat(),
-                    vec![10, 20, 30],
+                    positions,
+                    if sparse {
+                        vec![10, 30, 40, 50]
+                    } else {
+                        vec![10, 20, 30, 40, 50]
+                    },
                     "indexed source order and exact region boundaries must be stable"
                 );
-                assert!(session
-                    .next_block(2)
-                    .expect("indexed mode should reach EOF")
-                    .is_none());
                 let at_eof = probe.snapshot();
                 assert!(session
-                    .next_block(2)
+                    .next_block(3)
                     .expect("indexed mode EOF should be sticky")
                     .is_none());
                 assert_eq!(probe.snapshot(), at_eof);
@@ -1732,12 +2032,46 @@ mod tests {
                 assert_eq!(counts.header_parses, 1);
                 assert_eq!(counts.tabix_index_opens, usize::from(!use_csi));
                 assert_eq!(counts.csi_index_opens, usize::from(use_csi));
-                assert_eq!(counts.candidate_visits, 3);
-                assert_eq!(counts.gt_decodes, expected_gt);
-                assert_eq!(counts.ds_decodes, expected_ds);
-                assert_eq!(counts.phase_decodes, expected_phase);
-                assert_eq!(counts.max_dense_output_len, expected_dense_allocation);
-                assert_eq!(counts.max_sparse_indptr_len, expected_sparse_allocation);
+                assert_eq!(
+                    counts.candidate_visits, 7,
+                    "touching index chunks merge into one coarse span before region post-filtering"
+                );
+                assert_eq!(
+                    counts.gt_decodes,
+                    match (matrix_kind, dosage_source) {
+                        (MatrixKind::Genotype, DosageSource::Hardcall)
+                        | (MatrixKind::Haplotype, DosageSource::Hardcall) => 5,
+                        (MatrixKind::Genotype, DosageSource::Dosage) => 0,
+                        (MatrixKind::Haplotype, DosageSource::Dosage) => unreachable!(),
+                    }
+                );
+                assert_eq!(
+                    counts.ds_decodes,
+                    usize::from(dosage_source == DosageSource::Dosage) * 5
+                );
+                assert_eq!(
+                    counts.phase_decodes,
+                    if matrix_kind == MatrixKind::Haplotype {
+                        if sparse {
+                            4
+                        } else {
+                            5
+                        }
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    counts.max_dense_output_len,
+                    if sparse {
+                        0
+                    } else if matrix_kind == MatrixKind::Haplotype {
+                        12
+                    } else {
+                        6
+                    }
+                );
+                assert_eq!(counts.max_sparse_indptr_len, if sparse { 4 } else { 0 });
                 assert_eq!(counts.drops, 1);
             }
 
@@ -1757,7 +2091,7 @@ mod tests {
             let early_probe = TextVcfWorkProbe::default();
             let mut early = TextVcfBlockSession::open_with_probe(
                 path.clone(),
-                options(Some(region_filter("1:10-30"))),
+                options(Some(region_filter("1:10-50"))),
                 early_probe.clone(),
             )
             .expect("early-drop indexed session should open");
@@ -1767,7 +2101,10 @@ mod tests {
                 .is_some());
             drop(early);
             let early_counts = early_probe.snapshot();
-            assert_eq!(early_counts.candidate_visits, 2);
+            assert_eq!(
+                early_counts.candidate_visits, 3,
+                "early drop should include the coarse before-region candidate visit"
+            );
             assert_eq!(early_counts.gt_decodes, 2);
             assert_eq!(early_counts.drops, 1);
         }
@@ -1777,16 +2114,9 @@ mod tests {
     fn pbr_rust_textvcf_001_002_plain_and_compressed_sequential_mode_matrix() {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let plain = dir.path().join("matrix.vcf");
-        write_fixture(
-            &plain,
-            "\
-1\t10\trs10\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|1:0.9
-1\t20\trs20\tC\tT\t.\tPASS\t.\tGT:DS\t0|1:1.2\t1|1:1.8
-1\t30\trs30\tG\tA\t.\tPASS\t.\tGT:DS\t1|1:1.9\t0|0:0.2
-",
-        );
+        write_fixture(&plain, PARITY_CORE_RECORDS);
         let compressed = dir.path().join("matrix.vcf.gz");
-        write_indexed_fixture(&compressed);
+        write_bgzf_fixture(&compressed, PARITY_CORE_RECORDS, false);
         let modes = [
             (MatrixKind::Genotype, false, DosageSource::Hardcall),
             (MatrixKind::Genotype, false, DosageSource::Dosage),
@@ -1798,33 +2128,60 @@ mod tests {
         for path in [plain, compressed] {
             for (matrix_kind, sparse, dosage_source) in modes {
                 let probe = TextVcfWorkProbe::default();
-                let mut mode_options = options(Some(chrom_filter("1")));
+                let missing_rate_max = if sparse { 0.0 } else { 0.5 };
+                let mut mode_options = options(Some(sequential_parity_filter(missing_rate_max)));
                 mode_options.matrix_kind = matrix_kind;
                 mode_options.sparse = sparse;
                 mode_options.dosage_source = dosage_source;
-                mode_options.missing_policy = DenseMissingPolicy::Raise;
-                let mut session =
-                    TextVcfBlockSession::open_with_probe(path.clone(), mode_options, probe.clone())
-                        .expect("sequential text mode should open");
-                let first = session
-                    .next_block(2)
-                    .expect("first sequential text block should decode")
-                    .expect("first sequential text block should exist");
-                let second = session
-                    .next_block(2)
-                    .expect("second sequential text block should decode")
-                    .expect("second sequential text block should exist");
+                mode_options.missing_policy = if sparse {
+                    DenseMissingPolicy::Raise
+                } else {
+                    DenseMissingPolicy::Nan
+                };
+                mode_options.requested_samples = Some(vec!["S2".to_owned(), "S1".to_owned()]);
+                let mut session = TextVcfBlockSession::open_with_probe(
+                    path.clone(),
+                    mode_options.clone(),
+                    probe.clone(),
+                )
+                .expect("sequential text mode should open");
+                let mut start = 0;
+                let mut widths = Vec::new();
+                let mut positions = Vec::new();
+                while let Some(actual) = session
+                    .next_block(3)
+                    .expect("sequential text mode block should decode")
+                {
+                    let context = format!(
+                        "{matrix_kind:?}/{sparse}/{dosage_source:?} sequential block {start}"
+                    );
+                    let expected = stateless_text_block(&path, &mode_options, start, 3);
+                    assert_block_output_matches(&actual, &expected, &context);
+                    if start == 0 {
+                        assert_first_parity_block_contract(
+                            &actual,
+                            matrix_kind,
+                            sparse,
+                            dosage_source,
+                        );
+                    }
+                    let width = output_width(&actual);
+                    start += width;
+                    widths.push(width);
+                    positions.extend(output_positions(&actual));
+                }
+                assert_eq!(widths, if sparse { vec![3, 1] } else { vec![3, 2] });
                 assert_eq!(
-                    [output_positions(&first), output_positions(&second)].concat(),
-                    vec![10, 20, 30]
+                    positions,
+                    if sparse {
+                        vec![10, 30, 40, 50]
+                    } else {
+                        vec![10, 20, 30, 40, 50]
+                    }
                 );
-                assert!(session
-                    .next_block(2)
-                    .expect("sequential text mode should reach EOF")
-                    .is_none());
                 let at_eof = probe.snapshot();
                 assert!(session
-                    .next_block(2)
+                    .next_block(3)
                     .expect("sequential text EOF should be sticky")
                     .is_none());
                 assert_eq!(probe.snapshot(), at_eof);
@@ -1834,7 +2191,43 @@ mod tests {
                 assert_eq!(counts.header_parses, 1);
                 assert_eq!(counts.tabix_index_opens, 0);
                 assert_eq!(counts.csi_index_opens, 0);
-                assert_eq!(counts.candidate_visits, 3);
+                assert_eq!(counts.candidate_visits, 6);
+                assert_eq!(
+                    counts.gt_decodes,
+                    match (matrix_kind, dosage_source) {
+                        (MatrixKind::Genotype, DosageSource::Hardcall)
+                        | (MatrixKind::Haplotype, DosageSource::Hardcall) => 5,
+                        (MatrixKind::Genotype, DosageSource::Dosage) => 0,
+                        (MatrixKind::Haplotype, DosageSource::Dosage) => unreachable!(),
+                    }
+                );
+                assert_eq!(
+                    counts.ds_decodes,
+                    usize::from(dosage_source == DosageSource::Dosage) * 5
+                );
+                assert_eq!(
+                    counts.phase_decodes,
+                    if matrix_kind == MatrixKind::Haplotype {
+                        if sparse {
+                            4
+                        } else {
+                            5
+                        }
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    counts.max_dense_output_len,
+                    if sparse {
+                        0
+                    } else if matrix_kind == MatrixKind::Haplotype {
+                        12
+                    } else {
+                        6
+                    }
+                );
+                assert_eq!(counts.max_sparse_indptr_len, if sparse { 4 } else { 0 });
                 assert_eq!(counts.drops, 1);
             }
         }

@@ -5,13 +5,13 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-#[allow(
+#[expect(
     dead_code,
     reason = "shared integration-test helpers are compiled per test target"
 )]
 pub(crate) mod bcf;
 pub(crate) mod bgen_output;
-#[allow(
+#[expect(
     dead_code,
     reason = "shared integration-test helpers are compiled per test target"
 )]
