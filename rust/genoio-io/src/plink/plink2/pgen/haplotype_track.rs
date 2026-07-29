@@ -17,7 +17,9 @@ use crate::error::Result;
 use crate::hardcall::PackedHardcalls as PackedGenotypes;
 
 use super::bitpack::{bit_is_set, ensure_record_bits, ensure_record_bytes};
-use super::dosage_track::{overlay_variable_width_dosages, DosageOverlayTarget};
+use super::dosage_track::{
+    overlay_variable_width_dosages, DosageEntryScratch, DosageOverlayTarget,
+};
 use super::io::read_fixed_width_phased_dosage_variant_record;
 use super::main_track::decode_variable_width_main_track;
 use super::{
@@ -182,7 +184,10 @@ pub(in crate::plink::plink2) fn decode_plink2_haplotype_dosage_aux(
             values: &mut haplotype_state.selected_collapsed_values,
             missing_indices: &mut haplotype_state.selected_collapsed_missing_indices,
         },
-        Some(&mut haplotype_state.dosage_source_indices),
+        Some(DosageEntryScratch {
+            source_indices: &mut haplotype_state.dosage_source_indices,
+            totals: &mut haplotype_state.dosage_source_totals,
+        }),
     )?;
     haplotype_state.selected_explicit_phase.clear();
     haplotype_state
@@ -498,15 +503,26 @@ fn decode_variable_explicit_phase_track(
             })?;
         ensure_record_bytes(path, record, cursor, phase_bytes_len)?;
         let mut selected_cursor = SelectedSampleCursor::new(source_indices);
-        for source_index in 0..haplotype_state.dosage_source_indices.len() {
-            let byte_index = cursor + source_index * 2;
+        for dosage_index in 0..haplotype_state.dosage_source_indices.len() {
+            let source_index = haplotype_state.dosage_source_indices[dosage_index];
+            let byte_index = cursor + dosage_index * 2;
             let delta = decode_variable_phase_delta(
                 path,
                 i16::from_le_bytes([record[byte_index], record[byte_index + 1]]),
                 true,
             )?;
+            let total = haplotype_state
+                .dosage_source_totals
+                .get(dosage_index)
+                .copied()
+                .ok_or_else(|| {
+                    GenoioError::internal_contract(
+                        "pgen phased dosage totals and source indices are misaligned",
+                    )
+                })?;
+            let phased = validate_phased_dosage_pair(path, total, delta)?;
             if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
-                apply_explicit_phase_delta(path, selected_index, delta, haplotype_state)?;
+                apply_validated_explicit_phase(selected_index, phased, haplotype_state);
             }
         }
         return Ok(cursor + phase_bytes_len);
@@ -538,8 +554,18 @@ fn decode_variable_explicit_phase_track(
             i16::from_le_bytes([record[byte_index], record[byte_index + 1]]),
             false,
         )?;
+        let total = haplotype_state
+            .dosage_source_totals
+            .get(dosage_index)
+            .copied()
+            .ok_or_else(|| {
+                GenoioError::internal_contract(
+                    "pgen phased dosage totals and source indices are misaligned",
+                )
+            })?;
+        let phased = validate_phased_dosage_pair(path, total, delta)?;
         if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
-            apply_explicit_phase_delta(path, selected_index, delta, haplotype_state)?;
+            apply_validated_explicit_phase(selected_index, phased, haplotype_state);
         }
         phase_value_index += 1;
     }
@@ -565,36 +591,46 @@ fn decode_variable_phase_delta(path: &Path, raw: i16, allow_missing: bool) -> Re
     Ok(Some(f32::from(raw) * PGEN_PHASE_SCALE))
 }
 
-fn apply_explicit_phase_delta(
+#[derive(Clone, Copy)]
+enum ValidatedPhasedDosage {
+    Missing,
+    Present { total: f32, left: f32, right: f32 },
+}
+
+fn validate_phased_dosage_pair(
     path: &Path,
-    selected_index: usize,
+    total: Option<f32>,
     delta: Option<f32>,
-    haplotype_state: &mut PgenHaplotypeDecodeState,
-) -> Result<()> {
-    let total_missing = haplotype_state
-        .selected_collapsed_missing_indices
-        .binary_search(&selected_index)
-        .is_ok();
-    match (total_missing, delta) {
-        (true, None) => {
-            set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, true);
-        }
-        (false, Some(delta)) => {
-            let total = haplotype_state.selected_collapsed_values[selected_index];
+) -> Result<ValidatedPhasedDosage> {
+    match (total, delta) {
+        (None, None) => Ok(ValidatedPhasedDosage::Missing),
+        (Some(total), Some(delta)) => {
             let left = (total + delta) * 0.5;
             let right = (total - delta) * 0.5;
             validate_phased_dosage_haplotype_components(path, left, right)?;
-            set_selected_haplotype_pair(haplotype_state, selected_index, left, right, false);
+            Ok(ValidatedPhasedDosage::Present { total, left, right })
         }
-        _ => {
-            return Err(GenoioError::invalid_source(
-                path,
-                "pgen full dosage and phased-dosage missing sentinels are inconsistent",
-            ));
+        _ => Err(GenoioError::invalid_source(
+            path,
+            "pgen full dosage and phased-dosage missing sentinels are inconsistent",
+        )),
+    }
+}
+
+fn apply_validated_explicit_phase(
+    selected_index: usize,
+    phased: ValidatedPhasedDosage,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) {
+    match phased {
+        ValidatedPhasedDosage::Missing => {
+            set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, true);
+        }
+        ValidatedPhasedDosage::Present { left, right, .. } => {
+            set_selected_haplotype_pair(haplotype_state, selected_index, left, right, false);
         }
     }
     haplotype_state.selected_explicit_phase[selected_index] = true;
-    Ok(())
 }
 
 fn finalize_implicit_haplotype_dosages(
@@ -673,7 +709,8 @@ fn decode_full_phased_dosage_tracks(
     haplotype_state.selected_haplotype_missing_indices.clear();
     haplotype_state.selected_collapsed_values.clear();
     haplotype_state.selected_collapsed_missing_indices.clear();
-    for source_index in source_indices {
+    let mut selected_samples = SelectedSampleCursor::new(source_indices);
+    for source_index in 0..sample_ct {
         let dosage_offset = cursor + source_index * 2;
         let phase_offset = phase_cursor + source_index * 2;
         let dosage = decode_phased_dosage_total(
@@ -684,22 +721,26 @@ fn decode_full_phased_dosage_tracks(
             path,
             i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]),
         )?;
-        let (Some(total), Some(delta)) = (dosage, phase_delta) else {
-            let row_offset = haplotype_state.selected_haplotype_values.len();
-            haplotype_state
-                .selected_haplotype_missing_indices
-                .extend([row_offset, row_offset + 1]);
-            haplotype_state.selected_haplotype_values.extend([0.0, 0.0]);
-            push_collapsed_dosage(haplotype_state, 0.0, true);
+        let phased = validate_phased_dosage_pair(path, dosage, phase_delta)?;
+        if selected_samples.selected_index_for(source_index).is_none() {
             continue;
-        };
-        let left = (total + delta) * 0.5;
-        let right = (total - delta) * 0.5;
-        validate_phased_dosage_haplotype_components(path, left, right)?;
-        haplotype_state
-            .selected_haplotype_values
-            .extend([left, right]);
-        push_collapsed_dosage(haplotype_state, total, false);
+        }
+        match phased {
+            ValidatedPhasedDosage::Missing => {
+                let row_offset = haplotype_state.selected_haplotype_values.len();
+                haplotype_state
+                    .selected_haplotype_missing_indices
+                    .extend([row_offset, row_offset + 1]);
+                haplotype_state.selected_haplotype_values.extend([0.0, 0.0]);
+                push_collapsed_dosage(haplotype_state, 0.0, true);
+            }
+            ValidatedPhasedDosage::Present { total, left, right } => {
+                haplotype_state
+                    .selected_haplotype_values
+                    .extend([left, right]);
+                push_collapsed_dosage(haplotype_state, total, false);
+            }
+        }
     }
     Ok(())
 }

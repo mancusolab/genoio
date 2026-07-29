@@ -96,6 +96,7 @@ pub(super) struct PgenHaplotypeDecodeState {
     pub(super) selected_collapsed_missing_indices: Vec<usize>,
     selected_phase_swapped: Vec<Option<bool>>,
     dosage_source_indices: Vec<usize>,
+    dosage_source_totals: Vec<Option<f32>>,
     selected_explicit_phase: Vec<bool>,
 }
 

@@ -889,6 +889,239 @@ fn pbr_rust_plink2_003_genotype_and_haplotype_dosage_blocks_match_whole_reads() 
     );
 }
 
+fn assert_unselected_dosage_corruption_is_rejected(
+    name: &str,
+    invalid_pgen_bytes: &[u8],
+    valid_pgen_bytes: &[u8],
+    matrix_kind: MatrixKind,
+    expected_valid_values: &[f32],
+) {
+    let variants = "#CHROM POS ID REF ALT\n1 10 valid A G\n1 20 invalid C T\n";
+    let selected = vec!["S1".to_owned()];
+    let invalid_dir = unique_dir(&format!("pbr-plink2-unselected-invalid-{name}"));
+    let (invalid_pgen, invalid_pvar, invalid_psam) =
+        write_plink2_fixture_with_variants(&invalid_dir, invalid_pgen_bytes, variants);
+
+    let stateless_error = match matrix_kind {
+        MatrixKind::Genotype => genoio_io::read_plink2_dosage_dense_windowed(
+            &invalid_pgen,
+            &invalid_pvar,
+            &invalid_psam,
+            Some(&selected),
+            None,
+            None,
+            false,
+        ),
+        MatrixKind::Haplotype => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+            &invalid_pgen,
+            &invalid_pvar,
+            &invalid_psam,
+            Some(&selected),
+            None,
+            None,
+            false,
+        ),
+    }
+    .expect_err("an invalid unselected dosage entry must fail a stateless read");
+    assert!(
+        matches!(
+            stateless_error,
+            genoio_core::GenoioError::InvalidSource { .. }
+        ),
+        "{name}: {stateless_error}"
+    );
+
+    let mut invalid_reader = BlockReader::open(
+        BlockSource::Plink2 {
+            pgen: invalid_pgen,
+            pvar: invalid_pvar,
+            psam: invalid_psam,
+        },
+        plink2_mode_block_options(
+            matrix_kind,
+            false,
+            Some(selected.clone()),
+            None,
+            DosageSource::Dosage,
+            DenseMissingPolicy::Nan,
+            true,
+        ),
+        1,
+    )
+    .expect("an invalid-later dosage session should open");
+    assert!(invalid_reader
+        .next_block()
+        .expect("the valid first dosage block should decode")
+        .is_some());
+    let session_error = invalid_reader
+        .next_block()
+        .expect_err("an invalid unselected dosage entry must fail when its block is requested");
+    assert!(
+        matches!(
+            session_error,
+            genoio_core::GenoioError::InvalidSource { .. }
+        ),
+        "{name}: {session_error}"
+    );
+    assert!(invalid_reader
+        .next_block()
+        .expect("a failed dosage session must remain terminal")
+        .is_none());
+
+    let valid_dir = unique_dir(&format!("pbr-plink2-unselected-valid-{name}"));
+    let (valid_pgen, valid_pvar, valid_psam) =
+        write_plink2_fixture_with_variants(&valid_dir, valid_pgen_bytes, variants);
+    let stateless_valid = match matrix_kind {
+        MatrixKind::Genotype => genoio_io::read_plink2_dosage_dense_windowed(
+            &valid_pgen,
+            &valid_pvar,
+            &valid_psam,
+            Some(&selected),
+            None,
+            None,
+            false,
+        ),
+        MatrixKind::Haplotype => genoio_io::read_plink2_haplotypes_dosage_dense_windowed(
+            &valid_pgen,
+            &valid_pvar,
+            &valid_psam,
+            Some(&selected),
+            None,
+            None,
+            false,
+        ),
+    }
+    .expect("the equivalent valid selected-sample read should decode");
+    assert_values_with_nan(
+        &dense_values_sample_major(&stateless_valid),
+        expected_valid_values,
+    );
+
+    let valid_blocks = collect_plink2_blocks(
+        &valid_pgen,
+        &valid_pvar,
+        &valid_psam,
+        plink2_mode_block_options(
+            matrix_kind,
+            false,
+            Some(selected),
+            None,
+            DosageSource::Dosage,
+            DenseMissingPolicy::Nan,
+            true,
+        ),
+        1,
+    )
+    .into_iter()
+    .map(|block| match block {
+        BlockOutput::Dense(matrix) => matrix,
+        BlockOutput::Sparse(_) => panic!("a dosage session returned sparse output"),
+    })
+    .collect::<Vec<_>>();
+    assert_values_with_nan(
+        &concatenate_plink2_dense_blocks(&valid_blocks),
+        expected_valid_values,
+    );
+}
+
+#[test]
+fn pbr_rust_plink2_003_fixed_genotype_dosage_validates_unselected_samples() {
+    let valid_record = {
+        let mut record = vec![0x00];
+        record.extend(0_u16.to_le_bytes());
+        record.extend(0_u16.to_le_bytes());
+        record.extend(0_u16.to_le_bytes());
+        record
+    };
+    let invalid_record = {
+        let mut record = valid_record.clone();
+        record[3..5].copy_from_slice(&32_769_u16.to_le_bytes());
+        record
+    };
+    assert_unselected_dosage_corruption_is_rejected(
+        "fixed-genotype",
+        &fixed_width_dosage_pgen(&[&valid_record, &invalid_record], 3),
+        &fixed_width_dosage_pgen(&[&valid_record, &valid_record], 3),
+        MatrixKind::Genotype,
+        &[0.0, 0.0],
+    );
+}
+
+#[test]
+fn pbr_rust_plink2_003_fixed_phased_dosage_validates_unselected_samples() {
+    let valid_record = {
+        let mut record = vec![0x00];
+        for _ in 0..3 {
+            record.extend(0_u16.to_le_bytes());
+        }
+        for _ in 0..3 {
+            record.extend(0_i16.to_le_bytes());
+        }
+        record
+    };
+    let invalid_record = {
+        let mut record = valid_record.clone();
+        record[3..5].copy_from_slice(&u16::MAX.to_le_bytes());
+        record
+    };
+    assert_unselected_dosage_corruption_is_rejected(
+        "fixed-phased",
+        &fixed_width_phased_dosage_pgen(&[&valid_record, &invalid_record], 3),
+        &fixed_width_phased_dosage_pgen(&[&valid_record, &valid_record], 3),
+        MatrixKind::Haplotype,
+        &[0.0, 0.0, 0.0, 0.0],
+    );
+}
+
+#[test]
+fn pbr_rust_plink2_003_variable_explicit_phase_validates_unselected_samples() {
+    let valid_record = {
+        let mut record = vec![0x00];
+        for _ in 0..3 {
+            record.extend(0_u16.to_le_bytes());
+        }
+        for _ in 0..3 {
+            record.extend(0_i16.to_le_bytes());
+        }
+        record
+    };
+    let invalid_record = {
+        let mut record = valid_record.clone();
+        record[9..11].copy_from_slice(&16_384_i16.to_le_bytes());
+        record
+    };
+    assert_unselected_dosage_corruption_is_rejected(
+        "variable-explicit-phase",
+        &explicit_phased_dosage_pgen(&[&valid_record, &invalid_record], 3),
+        &explicit_phased_dosage_pgen(&[&valid_record, &valid_record], 3),
+        MatrixKind::Haplotype,
+        &[0.0, 0.0, 0.0, 0.0],
+    );
+}
+
+#[test]
+fn pbr_rust_plink2_003_sparse_explicit_phase_validates_unselected_samples() {
+    let valid_record = {
+        let mut record = vec![0x00, 0x00, 0b0000_0010];
+        record.extend(0_u16.to_le_bytes());
+        record.push(0b0000_0001);
+        record.extend(0_i16.to_le_bytes());
+        record
+    };
+    let invalid_record = {
+        let mut record = valid_record.clone();
+        record[6..8].copy_from_slice(&16_384_i16.to_le_bytes());
+        record
+    };
+    assert_unselected_dosage_corruption_is_rejected(
+        "sparse-explicit-phase",
+        &variable_width_pgen(&[0xf0, 0xf0], &[&valid_record, &invalid_record], 3),
+        &variable_width_pgen(&[0xf0, 0xf0], &[&valid_record, &valid_record], 3),
+        MatrixKind::Haplotype,
+        &[0.0, 0.0, 0.0, 0.0],
+    );
+}
+
 #[test]
 fn pbr_rust_plink2_003_variable_dosage_existence_and_phase_mapping_follow_the_spec() {
     let dir = unique_dir("pbr-plink2-variable-dosage-existence-phase");
@@ -1236,7 +1469,7 @@ fn pbr_rust_plink2_003_fixed_width_and_rejected_ld_base_dosage_semantics_are_per
     record_3.extend(u16::MAX.to_le_bytes());
     record_3.extend(scaled_phase_delta(0.1, 0.3));
     record_3.extend(scaled_phase_delta(0.5, 0.5));
-    record_3.extend(scaled_phase_delta(0.0, 0.0));
+    record_3.extend(i16::MIN.to_le_bytes());
     let fixed = fixed_width_phased_dosage_pgen(&[&record_1, &record_2, &record_3], 3);
     let (fixed_pgen, fixed_pvar, fixed_psam) = write_plink2_fixture_with_variants(
         &dir,
