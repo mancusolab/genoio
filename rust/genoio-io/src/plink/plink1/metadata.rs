@@ -60,20 +60,6 @@ pub(super) fn parse_bim_metadata(path: &Path) -> Result<VariantMetadataBuffers> 
     Ok(variants)
 }
 
-pub(super) fn count_bim_records(path: &Path) -> Result<usize> {
-    let mut count = 0_usize;
-    for line in open_text_lines(path)? {
-        let line = line.map_err(|source| GenoioError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if !line.trim().is_empty() {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
 /// Streams non-empty BIM rows as source-indexed variant records.
 pub(super) struct BimRecordReader {
     path: std::path::PathBuf,

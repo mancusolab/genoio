@@ -45,34 +45,6 @@ fn validate_bed_header(path: &Path, header: &[u8; 3]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_bed_payload_len(
-    path: &Path,
-    file: &File,
-    n_source_samples: usize,
-    n_source_variants: usize,
-    bytes_per_variant: usize,
-) -> Result<()> {
-    let expected_len = 3 + n_source_variants * bytes_per_variant;
-    let actual_len = file
-        .metadata()
-        .map_err(|source| GenoioError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .len();
-    let expected_len_u64 = u64::try_from(expected_len)
-        .map_err(|_| GenoioError::invalid_source(path, "bed payload length is out of range"))?;
-    if actual_len != expected_len_u64 {
-        return Err(GenoioError::invalid_source(
-            path,
-            format!(
-                "bed payload length {actual_len} does not match {n_source_samples} samples and {n_source_variants} variants"
-            ),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn infer_bed_variant_count(
     path: &Path,
     file: &File,

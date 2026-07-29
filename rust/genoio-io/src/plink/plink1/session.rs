@@ -5,15 +5,16 @@ use std::fs::File;
 use std::path::PathBuf;
 
 use genoio_core::{
-    attach_variant_stats, select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix,
-    DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan,
-    PartialFilterDecision, SampleMetadataBuffers, VariantFilter, VariantMetadataBuffers,
-    VariantRecord, VariantWindow,
+    append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
+    select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseLayout,
+    DenseMissingPolicy, DenseSampleSelection, GenoioError, GenotypeFilterPlan,
+    PartialFilterDecision, SampleMetadataBuffers, SparseGenotypeMatrix, VariantFilter,
+    VariantMetadataBuffers, VariantRecord, VariantWindow,
 };
 
 use crate::blocks::{
-    block_diagnostics_snapshot, checked_dense_block_len, BlockOutput, BlockReadOptions,
-    DosageSource, MatrixKind,
+    block_diagnostics_snapshot, checked_dense_block_len, checked_sparse_indptr_len, BlockOutput,
+    BlockReadOptions, DosageSource, MatrixKind,
 };
 use crate::error::Result;
 use crate::hardcall::{
@@ -43,6 +44,7 @@ pub(crate) struct Plink1BlockSession {
     variant_filter: Option<VariantFilter>,
     genotype_filter_plan: GenotypeFilterPlan,
     missing_policy: DenseMissingPolicy,
+    sparse: bool,
     return_samples: bool,
     return_variants: bool,
     all_samples_selected: bool,
@@ -113,6 +115,7 @@ impl Plink1BlockSession {
             variant_filter: options.variant_filter,
             genotype_filter_plan,
             missing_policy: options.missing_policy,
+            sparse: options.sparse,
             return_samples: options.return_samples,
             return_variants: options.return_variants,
             all_samples_selected: options.requested_samples.is_none(),
@@ -144,8 +147,13 @@ impl Plink1BlockSession {
     }
 
     pub(crate) fn next_block(&mut self, block_size: usize) -> Result<Option<BlockOutput>> {
-        self.next_dense_block(block_size)
-            .map(|matrix| matrix.map(BlockOutput::Dense))
+        if self.sparse {
+            self.next_sparse_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Sparse))
+        } else {
+            self.next_dense_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Dense))
+        }
     }
 
     pub(super) fn source_record_capacity(&self) -> usize {
@@ -166,6 +174,27 @@ impl Plink1BlockSession {
             0,
             Vec::new(),
             DenseLayout::SampleMajor,
+            samples,
+            variants,
+            block_diagnostics_snapshot(&self.diagnostics, 0),
+        )
+    }
+
+    pub(super) fn empty_sparse_output(&self) -> Result<SparseGenotypeMatrix> {
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &self.selection.samples,
+            self.return_samples,
+            false,
+        )?;
+        let variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(0));
+        SparseGenotypeMatrix::new(
+            self.selection.samples.len(),
+            0,
+            vec![0],
+            Vec::new(),
+            Vec::new(),
             samples,
             variants,
             block_diagnostics_snapshot(&self.diagnostics, 0),
@@ -307,6 +336,115 @@ impl Plink1BlockSession {
         .map(Some)
     }
 
+    pub(super) fn next_sparse_block(
+        &mut self,
+        block_size: usize,
+    ) -> Result<Option<SparseGenotypeMatrix>> {
+        if self.eof || block_size == 0 {
+            return Ok(None);
+        }
+
+        let indptr_len = checked_sparse_indptr_len(block_size)?;
+        self.record_sparse_allocation(indptr_len);
+        let mut indptr = Vec::with_capacity(indptr_len);
+        indptr.push(0);
+        let mut indices = Vec::new();
+        let mut data = Vec::new();
+        let mut variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(block_size));
+        let retained_skip = std::mem::take(&mut self.retained_skip);
+        let mut retention = RetainedVariantState::new(Some(VariantWindow {
+            start: retained_skip,
+            len: block_size,
+        }));
+        let mut output_variant_count = 0_usize;
+
+        while !retention.window_is_satisfied() {
+            let Some((variant_index, variant)) = self.next_source_variant()? else {
+                break;
+            };
+            let mut variant = variant.ok_or_else(|| {
+                GenoioError::internal_contract("sparse PLINK1 reads require BIM metadata")
+            })?;
+            let partial_decision = self
+                .variant_filter
+                .as_ref()
+                .map_or(PartialFilterDecision::Accept, |filter| {
+                    filter.partial_decision(&variant)
+                });
+            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
+                MetadataRetentionAction::Skip => continue,
+                MetadataRetentionAction::Stop => break,
+                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            }
+
+            self.decode_variant(variant_index)?;
+            if matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+                let filter = self.variant_filter.as_ref().ok_or_else(|| {
+                    GenoioError::internal_contract("genotype decision requires a variant filter")
+                })?;
+                let (retain_variant, stats) = evaluate_packed_hardcall_filter(
+                    &self.decoder_state.packed,
+                    &self.selection.source_indices,
+                    self.all_samples_selected,
+                    filter,
+                    self.genotype_filter_plan,
+                    Some(&variant),
+                    self.return_variants,
+                )?;
+                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => break,
+                }
+                if let Some(stats) = stats {
+                    attach_variant_stats(&mut variant, stats);
+                }
+            }
+
+            self.decoder_state.packed.expand_selected(
+                &self.selection.source_indices,
+                &mut self.decoder_state.values,
+                &mut self.decoder_state.missing_indices,
+            );
+            reject_sparse_missing(!self.decoder_state.missing_indices.is_empty())?;
+            flip_values_to_minor_allele(&mut self.decoder_state.values, &mut variant);
+            append_sparse_column(
+                &mut indptr,
+                &mut indices,
+                &mut data,
+                &self.decoder_state.values,
+            )?;
+            output_variant_count += 1;
+            if let Some(variants) = variants.as_mut() {
+                variants.push_record(&variant)?;
+            }
+        }
+
+        self.finish_source_if_at_bed_end()?;
+        if output_variant_count == 0 {
+            return Ok(None);
+        }
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &self.selection.samples,
+            self.return_samples,
+            false,
+        )?;
+        let diagnostics = block_diagnostics_snapshot(&self.diagnostics, output_variant_count);
+        SparseGenotypeMatrix::new(
+            self.selection.samples.len(),
+            output_variant_count,
+            indptr,
+            indices,
+            data,
+            samples,
+            variants,
+            diagnostics,
+        )
+        .map(Some)
+    }
+
     fn next_source_variant(&mut self) -> Result<Option<(usize, Option<VariantRecord>)>> {
         if self.source_position >= self.n_source_variants {
             self.finish_source_if_at_bed_end()?;
@@ -391,6 +529,16 @@ impl Plink1BlockSession {
 
     #[cfg(not(test))]
     fn record_dense_allocation(&self, _len: usize) {}
+
+    #[cfg(test)]
+    fn record_sparse_allocation(&self, indptr_len: usize) {
+        if let Some(probe) = &self.probe {
+            probe.record_sparse_allocation(indptr_len);
+        }
+    }
+
+    #[cfg(not(test))]
+    fn record_sparse_allocation(&self, _indptr_len: usize) {}
 }
 
 impl Drop for Plink1BlockSession {
@@ -411,11 +559,6 @@ fn validate_plink1_options(options: &BlockReadOptions) -> Result<()> {
     if options.dosage_source != DosageSource::Hardcall {
         return Err(GenoioError::unsupported(
             "plink1 block reads support hardcall values only",
-        ));
-    }
-    if options.sparse {
-        return Err(GenoioError::unsupported(
-            "plink1 sparse block reads are not implemented yet",
         ));
     }
     Ok(())
@@ -469,6 +612,12 @@ impl Plink1WorkProbe {
         self.update(|counts| counts.max_dense_output_len = counts.max_dense_output_len.max(len));
     }
 
+    fn record_sparse_allocation(&self, indptr_len: usize) {
+        self.update(|counts| {
+            counts.max_sparse_indptr_len = counts.max_sparse_indptr_len.max(indptr_len);
+        });
+    }
+
     fn record_drop(&self) {
         self.update(|counts| counts.drops += 1);
     }
@@ -483,6 +632,7 @@ struct Plink1WorkCounts {
     candidate_visits: usize,
     payload_decodes: usize,
     max_dense_output_len: usize,
+    max_sparse_indptr_len: usize,
     drops: usize,
 }
 
@@ -531,6 +681,14 @@ mod tests {
         }
     }
 
+    fn sparse_options(filter: Option<VariantFilter>) -> BlockReadOptions {
+        BlockReadOptions {
+            sparse: true,
+            missing_policy: DenseMissingPolicy::Raise,
+            ..options(filter)
+        }
+    }
+
     fn chrom_filter(chrom: &str) -> VariantFilter {
         VariantFilter::from_json_value(json!({
             "op": "predicate",
@@ -545,7 +703,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let (bed, bim, fam) = write_fixture(
             dir.path(),
-            &[0x04, 0x0d, 0x03],
+            &[0x0b, 0x2c, 0x08],
             "1 rs1 0 10 G A\n1 rs2 0 20 T C\n2 rs3 0 30 A G\n",
         );
         let probe = Plink1WorkProbe::default();
@@ -659,5 +817,94 @@ mod tests {
         {}
 
         assert_eq!(probe.snapshot().max_dense_output_len, 2);
+    }
+
+    #[test]
+    fn pbr_rust_plink1_002_sparse_probe_counts_linear_work_and_checked_block_allocation() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (bed, bim, fam) = write_fixture(
+            dir.path(),
+            &[0x0b, 0x2c, 0x08],
+            "1 rs1 0 10 G A\n1 rs2 0 20 T C\n2 rs3 0 30 A G\n",
+        );
+        let probe = Plink1WorkProbe::default();
+
+        {
+            let mut session = Plink1BlockSession::open_with_probe(
+                bed,
+                bim,
+                fam,
+                sparse_options(None),
+                probe.clone(),
+            )
+            .expect("persistent sparse plink1 session should open");
+            while session
+                .next_block(1)
+                .expect("persistent sparse plink1 block should decode")
+                .is_some()
+            {}
+        }
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.bed_opens, 1);
+        assert_eq!(counts.bim_opens, 1);
+        assert_eq!(counts.fam_opens, 1);
+        assert_eq!(counts.candidate_visits, 3);
+        assert_eq!(counts.payload_decodes, 3);
+        assert_eq!(counts.max_sparse_indptr_len, 2);
+        assert_eq!(counts.drops, 1);
+    }
+
+    #[test]
+    fn pbr_rust_plink1_002_separate_sessions_keep_independent_cursors_and_probes() {
+        let first_dir = tempfile::tempdir().expect("test directory should be created");
+        let second_dir = tempfile::tempdir().expect("test directory should be created");
+        let first_paths = write_fixture(
+            first_dir.path(),
+            &[0x0b, 0x2c, 0x08],
+            "1 rs1 0 10 G A\n1 rs2 0 20 T C\n2 rs3 0 30 A G\n",
+        );
+        let second_paths = write_fixture(
+            second_dir.path(),
+            &[0x0b, 0x2c, 0x08],
+            "1 rs1 0 10 G A\n1 rs2 0 20 T C\n2 rs3 0 30 A G\n",
+        );
+        let first_probe = Plink1WorkProbe::default();
+        let second_probe = Plink1WorkProbe::default();
+        let mut first = Plink1BlockSession::open_with_probe(
+            first_paths.0,
+            first_paths.1,
+            first_paths.2,
+            options(None),
+            first_probe.clone(),
+        )
+        .expect("first persistent plink1 session should open");
+        let mut second = Plink1BlockSession::open_with_probe(
+            second_paths.0,
+            second_paths.1,
+            second_paths.2,
+            sparse_options(None),
+            second_probe.clone(),
+        )
+        .expect("second persistent sparse plink1 session should open");
+
+        assert!(first
+            .next_block(1)
+            .expect("first session should advance")
+            .is_some());
+        assert!(second
+            .next_block(1)
+            .expect("second session should advance")
+            .is_some());
+        drop(first);
+        assert!(second
+            .next_block(1)
+            .expect("second session should remain usable")
+            .is_some());
+
+        assert_eq!(first_probe.snapshot().candidate_visits, 1);
+        assert_eq!(first_probe.snapshot().drops, 1);
+        assert_eq!(second_probe.snapshot().candidate_visits, 2);
+        assert_eq!(second_probe.snapshot().drops, 0);
     }
 }

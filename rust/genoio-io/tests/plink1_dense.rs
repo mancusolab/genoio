@@ -433,3 +433,70 @@ fn pbr_rust_plink1_001_rejects_unsupported_plink1_block_representations() {
         GenoioError::UnsupportedRepresentation { .. }
     ));
 }
+
+#[test]
+fn pbr_rust_plink1_002_dense_and_sparse_readers_advance_and_drop_independently() {
+    let first_dir = unique_dir("pbr-plink1-independent-dense");
+    let second_dir = unique_dir("pbr-plink1-independent-sparse");
+    let first_paths = write_plink_fixture(&first_dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c, 0x38]);
+    let second_paths = write_plink_fixture(&second_dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c, 0x38]);
+    let mut dense_reader = BlockReader::open(
+        BlockSource::Plink1 {
+            bed: first_paths.0,
+            bim: first_paths.1,
+            fam: first_paths.2,
+        },
+        plink1_block_options(None, None, DenseMissingPolicy::Nan, true),
+        1,
+    )
+    .expect("persistent dense plink1 reader should open");
+    let mut sparse_reader = BlockReader::open(
+        BlockSource::Plink1 {
+            bed: second_paths.0,
+            bim: second_paths.1,
+            fam: second_paths.2,
+        },
+        BlockReadOptions {
+            sparse: true,
+            missing_policy: DenseMissingPolicy::Raise,
+            ..plink1_block_options(None, None, DenseMissingPolicy::Nan, true)
+        },
+        1,
+    )
+    .expect("persistent sparse plink1 reader should open");
+
+    let dense_first = dense_reader
+        .next_block()
+        .expect("dense reader should advance")
+        .expect("dense reader should yield a block");
+    let sparse_first = sparse_reader
+        .next_block()
+        .expect("sparse reader should advance")
+        .expect("sparse reader should yield a block");
+    let dense_second = dense_reader
+        .next_block()
+        .expect("dense reader should advance independently")
+        .expect("dense reader should yield a second block");
+    drop(sparse_reader);
+    let dense_third = dense_reader
+        .next_block()
+        .expect("dense reader should survive sparse-reader drop")
+        .expect("dense reader should yield a third block");
+
+    let BlockOutput::Dense(dense_first) = dense_first else {
+        panic!("dense reader should return dense output");
+    };
+    let BlockOutput::Sparse(sparse_first) = sparse_first else {
+        panic!("sparse reader should return sparse output");
+    };
+    let BlockOutput::Dense(dense_second) = dense_second else {
+        panic!("dense reader should return dense output");
+    };
+    let BlockOutput::Dense(dense_third) = dense_third else {
+        panic!("dense reader should return dense output");
+    };
+    assert_eq!(variant_ids(variants(&dense_first.variants)), vec!["rs1"]);
+    assert_eq!(variant_ids(variants(&sparse_first.variants)), vec!["rs1"]);
+    assert_eq!(variant_ids(variants(&dense_second.variants)), vec!["rs2"]);
+    assert_eq!(variant_ids(variants(&dense_third.variants)), vec!["indel1"]);
+}

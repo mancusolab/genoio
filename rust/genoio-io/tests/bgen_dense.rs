@@ -956,6 +956,32 @@ fn bgen_block_options(
     }
 }
 
+fn write_mixed_reader_plink_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let bed = dir.join("mixed.bed");
+    let bim = dir.join("mixed.bim");
+    let fam = dir.join("mixed.fam");
+    fs::write(&bed, [0x6c, 0x1b, 0x01, 0x0b, 0x2c, 0x08])
+        .expect("mixed-reader bed fixture should be written");
+    fs::write(&bim, "1 prs1 0 10 G A\n1 prs2 0 20 T C\n2 prs3 0 30 A G\n")
+        .expect("mixed-reader bim fixture should be written");
+    fs::write(&fam, "F1 S1 0 0 1 -9\nF1 S2 0 0 2 -9\n")
+        .expect("mixed-reader fam fixture should be written");
+    (bed, bim, fam)
+}
+
+fn plink1_mixed_reader_options() -> BlockReadOptions {
+    BlockReadOptions {
+        matrix_kind: MatrixKind::Genotype,
+        sparse: true,
+        requested_samples: None,
+        variant_filter: None,
+        dosage_source: DosageSource::Hardcall,
+        missing_policy: DenseMissingPolicy::Raise,
+        return_samples: true,
+        return_variants: true,
+    }
+}
+
 fn collect_bgen_dense_blocks(
     bgen: &Path,
     sample: Option<&Path>,
@@ -3303,4 +3329,61 @@ fn bgen_metadata_rejects_unsupported_compression_flag() {
         genoio_io::read_bgen_metadata(&bgen, None).expect_err("reserved compression should fail");
 
     assert_genoio_error_contains(error, "compression");
+}
+
+#[test]
+fn pbr_rust_plink1_002_bgen_and_plink1_block_readers_advance_and_drop_independently() {
+    let dir = unique_dir("pbr-mixed-bgen-plink1-readers");
+    let bgen = dir.join("mixed.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), None],
+        [Some((128, 64)), Some((64, 64))],
+    ];
+    write_two_sample_three_variant_dosage_bgen(&bgen, 8, &calls);
+    let (bed, bim, fam) = write_mixed_reader_plink_fixture(&dir);
+    let mut bgen_reader = BlockReader::open(
+        BlockSource::Bgen { bgen, sample: None },
+        bgen_block_options(None, None, MatrixKind::Genotype, true),
+        1,
+    )
+    .expect("persistent bgen reader should open");
+    let mut plink1_reader = BlockReader::open(
+        BlockSource::Plink1 { bed, bim, fam },
+        plink1_mixed_reader_options(),
+        1,
+    )
+    .expect("persistent plink1 reader should open");
+
+    let next_bgen_id = |reader: &mut BlockReader| {
+        let output = reader
+            .next_block()
+            .expect("independent reader should advance")
+            .expect("independent reader should yield a block");
+        let BlockOutput::Dense(matrix) = output else {
+            panic!("mixed bgen reader should yield dense blocks");
+        };
+        variant_ids(variants(&matrix.variants))[0].to_owned()
+    };
+    let next_plink1_id = |reader: &mut BlockReader| {
+        let output = reader
+            .next_block()
+            .expect("independent reader should advance")
+            .expect("independent reader should yield a block");
+        let BlockOutput::Sparse(matrix) = output else {
+            panic!("mixed plink1 reader should yield sparse blocks");
+        };
+        variant_ids(variants(&matrix.variants))[0].to_owned()
+    };
+
+    assert_eq!(next_bgen_id(&mut bgen_reader), "rs1");
+    assert_eq!(next_plink1_id(&mut plink1_reader), "prs1");
+    assert_eq!(next_bgen_id(&mut bgen_reader), "rs2");
+    drop(bgen_reader);
+    assert_eq!(next_plink1_id(&mut plink1_reader), "prs2");
+    assert_eq!(next_plink1_id(&mut plink1_reader), "prs3");
+    assert!(plink1_reader
+        .next_block()
+        .expect("plink1 reader should reach EOF independently")
+        .is_none());
 }

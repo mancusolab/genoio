@@ -195,13 +195,6 @@ pub(crate) fn checked_dense_block_len(n_rows: usize, block_size: usize) -> Resul
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by concrete block sessions introduced in later phases"
-    )
-)]
 pub(crate) fn checked_sparse_indptr_len(block_size: usize) -> Result<usize> {
     block_size
         .checked_add(1)
