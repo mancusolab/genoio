@@ -555,16 +555,10 @@ fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Resu
         ));
     }
     let dosage_bits = (record_type >> 5) & 0x03;
-    if dosage_bits != 0 && record_type & 0x10 != 0 {
+    if record_type & 0x80 != 0 && dosage_bits == 0 {
         return Err(GenoioError::invalid_source(
             path,
-            "unsupported pgen hardcall-phase track with dosage",
-        ));
-    }
-    if record_type & 0x80 != 0 && dosage_bits != 2 {
-        return Err(GenoioError::invalid_source(
-            path,
-            "unsupported pgen phased-dosage track without full dosage track",
+            "pgen phased-dosage track is present without a dosage track",
         ));
     }
     match record_type & 0x07 {

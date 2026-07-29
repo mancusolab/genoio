@@ -27,6 +27,7 @@ use self::dosage_track::{
 pub(super) use self::haplotype_track::{
     decode_plink2_haplotype_dosage_aux, decode_plink2_haplotype_hardcall_aux,
     read_plink2_variant_haplotype_dosage_track, read_plink2_variant_haplotype_main_track,
+    skip_hardcall_phase_track,
 };
 use self::header::fixed_width_dosage_record_len;
 pub(super) use self::header::{
@@ -93,6 +94,9 @@ pub(super) struct PgenHaplotypeDecodeState {
     pub(super) selected_haplotype_missing_indices: Vec<usize>,
     pub(super) selected_collapsed_values: Vec<f32>,
     pub(super) selected_collapsed_missing_indices: Vec<usize>,
+    selected_phase_swapped: Vec<Option<bool>>,
+    dosage_source_indices: Vec<usize>,
+    selected_explicit_phase: Vec<bool>,
 }
 
 struct SelectedSampleCursor<'a> {
@@ -249,6 +253,16 @@ pub(super) fn decode_plink2_variant_dosage_aux(
             "pgen record does not contain dosage values",
         ));
     }
+    let cursor = if record_type & 0x10 != 0 {
+        skip_hardcall_phase_track(
+            path,
+            decoder_state.record.as_slice(),
+            cursor,
+            &decoder_state.packed,
+        )?
+    } else {
+        cursor
+    };
     decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
@@ -265,7 +279,9 @@ pub(super) fn decode_plink2_variant_dosage_aux(
             values: &mut decoder_state.values,
             missing_indices: &mut decoder_state.missing_indices,
         },
-    )
+        None,
+    )?;
+    Ok(())
 }
 
 fn read_fixed_width_dosage_variant_values(
@@ -386,7 +402,7 @@ fn read_variable_width_dosage_variant_values(
             "pgen record does not contain dosage values",
         ));
     }
-    let cursor = decode_variable_width_main_track(
+    let mut cursor = decode_variable_width_main_track(
         path,
         record,
         record_type,
@@ -400,6 +416,9 @@ fn read_variable_width_dosage_variant_values(
             .previous_non_ld_packed
             .copy_from(&decoder_state.packed);
         decoder_state.has_previous_non_ld = true;
+    }
+    if record_type & 0x10 != 0 {
+        cursor = skip_hardcall_phase_track(path, record, cursor, &decoder_state.packed)?;
     }
 
     decoder_state.packed.expand_selected(
@@ -418,5 +437,7 @@ fn read_variable_width_dosage_variant_values(
             values: &mut decoder_state.values,
             missing_indices: &mut decoder_state.missing_indices,
         },
-    )
+        None,
+    )?;
+    Ok(())
 }

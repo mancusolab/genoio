@@ -17,6 +17,7 @@ use crate::error::Result;
 use crate::hardcall::PackedHardcalls as PackedGenotypes;
 
 use super::bitpack::{bit_is_set, ensure_record_bits, ensure_record_bytes};
+use super::dosage_track::{overlay_variable_width_dosages, DosageOverlayTarget};
 use super::io::read_fixed_width_phased_dosage_variant_record;
 use super::main_track::decode_variable_width_main_track;
 use super::{
@@ -24,6 +25,13 @@ use super::{
     SelectedSampleCursor, PGEN_DOSAGE_SCALE, PGEN_MAX_DOSAGE_RAW, PGEN_MAX_PHASE_RAW,
     PGEN_MIN_PHASE_RAW, PGEN_PHASE_SCALE,
 };
+
+#[derive(Clone, Copy)]
+struct HardcallPhaseLayout {
+    phasepresent_start_bit: Option<usize>,
+    phaseinfo_start_bit: usize,
+    end_cursor: usize,
+}
 
 pub(in crate::plink::plink2) fn read_plink2_variant_haplotype_main_track(
     path: &Path,
@@ -136,22 +144,73 @@ pub(in crate::plink::plink2) fn decode_plink2_haplotype_dosage_aux(
     }
     let record_type = header.record_types[variant_index];
     let dosage_bits = (record_type >> 5) & 0x03;
-    if record_type & 0x80 == 0 {
+    if dosage_bits == 0 {
         return Err(GenoioError::unsupported(
-            "pgen record does not contain explicit phased dosage values",
+            "pgen record does not contain dosage values",
         ));
     }
-    if dosage_bits != 2 {
-        return Err(GenoioError::unsupported(
-            "unsupported pgen phased dosage representation; only full dosage tracks are supported",
-        ));
-    }
-    decode_full_phased_dosage_tracks(
+
+    let record = decoder_state.record.as_slice();
+    let dosage_cursor = if record_type & 0x10 != 0 {
+        decode_selected_hardcall_phase_prefix(
+            path,
+            record,
+            cursor,
+            source_indices,
+            &decoder_state.packed,
+            false,
+            haplotype_state,
+        )?
+    } else {
+        initialize_selected_hardcall_haplotypes(
+            source_indices,
+            &decoder_state.packed,
+            None,
+            record,
+            haplotype_state,
+        )?;
+        cursor
+    };
+    let phase_cursor = overlay_variable_width_dosages(
         path,
-        decoder_state.record.as_slice(),
-        cursor,
+        record,
+        dosage_cursor,
+        dosage_bits,
         header.sample_ct,
+        DosageOverlayTarget {
+            source_indices,
+            values: &mut haplotype_state.selected_collapsed_values,
+            missing_indices: &mut haplotype_state.selected_collapsed_missing_indices,
+        },
+        Some(&mut haplotype_state.dosage_source_indices),
+    )?;
+    haplotype_state.selected_explicit_phase.clear();
+    haplotype_state
+        .selected_explicit_phase
+        .resize(source_indices.len(), false);
+
+    let record_end = if record_type & 0x80 != 0 {
+        decode_variable_explicit_phase_track(
+            path,
+            record,
+            phase_cursor,
+            dosage_bits,
+            source_indices,
+            haplotype_state,
+        )?
+    } else {
+        phase_cursor
+    };
+    if record_end != record.len() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "pgen phased dosage record has trailing or missing bytes",
+        ));
+    }
+    finalize_implicit_haplotype_dosages(
+        path,
         source_indices,
+        &decoder_state.packed,
         haplotype_state,
     )
 }
@@ -207,33 +266,141 @@ fn decode_hardcall_phase_track(
     packed: &PackedGenotypes,
     haplotype_state: &mut PgenHaplotypeDecodeState,
 ) -> Result<()> {
+    let end_cursor = decode_selected_hardcall_phase_prefix(
+        path,
+        record,
+        cursor,
+        source_indices,
+        packed,
+        true,
+        haplotype_state,
+    )?;
+    if end_cursor != record.len() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "pgen phased hardcall record has trailing or missing bytes",
+        ));
+    }
+    Ok(())
+}
+
+pub(in crate::plink::plink2) fn skip_hardcall_phase_track(
+    path: &Path,
+    record: &[u8],
+    cursor: usize,
+    packed: &PackedGenotypes,
+) -> Result<usize> {
+    Ok(hardcall_phase_layout(path, record, cursor, packed)?.end_cursor)
+}
+
+fn hardcall_phase_layout(
+    path: &Path,
+    record: &[u8],
+    cursor: usize,
+    packed: &PackedGenotypes,
+) -> Result<HardcallPhaseLayout> {
     let heterozygote_ct = (0..packed.sample_ct())
         .filter(|sample_index| packed.get(*sample_index) == 1)
         .count();
     ensure_record_bytes(path, record, cursor, 1)?;
     let phasepresent_stored = bit_is_set(&record[cursor..], 0);
-    let phaseinfo_start_bit = if phasepresent_stored {
-        let phasepresent_bits = 1 + heterozygote_ct;
-        ensure_record_bytes(path, record, cursor, phasepresent_bits.div_ceil(8))?;
-        cursor
-            .checked_add(phasepresent_bits.div_ceil(8))
-            .ok_or_else(|| GenoioError::invalid_source(path, "pgen phase offset is out of range"))?
-            * 8
-    } else {
-        cursor
-            .checked_mul(8)
-            .and_then(|bit| bit.checked_add(1))
-            .ok_or_else(|| GenoioError::invalid_source(path, "pgen phase offset is out of range"))?
-    };
-    ensure_record_bits(path, record, phaseinfo_start_bit, heterozygote_ct)?;
+    let (phasepresent_start_bit, phaseinfo_start_bit, phased_heterozygote_ct) =
+        if phasepresent_stored {
+            let phasepresent_bits = 1 + heterozygote_ct;
+            let phasepresent_start_bit = cursor
+                .checked_mul(8)
+                .and_then(|bit| bit.checked_add(1))
+                .ok_or_else(|| {
+                GenoioError::invalid_source(path, "pgen phase offset is out of range")
+            })?;
+            ensure_record_bits(path, record, phasepresent_start_bit, heterozygote_ct)?;
+            let phased_heterozygote_ct = (0..heterozygote_ct)
+                .filter(|index| bit_is_set(record, phasepresent_start_bit + index))
+                .count();
+            let phaseinfo_start_bit = cursor
+                .checked_add(phasepresent_bits.div_ceil(8))
+                .and_then(|byte| byte.checked_mul(8))
+                .ok_or_else(|| {
+                    GenoioError::invalid_source(path, "pgen phase offset is out of range")
+                })?;
+            (
+                Some(phasepresent_start_bit),
+                phaseinfo_start_bit,
+                phased_heterozygote_ct,
+            )
+        } else {
+            let phaseinfo_start_bit = cursor
+                .checked_mul(8)
+                .and_then(|bit| bit.checked_add(1))
+                .ok_or_else(|| {
+                    GenoioError::invalid_source(path, "pgen phase offset is out of range")
+                })?;
+            (None, phaseinfo_start_bit, heterozygote_ct)
+        };
+    ensure_record_bits(path, record, phaseinfo_start_bit, phased_heterozygote_ct)?;
+    let end_cursor = phaseinfo_start_bit
+        .checked_add(phased_heterozygote_ct)
+        .ok_or_else(|| GenoioError::invalid_source(path, "pgen phase offset is out of range"))?
+        .div_ceil(8);
+    Ok(HardcallPhaseLayout {
+        phasepresent_start_bit,
+        phaseinfo_start_bit,
+        end_cursor,
+    })
+}
 
+fn decode_selected_hardcall_phase_prefix(
+    path: &Path,
+    record: &[u8],
+    cursor: usize,
+    source_indices: &[usize],
+    packed: &PackedGenotypes,
+    require_selected_heterozygotes_phased: bool,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<usize> {
+    let layout = hardcall_phase_layout(path, record, cursor, packed)?;
+    initialize_selected_hardcall_haplotypes(
+        source_indices,
+        packed,
+        Some(layout),
+        record,
+        haplotype_state,
+    )?;
+    if require_selected_heterozygotes_phased {
+        for (selected_index, source_index) in source_indices.iter().copied().enumerate() {
+            if packed.get(source_index) == 1
+                && haplotype_state.selected_phase_swapped[selected_index].is_none()
+            {
+                return Err(GenoioError::unsupported(
+                    "unphased pgen heterozygous hardcall retained in haplotype read",
+                ));
+            }
+        }
+    }
+    Ok(layout.end_cursor)
+}
+
+fn initialize_selected_hardcall_haplotypes(
+    source_indices: &[usize],
+    packed: &PackedGenotypes,
+    phase_layout: Option<HardcallPhaseLayout>,
+    record: &[u8],
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
     haplotype_state.selected_haplotype_values.clear();
     haplotype_state.selected_haplotype_missing_indices.clear();
     haplotype_state.selected_collapsed_values.clear();
     haplotype_state.selected_collapsed_missing_indices.clear();
+    haplotype_state.selected_phase_swapped.clear();
     haplotype_state
         .selected_haplotype_values
         .resize(source_indices.len() * 2, 0.0);
+    haplotype_state
+        .selected_collapsed_values
+        .resize(source_indices.len(), 0.0);
+    haplotype_state
+        .selected_phase_swapped
+        .resize(source_indices.len(), None);
 
     let mut selected_cursor = SelectedSampleCursor::new(source_indices);
     let mut heterozygote_index = 0_usize;
@@ -245,25 +412,29 @@ fn decode_hardcall_phase_track(
             0 => {
                 if let Some(selected_index) = selected_index {
                     set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, false);
+                    haplotype_state.selected_collapsed_values[selected_index] = 0.0;
                 }
             }
             1 => {
-                let phase_present = if phasepresent_stored {
-                    bit_is_set(record, cursor * 8 + 1 + heterozygote_index)
-                } else {
-                    true
-                };
+                let phase_present = phase_layout.is_some_and(|layout| {
+                    layout
+                        .phasepresent_start_bit
+                        .is_none_or(|start_bit| bit_is_set(record, start_bit + heterozygote_index))
+                });
                 heterozygote_index += 1;
-                if !phase_present && selected_index.is_some() {
-                    return Err(GenoioError::unsupported(
-                        "unphased pgen heterozygous hardcall retained in haplotype read",
-                    ));
-                }
                 if phase_present {
+                    let phaseinfo_start_bit = phase_layout
+                        .ok_or_else(|| {
+                            GenoioError::internal_contract(
+                                "phased hardcall is missing phase-track layout",
+                            )
+                        })?
+                        .phaseinfo_start_bit;
                     let swapped =
                         bit_is_set(record, phaseinfo_start_bit + phased_heterozygote_index);
                     phased_heterozygote_index += 1;
                     if let Some(selected_index) = selected_index {
+                        haplotype_state.selected_phase_swapped[selected_index] = Some(swapped);
                         if swapped {
                             set_selected_haplotype_pair(
                                 haplotype_state,
@@ -283,34 +454,193 @@ fn decode_hardcall_phase_track(
                         }
                     }
                 }
+                if let Some(selected_index) = selected_index {
+                    haplotype_state.selected_collapsed_values[selected_index] = 1.0;
+                }
             }
             2 => {
                 if let Some(selected_index) = selected_index {
                     set_selected_haplotype_pair(haplotype_state, selected_index, 1.0, 1.0, false);
+                    haplotype_state.selected_collapsed_values[selected_index] = 2.0;
                 }
             }
             3 => {
                 if let Some(selected_index) = selected_index {
                     set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, true);
+                    haplotype_state.selected_collapsed_values[selected_index] = 0.0;
+                    insert_sorted_unique_index(
+                        &mut haplotype_state.selected_collapsed_missing_indices,
+                        selected_index,
+                    );
                 }
             }
             _ => unreachable!("two-bit hard-call code should be masked"),
         }
     }
-    let end_bit = phaseinfo_start_bit + phased_heterozygote_index;
-    if end_bit.div_ceil(8) != record.len() {
+    Ok(())
+}
+
+fn decode_variable_explicit_phase_track(
+    path: &Path,
+    record: &[u8],
+    cursor: usize,
+    dosage_bits: u8,
+    source_indices: &[usize],
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<usize> {
+    if dosage_bits == 2 {
+        let phase_bytes_len = haplotype_state
+            .dosage_source_indices
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| {
+                GenoioError::invalid_source(path, "pgen phased dosage byte count is out of range")
+            })?;
+        ensure_record_bytes(path, record, cursor, phase_bytes_len)?;
+        let mut selected_cursor = SelectedSampleCursor::new(source_indices);
+        for source_index in 0..haplotype_state.dosage_source_indices.len() {
+            let byte_index = cursor + source_index * 2;
+            let delta = decode_variable_phase_delta(
+                path,
+                i16::from_le_bytes([record[byte_index], record[byte_index + 1]]),
+                true,
+            )?;
+            if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
+                apply_explicit_phase_delta(path, selected_index, delta, haplotype_state)?;
+            }
+        }
+        return Ok(cursor + phase_bytes_len);
+    }
+
+    let dosage_ct = haplotype_state.dosage_source_indices.len();
+    let phase_exists_len = dosage_ct.div_ceil(8);
+    ensure_record_bytes(path, record, cursor, phase_exists_len)?;
+    let phase_exists = &record[cursor..cursor + phase_exists_len];
+    let phase_value_ct = (0..dosage_ct)
+        .filter(|dosage_index| bit_is_set(phase_exists, *dosage_index))
+        .count();
+    let phase_values_cursor = cursor + phase_exists_len;
+    let phase_bytes_len = phase_value_ct.checked_mul(2).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen phased dosage byte count is out of range")
+    })?;
+    ensure_record_bytes(path, record, phase_values_cursor, phase_bytes_len)?;
+
+    let mut selected_cursor = SelectedSampleCursor::new(source_indices);
+    let mut phase_value_index = 0_usize;
+    for dosage_index in 0..dosage_ct {
+        if !bit_is_set(phase_exists, dosage_index) {
+            continue;
+        }
+        let source_index = haplotype_state.dosage_source_indices[dosage_index];
+        let byte_index = phase_values_cursor + phase_value_index * 2;
+        let delta = decode_variable_phase_delta(
+            path,
+            i16::from_le_bytes([record[byte_index], record[byte_index + 1]]),
+            false,
+        )?;
+        if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
+            apply_explicit_phase_delta(path, selected_index, delta, haplotype_state)?;
+        }
+        phase_value_index += 1;
+    }
+    Ok(phase_values_cursor + phase_bytes_len)
+}
+
+fn decode_variable_phase_delta(path: &Path, raw: i16, allow_missing: bool) -> Result<Option<f32>> {
+    if raw == i16::MIN {
+        if allow_missing {
+            return Ok(None);
+        }
         return Err(GenoioError::invalid_source(
             path,
-            "pgen phased hardcall record has trailing or missing bytes",
+            "pgen sparse phased-dosage entry uses the full-track missing sentinel",
         ));
     }
-    for source_index in source_indices {
-        match packed.get(*source_index) {
-            0 => push_collapsed_dosage(haplotype_state, 0.0, false),
-            1 => push_collapsed_dosage(haplotype_state, 1.0, false),
-            2 => push_collapsed_dosage(haplotype_state, 2.0, false),
-            3 => push_collapsed_dosage(haplotype_state, 0.0, true),
-            _ => unreachable!("two-bit hard-call code should be masked"),
+    if !(PGEN_MIN_PHASE_RAW..=PGEN_MAX_PHASE_RAW).contains(&raw) {
+        return Err(GenoioError::invalid_source(
+            path,
+            format!("pgen phased dosage phase raw value {raw} is outside [-16384, 16384]"),
+        ));
+    }
+    Ok(Some(f32::from(raw) * PGEN_PHASE_SCALE))
+}
+
+fn apply_explicit_phase_delta(
+    path: &Path,
+    selected_index: usize,
+    delta: Option<f32>,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
+    let total_missing = haplotype_state
+        .selected_collapsed_missing_indices
+        .binary_search(&selected_index)
+        .is_ok();
+    match (total_missing, delta) {
+        (true, None) => {
+            set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, true);
+        }
+        (false, Some(delta)) => {
+            let total = haplotype_state.selected_collapsed_values[selected_index];
+            let left = (total + delta) * 0.5;
+            let right = (total - delta) * 0.5;
+            validate_phased_dosage_haplotype_components(path, left, right)?;
+            set_selected_haplotype_pair(haplotype_state, selected_index, left, right, false);
+        }
+        _ => {
+            return Err(GenoioError::invalid_source(
+                path,
+                "pgen full dosage and phased-dosage missing sentinels are inconsistent",
+            ));
+        }
+    }
+    haplotype_state.selected_explicit_phase[selected_index] = true;
+    Ok(())
+}
+
+fn finalize_implicit_haplotype_dosages(
+    path: &Path,
+    source_indices: &[usize],
+    packed: &PackedGenotypes,
+    haplotype_state: &mut PgenHaplotypeDecodeState,
+) -> Result<()> {
+    for (selected_index, source_index) in source_indices.iter().copied().enumerate() {
+        if haplotype_state.selected_explicit_phase[selected_index] {
+            continue;
+        }
+        if haplotype_state
+            .selected_collapsed_missing_indices
+            .binary_search(&selected_index)
+            .is_ok()
+        {
+            set_selected_haplotype_pair(haplotype_state, selected_index, 0.0, 0.0, true);
+            continue;
+        }
+        let has_stored_dosage = haplotype_state
+            .dosage_source_indices
+            .binary_search(&source_index)
+            .is_ok();
+        if has_stored_dosage {
+            let Some(swapped) = haplotype_state.selected_phase_swapped[selected_index] else {
+                return Err(GenoioError::unsupported(
+                    "pgen phased dosage is unavailable: the dosage lacks explicit phase and cannot be implicitly phased from a phased heterozygous hardcall",
+                ));
+            };
+            let total = haplotype_state.selected_collapsed_values[selected_index];
+            let alt_haplotype = total.min(1.0);
+            let ref_haplotype = (total - 1.0).max(0.0);
+            let (left, right) = if swapped {
+                (alt_haplotype, ref_haplotype)
+            } else {
+                (ref_haplotype, alt_haplotype)
+            };
+            validate_phased_dosage_haplotype_components(path, left, right)?;
+            set_selected_haplotype_pair(haplotype_state, selected_index, left, right, false);
+        } else if packed.get(source_index) == 1
+            && haplotype_state.selected_phase_swapped[selected_index].is_none()
+        {
+            return Err(GenoioError::unsupported(
+                "pgen phased dosage is unavailable for an unphased heterozygous hardcall",
+            ));
         }
     }
     Ok(())
@@ -428,6 +758,15 @@ fn set_selected_haplotype_pair(
             offset,
         );
         insert_sorted_unique_index(
+            &mut haplotype_state.selected_haplotype_missing_indices,
+            offset + 1,
+        );
+    } else {
+        super::remove_sorted_index(
+            &mut haplotype_state.selected_haplotype_missing_indices,
+            offset,
+        );
+        super::remove_sorted_index(
             &mut haplotype_state.selected_haplotype_missing_indices,
             offset + 1,
         );
