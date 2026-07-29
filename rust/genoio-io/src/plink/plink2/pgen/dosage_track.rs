@@ -278,8 +278,13 @@ pub(super) fn overlay_fixed_width_dosages(
     source_indices: &[usize],
     values: &mut [f32],
     missing_indices: &mut Vec<usize>,
+    mut dosage_totals: Option<&mut Vec<Option<f32>>>,
 ) -> Result<()> {
     missing_indices.clear();
+    if let Some(totals) = dosage_totals.as_deref_mut() {
+        totals.clear();
+        totals.reserve(dosage_bytes.len() / 2);
+    }
     let mut selected_samples = SelectedSampleCursor::new(source_indices);
     for source_index in 0..dosage_bytes.len() / 2 {
         let byte_index = source_index.checked_mul(2).ok_or_else(|| {
@@ -288,6 +293,9 @@ pub(super) fn overlay_fixed_width_dosages(
         ensure_record_bytes(path, dosage_bytes, byte_index, 2)?;
         let raw = u16::from_le_bytes([dosage_bytes[byte_index], dosage_bytes[byte_index + 1]]);
         let dosage = decode_pgen_dosage(path, raw, true)?;
+        if let Some(totals) = dosage_totals.as_deref_mut() {
+            totals.push(dosage);
+        }
         if let Some(selected_index) = selected_samples.selected_index_for(source_index) {
             apply_decoded_pgen_dosage(
                 dosage,
@@ -503,6 +511,7 @@ mod tests {
                 &[0],
                 &mut values,
                 &mut missing_indices,
+                None,
             )
             .expect_err("reserved fixed-width raw dosage must fail");
             assert!(matches!(error, GenoioError::InvalidSource { .. }));
@@ -515,6 +524,7 @@ mod tests {
             &[0],
             &mut values,
             &mut missing_indices,
+            None,
         )
         .expect("fixed-width full-track sentinel must be accepted");
         assert_eq!(missing_indices, vec![0]);

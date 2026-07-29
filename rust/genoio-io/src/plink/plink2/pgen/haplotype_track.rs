@@ -24,8 +24,8 @@ use super::io::read_fixed_width_phased_dosage_variant_record;
 use super::main_track::decode_variable_width_main_track;
 use super::{
     insert_sorted_unique_index, PgenDecoderState, PgenHaplotypeDecodeState, PgenHeader, PgenLayout,
-    SelectedSampleCursor, PGEN_DOSAGE_SCALE, PGEN_MAX_DOSAGE_RAW, PGEN_MAX_PHASE_RAW,
-    PGEN_MIN_PHASE_RAW, PGEN_PHASE_SCALE,
+    SelectedSampleCursor, ValidatedPhasedDosage, PGEN_DOSAGE_SCALE, PGEN_MAX_DOSAGE_RAW,
+    PGEN_MAX_PHASE_RAW, PGEN_MIN_PHASE_RAW, PGEN_PHASE_SCALE,
 };
 
 #[derive(Clone, Copy)]
@@ -194,23 +194,27 @@ pub(in crate::plink::plink2) fn decode_plink2_haplotype_dosage_aux(
         .selected_explicit_phase
         .resize(source_indices.len(), false);
 
-    let record_end = if record_type & 0x80 != 0 {
-        decode_variable_explicit_phase_track(
-            path,
-            record,
-            phase_cursor,
-            dosage_bits,
-            source_indices,
-            haplotype_state,
-        )?
-    } else {
-        phase_cursor
-    };
-    if record_end != record.len() {
-        return Err(GenoioError::invalid_source(
-            path,
-            "pgen phased dosage record has trailing or missing bytes",
-        ));
+    validate_variable_phased_dosage_record(
+        path,
+        record,
+        record_type,
+        phase_cursor,
+        dosage_bits,
+        (
+            &haplotype_state.dosage_source_indices,
+            &haplotype_state.dosage_source_totals,
+        ),
+        Some(&mut haplotype_state.validated_phased_dosages),
+    )?;
+    let mut selected_cursor = SelectedSampleCursor::new(source_indices);
+    for dosage_index in 0..haplotype_state.dosage_source_indices.len() {
+        let source_index = haplotype_state.dosage_source_indices[dosage_index];
+        let Some(phased) = haplotype_state.validated_phased_dosages[dosage_index] else {
+            continue;
+        };
+        if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
+            apply_validated_explicit_phase(selected_index, phased, haplotype_state);
+        }
     }
     finalize_implicit_haplotype_dosages(
         path,
@@ -485,50 +489,77 @@ fn initialize_selected_hardcall_haplotypes(
     Ok(())
 }
 
-fn decode_variable_explicit_phase_track(
+pub(in crate::plink::plink2) fn validate_variable_phased_dosage_record(
+    path: &Path,
+    record: &[u8],
+    record_type: u8,
+    phase_cursor: usize,
+    dosage_bits: u8,
+    dosage_entries: (&[usize], &[Option<f32>]),
+    mut validated_phased_dosages: Option<&mut Vec<Option<ValidatedPhasedDosage>>>,
+) -> Result<()> {
+    let (dosage_source_indices, _) = dosage_entries;
+    if let Some(validated) = validated_phased_dosages.as_deref_mut() {
+        validated.clear();
+        validated.resize(dosage_source_indices.len(), None);
+    }
+    let record_end = if record_type & 0x80 != 0 {
+        validate_variable_explicit_phase_track(
+            path,
+            record,
+            phase_cursor,
+            dosage_bits,
+            dosage_entries,
+            validated_phased_dosages,
+        )?
+    } else {
+        phase_cursor
+    };
+    if record_end != record.len() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "pgen phased dosage record has trailing or missing bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_variable_explicit_phase_track(
     path: &Path,
     record: &[u8],
     cursor: usize,
     dosage_bits: u8,
-    source_indices: &[usize],
-    haplotype_state: &mut PgenHaplotypeDecodeState,
+    dosage_entries: (&[usize], &[Option<f32>]),
+    mut validated_phased_dosages: Option<&mut Vec<Option<ValidatedPhasedDosage>>>,
 ) -> Result<usize> {
+    let (dosage_source_indices, dosage_source_totals) = dosage_entries;
+    if dosage_source_indices.len() != dosage_source_totals.len() {
+        return Err(GenoioError::internal_contract(
+            "pgen phased dosage totals and source indices are misaligned",
+        ));
+    }
     if dosage_bits == 2 {
-        let phase_bytes_len = haplotype_state
-            .dosage_source_indices
-            .len()
-            .checked_mul(2)
-            .ok_or_else(|| {
-                GenoioError::invalid_source(path, "pgen phased dosage byte count is out of range")
-            })?;
+        let phase_bytes_len = dosage_source_indices.len().checked_mul(2).ok_or_else(|| {
+            GenoioError::invalid_source(path, "pgen phased dosage byte count is out of range")
+        })?;
         ensure_record_bytes(path, record, cursor, phase_bytes_len)?;
-        let mut selected_cursor = SelectedSampleCursor::new(source_indices);
-        for dosage_index in 0..haplotype_state.dosage_source_indices.len() {
-            let source_index = haplotype_state.dosage_source_indices[dosage_index];
+        for dosage_index in 0..dosage_source_indices.len() {
             let byte_index = cursor + dosage_index * 2;
             let delta = decode_variable_phase_delta(
                 path,
                 i16::from_le_bytes([record[byte_index], record[byte_index + 1]]),
                 true,
             )?;
-            let total = haplotype_state
-                .dosage_source_totals
-                .get(dosage_index)
-                .copied()
-                .ok_or_else(|| {
-                    GenoioError::internal_contract(
-                        "pgen phased dosage totals and source indices are misaligned",
-                    )
-                })?;
+            let total = dosage_source_totals[dosage_index];
             let phased = validate_phased_dosage_pair(path, total, delta)?;
-            if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
-                apply_validated_explicit_phase(selected_index, phased, haplotype_state);
+            if let Some(validated) = validated_phased_dosages.as_deref_mut() {
+                validated[dosage_index] = Some(phased);
             }
         }
         return Ok(cursor + phase_bytes_len);
     }
 
-    let dosage_ct = haplotype_state.dosage_source_indices.len();
+    let dosage_ct = dosage_source_indices.len();
     let phase_exists_len = dosage_ct.div_ceil(8);
     ensure_record_bytes(path, record, cursor, phase_exists_len)?;
     let phase_exists = &record[cursor..cursor + phase_exists_len];
@@ -541,31 +572,21 @@ fn decode_variable_explicit_phase_track(
     })?;
     ensure_record_bytes(path, record, phase_values_cursor, phase_bytes_len)?;
 
-    let mut selected_cursor = SelectedSampleCursor::new(source_indices);
     let mut phase_value_index = 0_usize;
     for dosage_index in 0..dosage_ct {
         if !bit_is_set(phase_exists, dosage_index) {
             continue;
         }
-        let source_index = haplotype_state.dosage_source_indices[dosage_index];
         let byte_index = phase_values_cursor + phase_value_index * 2;
         let delta = decode_variable_phase_delta(
             path,
             i16::from_le_bytes([record[byte_index], record[byte_index + 1]]),
             false,
         )?;
-        let total = haplotype_state
-            .dosage_source_totals
-            .get(dosage_index)
-            .copied()
-            .ok_or_else(|| {
-                GenoioError::internal_contract(
-                    "pgen phased dosage totals and source indices are misaligned",
-                )
-            })?;
+        let total = dosage_source_totals[dosage_index];
         let phased = validate_phased_dosage_pair(path, total, delta)?;
-        if let Some(selected_index) = selected_cursor.selected_index_for(source_index) {
-            apply_validated_explicit_phase(selected_index, phased, haplotype_state);
+        if let Some(validated) = validated_phased_dosages.as_deref_mut() {
+            validated[dosage_index] = Some(phased);
         }
         phase_value_index += 1;
     }
@@ -589,12 +610,6 @@ fn decode_variable_phase_delta(path: &Path, raw: i16, allow_missing: bool) -> Re
         ));
     }
     Ok(Some(f32::from(raw) * PGEN_PHASE_SCALE))
-}
-
-#[derive(Clone, Copy)]
-enum ValidatedPhasedDosage {
-    Missing,
-    Present { total: f32, left: f32, right: f32 },
 }
 
 fn validate_phased_dosage_pair(
@@ -697,13 +712,25 @@ fn decode_full_phased_dosage_tracks(
     let phase_cursor = cursor.checked_add(dosage_bytes_len).ok_or_else(|| {
         GenoioError::invalid_source(path, "pgen phased dosage offset is out of range")
     })?;
-    ensure_record_bytes(path, record, phase_cursor, dosage_bytes_len)?;
-    if phase_cursor + dosage_bytes_len != record.len() {
-        return Err(GenoioError::invalid_source(
-            path,
-            "pgen phased dosage record has trailing or missing bytes",
-        ));
+    haplotype_state.dosage_source_totals.clear();
+    haplotype_state.dosage_source_totals.reserve(sample_ct);
+    for source_index in 0..sample_ct {
+        let dosage_offset = cursor + source_index * 2;
+        haplotype_state
+            .dosage_source_totals
+            .push(decode_phased_dosage_total(
+                path,
+                u16::from_le_bytes([record[dosage_offset], record[dosage_offset + 1]]),
+            )?);
     }
+    validate_full_phased_dosage_track(
+        path,
+        record,
+        phase_cursor,
+        sample_ct,
+        &haplotype_state.dosage_source_totals,
+        Some(&mut haplotype_state.validated_phased_dosages),
+    )?;
 
     haplotype_state.selected_haplotype_values.clear();
     haplotype_state.selected_haplotype_missing_indices.clear();
@@ -711,17 +738,9 @@ fn decode_full_phased_dosage_tracks(
     haplotype_state.selected_collapsed_missing_indices.clear();
     let mut selected_samples = SelectedSampleCursor::new(source_indices);
     for source_index in 0..sample_ct {
-        let dosage_offset = cursor + source_index * 2;
-        let phase_offset = phase_cursor + source_index * 2;
-        let dosage = decode_phased_dosage_total(
-            path,
-            u16::from_le_bytes([record[dosage_offset], record[dosage_offset + 1]]),
-        )?;
-        let phase_delta = decode_phased_dosage_delta(
-            path,
-            i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]),
-        )?;
-        let phased = validate_phased_dosage_pair(path, dosage, phase_delta)?;
+        let phased = haplotype_state.validated_phased_dosages[source_index].ok_or_else(|| {
+            GenoioError::internal_contract("full pgen phased dosage validation is incomplete")
+        })?;
         if selected_samples.selected_index_for(source_index).is_none() {
             continue;
         }
@@ -740,6 +759,50 @@ fn decode_full_phased_dosage_tracks(
                     .extend([left, right]);
                 push_collapsed_dosage(haplotype_state, total, false);
             }
+        }
+    }
+    Ok(())
+}
+
+pub(in crate::plink::plink2) fn validate_full_phased_dosage_track(
+    path: &Path,
+    record: &[u8],
+    phase_cursor: usize,
+    sample_ct: usize,
+    dosage_totals: &[Option<f32>],
+    mut validated_phased_dosages: Option<&mut Vec<Option<ValidatedPhasedDosage>>>,
+) -> Result<()> {
+    if dosage_totals.len() != sample_ct {
+        return Err(GenoioError::internal_contract(
+            "pgen full phased dosage totals do not match the sample count",
+        ));
+    }
+    let phase_bytes_len = sample_ct.checked_mul(2).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen phased dosage byte count is out of range")
+    })?;
+    ensure_record_bytes(path, record, phase_cursor, phase_bytes_len)?;
+    let record_end = phase_cursor.checked_add(phase_bytes_len).ok_or_else(|| {
+        GenoioError::invalid_source(path, "pgen phased dosage offset is out of range")
+    })?;
+    if record_end != record.len() {
+        return Err(GenoioError::invalid_source(
+            path,
+            "pgen phased dosage record has trailing or missing bytes",
+        ));
+    }
+    if let Some(validated) = validated_phased_dosages.as_deref_mut() {
+        validated.clear();
+        validated.resize(sample_ct, None);
+    }
+    for (source_index, total) in dosage_totals.iter().copied().enumerate() {
+        let phase_offset = phase_cursor + source_index * 2;
+        let phase_delta = decode_phased_dosage_delta(
+            path,
+            i16::from_le_bytes([record[phase_offset], record[phase_offset + 1]]),
+        )?;
+        let phased = validate_phased_dosage_pair(path, total, phase_delta)?;
+        if let Some(validated) = validated_phased_dosages.as_deref_mut() {
+            validated[source_index] = Some(phased);
         }
     }
     Ok(())
