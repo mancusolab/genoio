@@ -219,6 +219,55 @@ pub(super) fn read_plink2_variant_dosage(
     }
 }
 
+pub(super) fn read_plink2_variant_dosage_main_track(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    decoder_state: &mut PgenDecoderState,
+) -> Result<usize> {
+    read_plink2_variant_haplotype_main_track(path, file, header, variant_index, decoder_state)
+}
+
+pub(super) fn decode_plink2_variant_dosage_aux(
+    path: &Path,
+    header: &PgenHeader,
+    variant_index: usize,
+    cursor: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    if !matches!(header.layout, PgenLayout::VariableWidth) {
+        return Err(GenoioError::internal_contract(
+            "separate pgen dosage auxiliary decode requires variable-width storage",
+        ));
+    }
+    let record_type = header.record_types[variant_index];
+    let dosage_bits = (record_type >> 5) & 0x03;
+    if dosage_bits == 0 {
+        return Err(GenoioError::unsupported(
+            "pgen record does not contain dosage values",
+        ));
+    }
+    decoder_state.packed.expand_selected(
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing_indices,
+    );
+    overlay_variable_width_dosages(
+        path,
+        decoder_state.record.as_slice(),
+        cursor,
+        dosage_bits,
+        header.sample_ct,
+        DosageOverlayTarget {
+            source_indices,
+            values: &mut decoder_state.values,
+            missing_indices: &mut decoder_state.missing_indices,
+        },
+    )
+}
+
 fn read_fixed_width_dosage_variant_values(
     path: &Path,
     file: &mut File,
