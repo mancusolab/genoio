@@ -36,7 +36,9 @@ mod vcf;
 pub use bgen::{
     read_bgen_dosage_dense_windowed, read_bgen_haplotypes_dosage_dense_windowed, read_bgen_metadata,
 };
-pub use blocks::{BlockOutput, BlockReadOptions, BlockSource, DosageSource, MatrixKind};
+pub use blocks::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
 pub use error::Result;
 pub use plink::{
     read_plink1_dense_windowed, read_plink1_metadata, read_plink1_sparse_windowed,

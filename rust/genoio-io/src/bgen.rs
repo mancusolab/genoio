@@ -22,6 +22,7 @@ mod session;
 pub use dense::read_bgen_dosage_dense_windowed;
 pub use haplotype::read_bgen_haplotypes_dosage_dense_windowed;
 
+pub(crate) use session::BgenBlockSession;
 use session::BgenReadSession;
 
 /// Read BGEN metadata with variant metadata staged as columnar buffers.

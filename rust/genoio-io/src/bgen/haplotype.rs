@@ -224,7 +224,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
         return_samples,
         return_variants,
     } = context;
-    let bgen = session.bgen;
+    let bgen = session.bgen.clone();
     let sample_count = session.header.sample_count;
     let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
     let output_variant_capacity = variant_window.map_or(index_records.len(), |window| {
@@ -267,7 +267,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
             MetadataRetentionAction::DecodeGenotypes => {
                 session.read_payload_into(&mut decode_buffers.probability)?;
                 decode_buffered_haplotype_values(
-                    bgen,
+                    &bgen,
                     sample_count,
                     &selection.source_indices,
                     &mut decode_buffers,
@@ -305,7 +305,7 @@ fn read_bgen_haplotypes_dosage_dense_indexed(
 
         if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
             decode_buffered_haplotype_values(
-                bgen,
+                &bgen,
                 sample_count,
                 &selection.source_indices,
                 &mut decode_buffers,

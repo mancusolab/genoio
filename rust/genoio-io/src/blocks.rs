@@ -7,6 +7,7 @@ use genoio_core::{
     VariantFilter,
 };
 
+use crate::bgen::BgenBlockSession;
 use crate::error::Result;
 
 /// Owned source paths for one persistent block-reader session.
@@ -75,6 +76,45 @@ pub enum BlockOutput {
     Sparse(SparseGenotypeMatrix),
 }
 
+enum BlockBackend {
+    Bgen(BgenBlockSession),
+}
+
+/// Backend-neutral persistent reader that yields bounded genotype blocks.
+pub struct BlockReader {
+    backend: BlockBackend,
+    lifecycle: BlockLifecycle,
+}
+
+impl BlockReader {
+    /// Open one persistent source session.
+    pub fn open(source: BlockSource, options: BlockReadOptions, block_size: usize) -> Result<Self> {
+        let lifecycle = BlockLifecycle::new(block_size)?;
+        let backend = match source {
+            BlockSource::Bgen { bgen, sample } => {
+                BlockBackend::Bgen(BgenBlockSession::open(bgen, sample, options)?)
+            }
+            BlockSource::Vcf { .. }
+            | BlockSource::Bcf { .. }
+            | BlockSource::Plink1 { .. }
+            | BlockSource::Plink2 { .. } => {
+                return Err(GenoioError::unsupported(
+                    "persistent block reads are not implemented for this source yet",
+                ));
+            }
+        };
+        Ok(Self { backend, lifecycle })
+    }
+
+    /// Decode the next retained block, or return `None` after terminal EOF.
+    pub fn next_block(&mut self) -> Result<Option<BlockOutput>> {
+        let Self { backend, lifecycle } = self;
+        lifecycle.next_block(|block_size| match backend {
+            BlockBackend::Bgen(session) => session.next_block(block_size),
+        })
+    }
+}
+
 impl BlockOutput {
     fn width(&self) -> usize {
         match self {
@@ -114,13 +154,6 @@ pub(crate) struct BlockLifecycle {
     eof: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by concrete block sessions introduced in later phases"
-    )
-)]
 impl BlockLifecycle {
     pub(crate) fn new(block_size: usize) -> Result<Self> {
         if block_size == 0 {
@@ -151,13 +184,6 @@ impl BlockLifecycle {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by concrete block sessions introduced in later phases"
-    )
-)]
 pub(crate) fn checked_dense_block_len(n_rows: usize, block_size: usize) -> Result<usize> {
     n_rows.checked_mul(block_size).ok_or_else(|| {
         GenoioError::internal_contract(format!(
@@ -179,13 +205,6 @@ pub(crate) fn checked_sparse_indptr_len(block_size: usize) -> Result<usize> {
         .ok_or_else(|| GenoioError::internal_contract("sparse block column count is out of range"))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by concrete block sessions introduced in later phases"
-    )
-)]
 pub(crate) fn block_diagnostics_snapshot(
     cumulative: &DenseDiagnostics,
     block_width: usize,

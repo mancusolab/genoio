@@ -4,9 +4,14 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use genoio_core::{DenseLayout, VariantFilter, VariantWindow};
+use genoio_core::{
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, VariantFilter, VariantWindow,
+};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -17,7 +22,9 @@ use common::bgen_output::{
     dense_missing_sample_major_output as dense_missing_sample_major, variant_a0, variant_a1,
     variant_chrom, variant_id, variant_ids, variants,
 };
-use common::dense::assert_values_close_with_nan as assert_values_with_nan;
+use common::dense::{
+    assert_values_close_with_nan as assert_values_with_nan, dense_values_sample_major,
+};
 use common::unique_dir;
 
 const FLAG_LAYOUT2: u32 = 2 << 2;
@@ -929,6 +936,301 @@ fn contradictory_chrom_filter() -> VariantFilter {
         },
     }))
     .expect("contradictory chrom filter should parse")
+}
+
+fn bgen_block_options(
+    requested_samples: Option<Vec<String>>,
+    variant_filter: Option<VariantFilter>,
+    matrix_kind: MatrixKind,
+    return_metadata: bool,
+) -> BlockReadOptions {
+    BlockReadOptions {
+        matrix_kind,
+        sparse: false,
+        requested_samples,
+        variant_filter,
+        dosage_source: DosageSource::Dosage,
+        missing_policy: DenseMissingPolicy::Nan,
+        return_samples: return_metadata,
+        return_variants: return_metadata,
+    }
+}
+
+fn collect_bgen_dense_blocks(
+    bgen: &Path,
+    sample: Option<&Path>,
+    options: BlockReadOptions,
+    block_size: usize,
+) -> Vec<DenseGenotypeMatrix> {
+    let mut reader = BlockReader::open(
+        BlockSource::Bgen {
+            bgen: bgen.to_path_buf(),
+            sample: sample.map(Path::to_path_buf),
+        },
+        options,
+        block_size,
+    )
+    .expect("persistent bgen reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader
+        .next_block()
+        .expect("persistent bgen block should decode")
+    {
+        let BlockOutput::Dense(matrix) = output else {
+            panic!("bgen dense reader should return dense blocks");
+        };
+        blocks.push(matrix);
+    }
+    assert!(reader
+        .next_block()
+        .expect("persistent bgen EOF should be sticky")
+        .is_none());
+    blocks
+}
+
+fn concatenate_dense_blocks_sample_major(blocks: &[DenseGenotypeMatrix]) -> Vec<f32> {
+    let Some(first) = blocks.first() else {
+        return Vec::new();
+    };
+    let block_values = blocks
+        .iter()
+        .map(dense_values_sample_major)
+        .collect::<Vec<_>>();
+    let mut values = Vec::with_capacity(
+        first.n_samples * blocks.iter().map(|block| block.n_variants).sum::<usize>(),
+    );
+    for sample_index in 0..first.n_samples {
+        for (block, block_values) in blocks.iter().zip(&block_values) {
+            let start = sample_index * block.n_variants;
+            values.extend_from_slice(&block_values[start..start + block.n_variants]);
+        }
+    }
+    values
+}
+
+fn concatenate_dense_blocks_missing_sample_major(blocks: &[DenseGenotypeMatrix]) -> Vec<bool> {
+    let Some(first) = blocks.first() else {
+        return Vec::new();
+    };
+    let block_missing = blocks
+        .iter()
+        .map(dense_missing_sample_major)
+        .collect::<Vec<_>>();
+    let mut missing = Vec::with_capacity(
+        first.n_samples * blocks.iter().map(|block| block.n_variants).sum::<usize>(),
+    );
+    for sample_index in 0..first.n_samples {
+        for (block, block_missing) in blocks.iter().zip(&block_missing) {
+            let start = sample_index * block.n_variants;
+            missing.extend_from_slice(&block_missing[start..start + block.n_variants]);
+        }
+    }
+    missing
+}
+
+fn concatenate_block_variant_ids(blocks: &[DenseGenotypeMatrix]) -> Vec<String> {
+    blocks
+        .iter()
+        .flat_map(|block| {
+            variant_ids(variants(&block.variants))
+                .into_iter()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn pbr_rust_bgen_001_sequential_blocks_match_whole_read_at_exact_and_partial_boundaries() {
+    let dir = unique_dir("pbr-bgen-sequential-boundaries");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), None],
+        [Some((128, 64)), Some((64, 64))],
+    ];
+    write_two_sample_three_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let expected = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, false)
+        .expect("whole bgen dosage read should decode");
+    let partial_blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, None, MatrixKind::Genotype, true),
+        2,
+    );
+    let exact_blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, None, MatrixKind::Genotype, true),
+        3,
+    );
+
+    assert_eq!(
+        partial_blocks
+            .iter()
+            .map(|block| block.n_variants)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert_eq!(
+        exact_blocks
+            .iter()
+            .map(|block| block.n_variants)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&partial_blocks),
+        &dense_values_sample_major(&expected),
+        0.0,
+    );
+    assert_eq!(
+        concatenate_dense_blocks_missing_sample_major(&partial_blocks),
+        dense_missing_sample_major(&expected)
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&partial_blocks),
+        variant_ids(variants(&expected.variants))
+    );
+    for block in &partial_blocks {
+        assert_eq!(block.samples, expected.samples);
+    }
+}
+
+#[test]
+fn pbr_rust_bgen_001_sequential_blocks_preserve_sample_and_variant_filters() {
+    let dir = unique_dir("pbr-bgen-sequential-filters");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), None],
+        [Some((128, 64)), Some((64, 64))],
+    ];
+    write_two_sample_three_variant_dosage_bgen(&bgen, 8, &calls);
+    let requested_samples = vec!["sample_2".to_owned()];
+    let filter = chrom_filter("1");
+
+    let expected = ::genoio_io::read_bgen_dosage_dense_windowed(
+        &bgen,
+        None,
+        Some(&requested_samples),
+        Some(&filter),
+        None,
+        DenseMissingPolicy::Nan,
+        true,
+        true,
+    )
+    .expect("filtered whole bgen dosage read should decode");
+    let blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(
+            Some(requested_samples),
+            Some(filter),
+            MatrixKind::Genotype,
+            true,
+        ),
+        1,
+    );
+
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.n_variants)
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&blocks),
+        &dense_values_sample_major(&expected),
+        0.0,
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&blocks),
+        variant_ids(variants(&expected.variants))
+    );
+    assert!(blocks.iter().all(|block| block.samples == expected.samples));
+}
+
+#[test]
+fn pbr_rust_bgen_001_sequential_matrix_only_and_all_filtered_reads_are_persistent() {
+    let dir = unique_dir("pbr-bgen-sequential-empty-matrix-only");
+    let bgen = dir.join("tiny.bgen");
+    let calls = [
+        [Some((204, 26)), Some((51, 128))],
+        [Some((0, 255)), None],
+        [Some((128, 64)), Some((64, 64))],
+    ];
+    write_two_sample_three_variant_dosage_bgen(&bgen, 8, &calls);
+
+    let expected = genoio_io::read_bgen_dosage_dense_windowed(&bgen, None, None, None, None, true)
+        .expect("matrix-only whole bgen dosage read should decode");
+    let blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(None, None, MatrixKind::Genotype, false),
+        2,
+    );
+    assert_values_with_nan(
+        &concatenate_dense_blocks_sample_major(&blocks),
+        &dense_values_sample_major(&expected),
+        0.0,
+    );
+    assert!(blocks
+        .iter()
+        .all(|block| block.samples.is_none() && block.variants.is_none()));
+
+    let empty_blocks = collect_bgen_dense_blocks(
+        &bgen,
+        None,
+        bgen_block_options(
+            None,
+            Some(contradictory_chrom_filter()),
+            MatrixKind::Genotype,
+            true,
+        ),
+        2,
+    );
+    assert!(empty_blocks.is_empty());
+}
+
+#[test]
+fn pbr_rust_bgen_001_rejects_unsupported_bgen_block_representations() {
+    let options = bgen_block_options(None, None, MatrixKind::Genotype, true);
+    let source = BlockSource::Bgen {
+        bgen: PathBuf::from("unused.bgen"),
+        sample: None,
+    };
+
+    let sparse_error = BlockReader::open(
+        source.clone(),
+        BlockReadOptions {
+            sparse: true,
+            ..options.clone()
+        },
+        2,
+    )
+    .err()
+    .expect("sparse bgen blocks should be rejected before source opening");
+    let hardcall_error = BlockReader::open(
+        source,
+        BlockReadOptions {
+            dosage_source: DosageSource::Hardcall,
+            ..options
+        },
+        2,
+    )
+    .err()
+    .expect("hardcall bgen blocks should be rejected before source opening");
+
+    assert!(matches!(
+        sparse_error,
+        genoio_core::GenoioError::UnsupportedRepresentation { .. }
+    ));
+    assert!(matches!(
+        hardcall_error,
+        genoio_core::GenoioError::UnsupportedRepresentation { .. }
+    ));
 }
 
 #[test]
