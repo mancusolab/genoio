@@ -10,6 +10,7 @@ use genoio_core::DenseMissingPolicy;
 
 mod common;
 
+use common::bcf::write_haplotype_fixture;
 use common::unique_dir;
 use common::vcf_output as genoio_io;
 use common::vcf_output::{
@@ -166,6 +167,57 @@ fn pbr_rust_textvcf_002_haplotype_blocks_filter_unphased_rejects_before_phase_de
         assert!(reader
             .next_block()
             .expect("unphased genotype-stat reject should not phase-decode")
+            .is_none());
+    }
+}
+
+#[test]
+fn pbr_rust_bcf_002_dense_and_sparse_haplotype_blocks_preserve_phase() {
+    let dir = unique_dir("pbr-bcf-haplotype-blocks");
+    let path = dir.join("phased.bcf");
+    write_haplotype_fixture(&path);
+
+    for sparse in [false, true] {
+        let mut reader = BlockReader::open(
+            BlockSource::Bcf { bcf: path.clone() },
+            BlockReadOptions {
+                matrix_kind: MatrixKind::Haplotype,
+                sparse,
+                requested_samples: None,
+                variant_filter: None,
+                dosage_source: DosageSource::Hardcall,
+                missing_policy: DenseMissingPolicy::Raise,
+                return_samples: true,
+                return_variants: true,
+            },
+            2,
+        )
+        .expect("persistent BCF haplotype reader should open");
+        let first = reader
+            .next_block()
+            .expect("first BCF haplotype block should decode")
+            .expect("first BCF haplotype block should exist");
+        let second = reader
+            .next_block()
+            .expect("second BCF haplotype block should decode")
+            .expect("second BCF haplotype block should exist");
+
+        match (sparse, first, second) {
+            (false, BlockOutput::Dense(first), BlockOutput::Dense(second)) => {
+                assert_eq!((first.n_samples, first.n_variants), (4, 2));
+                assert_eq!(first.values, vec![0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+                assert_eq!((second.n_samples, second.n_variants), (4, 1));
+                assert_eq!(second.values, vec![0.0, 0.0, 0.0, 1.0]);
+            }
+            (true, BlockOutput::Sparse(first), BlockOutput::Sparse(second)) => {
+                assert_eq!((first.n_rows, first.n_cols), (4, 2));
+                assert_eq!((second.n_rows, second.n_cols), (4, 1));
+            }
+            _ => panic!("BCF haplotype block representation mismatch"),
+        }
+        assert!(reader
+            .next_block()
+            .expect("BCF haplotype reader should reach EOF")
             .is_none());
     }
 }

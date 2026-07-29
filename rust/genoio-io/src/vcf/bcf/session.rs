@@ -20,14 +20,17 @@ use crate::error::Result;
 use crate::matrix::apply_dense_missing_policy_to_variant;
 use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
 
+use super::super::haplotype_sample_records;
 use super::decode::{decode_ds_record, decode_gt_record, BcfDenseDecodeBuffers, BcfStatsMode};
+use super::haplotype::{decode_phased_haplotype_record, BcfHaplotypeDecodeBuffers};
 use super::record::{bcf_variant_view_from_record, push_bcf_variant_row};
 #[cfg(not(test))]
 use super::source::open_bcf_input;
 #[cfg(test)]
 use super::source::open_bcf_input_with_hooks;
 use super::source::{
-    evaluate_bcf_gt_filter, flip_values_to_minor_allele, validate_biallelic_variant, BcfInput,
+    evaluate_bcf_gt_filter, flip_haplotype_values_to_minor_allele, flip_values_to_minor_allele,
+    validate_biallelic_variant, BcfInput,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,8 @@ enum BcfMode {
     DenseGenotype,
     DenseDosage,
     SparseGenotype,
+    DenseHaplotype,
+    SparseHaplotype,
 }
 
 /// One forward-only BCF reader with reusable record and decode buffers.
@@ -51,6 +56,7 @@ pub(crate) struct BcfBlockSession {
     mode: BcfMode,
     record: bcf::Record,
     decoded: BcfDenseDecodeBuffers,
+    haplotype_decoded: BcfHaplotypeDecodeBuffers,
     eof: bool,
     #[cfg(test)]
     probe: Option<BcfWorkProbe>,
@@ -120,6 +126,7 @@ impl BcfBlockSession {
             mode,
             record: bcf::Record::default(),
             decoded: BcfDenseDecodeBuffers::with_capacity(n_samples),
+            haplotype_decoded: BcfHaplotypeDecodeBuffers::with_capacity(n_samples),
             eof,
             #[cfg(test)]
             probe,
@@ -148,6 +155,12 @@ impl BcfBlockSession {
                 .map(|matrix| matrix.map(BlockOutput::Dense)),
             BcfMode::SparseGenotype => self
                 .next_sparse_genotype_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Sparse)),
+            BcfMode::DenseHaplotype => self
+                .next_dense_haplotype_block(block_size)
+                .map(|matrix| matrix.map(BlockOutput::Dense)),
+            BcfMode::SparseHaplotype => self
+                .next_sparse_haplotype_block(block_size)
                 .map(|matrix| matrix.map(BlockOutput::Sparse)),
         };
         if result.is_err() {
@@ -336,6 +349,184 @@ impl BcfBlockSession {
         self.finish_sparse_output(indptr, indices, data, variants)
     }
 
+    fn next_dense_haplotype_block(
+        &mut self,
+        block_size: usize,
+    ) -> Result<Option<DenseGenotypeMatrix>> {
+        let n_rows = self.selection.samples.len().checked_mul(2).ok_or_else(|| {
+            GenoioError::internal_contract("BCF haplotype row count is out of range")
+        })?;
+        let allocation_len = checked_dense_block_len(n_rows, block_size)?;
+        self.record_dense_allocation(allocation_len);
+        let mut variant_major_values = Vec::with_capacity(allocation_len);
+        let mut variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(block_size));
+        let mut retention = RetainedVariantState::new(Some(VariantWindow {
+            start: 0,
+            len: block_size,
+        }));
+        let mut output_variant_count = 0_usize;
+
+        while !retention.window_is_satisfied() {
+            if !self.read_next_record()? {
+                break;
+            }
+            let variant = bcf_variant_view_from_record(&self.path, &self.header, &self.record)?;
+            let partial_decision = self
+                .variant_filter
+                .as_ref()
+                .map_or(PartialFilterDecision::Accept, |filter| {
+                    filter.partial_decision_view(&variant)
+                });
+            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
+                MetadataRetentionAction::Skip => continue,
+                MetadataRetentionAction::Stop => break,
+                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            }
+            validate_biallelic_variant(&self.path, &variant)?;
+
+            let needs_genotype_decision =
+                matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+            let mut stats_to_attach = None;
+            if needs_genotype_decision {
+                decode_gt_record(
+                    &self.path,
+                    &self.header,
+                    &self.record,
+                    &self.selection.source_indices,
+                    if self.return_variants {
+                        BcfStatsMode::Compute
+                    } else {
+                        BcfStatsMode::Counts
+                    },
+                    &mut self.decoded,
+                )?;
+                self.record_gt_decode();
+                let filter = self.variant_filter.as_ref().ok_or_else(|| {
+                    GenoioError::internal_contract("genotype decision requires a variant filter")
+                })?;
+                let (retain_variant, stats) = evaluate_bcf_gt_filter(
+                    &self.decoded,
+                    filter,
+                    &variant,
+                    self.return_variants,
+                    "haplotype",
+                )?;
+                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => break,
+                }
+                stats_to_attach = stats;
+            }
+
+            decode_phased_haplotype_record(
+                &self.path,
+                &self.header,
+                &self.record,
+                &self.selection.source_indices,
+                &mut self.haplotype_decoded,
+            )?;
+            self.record_phase_decode();
+            apply_dense_missing_policy_to_variant(
+                &mut self.haplotype_decoded.values,
+                &self.haplotype_decoded.missing_indices,
+                self.missing_policy,
+            )?;
+            push_bcf_variant_row(&mut variants, &variant, stats_to_attach, false)?;
+            variant_major_values.extend_from_slice(&self.haplotype_decoded.values);
+            output_variant_count += 1;
+        }
+
+        self.finish_dense_haplotype_output(variant_major_values, variants, output_variant_count)
+    }
+
+    fn next_sparse_haplotype_block(
+        &mut self,
+        block_size: usize,
+    ) -> Result<Option<SparseGenotypeMatrix>> {
+        let indptr_len = checked_sparse_indptr_len(block_size)?;
+        self.record_sparse_allocation(indptr_len);
+        let mut indptr = Vec::with_capacity(indptr_len);
+        indptr.push(0);
+        let mut indices = Vec::new();
+        let mut data = Vec::new();
+        let mut variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(block_size));
+        let mut retention = RetainedVariantState::new(Some(VariantWindow {
+            start: 0,
+            len: block_size,
+        }));
+
+        while !retention.window_is_satisfied() {
+            if !self.read_next_record()? {
+                break;
+            }
+            let variant = bcf_variant_view_from_record(&self.path, &self.header, &self.record)?;
+            let partial_decision = self
+                .variant_filter
+                .as_ref()
+                .map_or(PartialFilterDecision::Accept, |filter| {
+                    filter.partial_decision_view(&variant)
+                });
+            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
+                MetadataRetentionAction::Skip => continue,
+                MetadataRetentionAction::Stop => break,
+                MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+            }
+            validate_biallelic_variant(&self.path, &variant)?;
+
+            let needs_genotype_decision =
+                matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
+            let mut stats_to_attach = None;
+            if needs_genotype_decision {
+                decode_gt_record(
+                    &self.path,
+                    &self.header,
+                    &self.record,
+                    &self.selection.source_indices,
+                    BcfStatsMode::Compute,
+                    &mut self.decoded,
+                )?;
+                self.record_gt_decode();
+                let stats = self.decoded.stats;
+                let retain_variant = self
+                    .variant_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref()));
+                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
+                    RetentionAction::Include => {}
+                    RetentionAction::Skip => continue,
+                    RetentionAction::Stop => break,
+                }
+                stats_to_attach = stats;
+            }
+
+            decode_phased_haplotype_record(
+                &self.path,
+                &self.header,
+                &self.record,
+                &self.selection.source_indices,
+                &mut self.haplotype_decoded,
+            )?;
+            self.record_phase_decode();
+            reject_sparse_missing(!self.haplotype_decoded.missing_indices.is_empty())?;
+            let flipped =
+                flip_haplotype_values_to_minor_allele(self.haplotype_decoded.values.as_mut_slice());
+            append_sparse_column(
+                &mut indptr,
+                &mut indices,
+                &mut data,
+                &self.haplotype_decoded.values,
+            )?;
+            push_bcf_variant_row(&mut variants, &variant, stats_to_attach, flipped)?;
+        }
+
+        self.finish_sparse_haplotype_output(indptr, indices, data, variants)
+    }
+
     fn read_next_record(&mut self) -> Result<bool> {
         let read = self.reader.read_record(&mut self.record).map_err(|error| {
             GenoioError::invalid_source(&self.path, format!("bcf record error: {error}"))
@@ -404,6 +595,65 @@ impl BcfBlockSession {
         .map(Some)
     }
 
+    fn finish_dense_haplotype_output(
+        &self,
+        variant_major_values: Vec<f32>,
+        variants: Option<VariantMetadataBuffers>,
+        output_variant_count: usize,
+    ) -> Result<Option<DenseGenotypeMatrix>> {
+        if output_variant_count == 0 {
+            return Ok(None);
+        }
+        let haplotype_samples =
+            haplotype_sample_records(&self.selection.samples, &self.selection.source_indices);
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &haplotype_samples,
+            self.return_samples,
+            true,
+        )?;
+        DenseGenotypeMatrix::new_with_layout(
+            haplotype_samples.len(),
+            output_variant_count,
+            variant_major_values,
+            DenseLayout::VariantMajor,
+            samples,
+            variants,
+            block_diagnostics_snapshot(&self.diagnostics, output_variant_count),
+        )
+        .map(Some)
+    }
+
+    fn finish_sparse_haplotype_output(
+        &self,
+        indptr: Vec<i32>,
+        indices: Vec<i32>,
+        data: Vec<f32>,
+        variants: Option<VariantMetadataBuffers>,
+    ) -> Result<Option<SparseGenotypeMatrix>> {
+        let output_variant_count = indptr.len().saturating_sub(1);
+        if output_variant_count == 0 {
+            return Ok(None);
+        }
+        let haplotype_samples =
+            haplotype_sample_records(&self.selection.samples, &self.selection.source_indices);
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &haplotype_samples,
+            self.return_samples,
+            true,
+        )?;
+        SparseGenotypeMatrix::new(
+            haplotype_samples.len(),
+            output_variant_count,
+            indptr,
+            indices,
+            data,
+            samples,
+            variants,
+            block_diagnostics_snapshot(&self.diagnostics, output_variant_count),
+        )
+        .map(Some)
+    }
+
     #[cfg(test)]
     fn record_read_call(&self) {
         if let Some(probe) = &self.probe {
@@ -443,6 +693,16 @@ impl BcfBlockSession {
 
     #[cfg(not(test))]
     fn record_ds_decode(&self) {}
+
+    #[cfg(test)]
+    fn record_phase_decode(&self) {
+        if let Some(probe) = &self.probe {
+            probe.record_phase_decode();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn record_phase_decode(&self) {}
 
     #[cfg(test)]
     fn record_dense_allocation(&self, len: usize) {
@@ -488,8 +748,10 @@ fn validate_bcf_options(options: &BlockReadOptions) -> Result<BcfMode> {
         (MatrixKind::Genotype, true, DosageSource::Dosage) => Err(GenoioError::unsupported(
             "BCF dosage blocks support dense genotype matrices only",
         )),
-        (MatrixKind::Haplotype, _, _) => Err(GenoioError::unsupported(
-            "persistent BCF haplotype block reads are not implemented yet",
+        (MatrixKind::Haplotype, false, DosageSource::Hardcall) => Ok(BcfMode::DenseHaplotype),
+        (MatrixKind::Haplotype, true, DosageSource::Hardcall) => Ok(BcfMode::SparseHaplotype),
+        (MatrixKind::Haplotype, _, DosageSource::Dosage) => Err(GenoioError::unsupported(
+            "BCF dosage blocks support dense genotype matrices only",
         )),
     }
 }
@@ -542,6 +804,10 @@ impl BcfWorkProbe {
         self.update(|counts| counts.ds_decodes += 1);
     }
 
+    fn record_phase_decode(&self) {
+        self.update(|counts| counts.phase_decodes += 1);
+    }
+
     fn record_dense_allocation(&self, len: usize) {
         self.update(|counts| counts.max_dense_output_len = counts.max_dense_output_len.max(len));
     }
@@ -564,6 +830,7 @@ struct BcfWorkCounts {
     candidate_visits: usize,
     gt_decodes: usize,
     ds_decodes: usize,
+    phase_decodes: usize,
     max_dense_output_len: usize,
     max_sparse_indptr_len: usize,
     drops: usize,
@@ -713,6 +980,7 @@ mod tests {
                 candidate_visits: 3,
                 gt_decodes: 2,
                 ds_decodes: 0,
+                phase_decodes: 0,
                 max_dense_output_len: 2,
                 max_sparse_indptr_len: 0,
                 drops: 1,
@@ -753,5 +1021,108 @@ mod tests {
         assert_eq!(after_error.read_record_calls, 2);
         assert_eq!(after_error.candidate_visits, 2);
         assert_eq!(after_error.gt_decodes, 1);
+    }
+
+    #[test]
+    fn pbr_rust_bcf_002_haplotype_probe_filters_before_phase_decode() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let path = dir.path().join("filter-order.bcf");
+        write_fixture(
+            &path,
+            &[
+                record("1", "retained", 10, ["0|1", "1|0"]),
+                record("1", "unphased_drop", 20, ["0/0", "0/0"]),
+            ],
+        );
+        let probe = BcfWorkProbe::default();
+        let mut haplotype_options = options(Some(
+            VariantFilter::from_json_value(serde_json::json!({
+                "op": "predicate",
+                "name": "maf",
+                "params": {"min": 0.1}
+            }))
+            .expect("MAF filter should parse"),
+        ));
+        haplotype_options.matrix_kind = MatrixKind::Haplotype;
+        let mut session = BcfBlockSession::open_with_probe(path, haplotype_options, probe.clone())
+            .expect("BCF haplotype session should open");
+
+        assert!(session
+            .next_block(1)
+            .expect("retained phased block should decode")
+            .is_some());
+        assert!(session
+            .next_block(1)
+            .expect("unphased genotype-stat reject should be skipped")
+            .is_none());
+
+        let counts = probe.snapshot();
+        assert_eq!(counts.source_opens, 1);
+        assert_eq!(counts.header_parses, 1);
+        assert_eq!(counts.read_record_calls, 3);
+        assert_eq!(counts.candidate_visits, 2);
+        assert_eq!(counts.gt_decodes, 2);
+        assert_eq!(counts.phase_decodes, 1);
+        assert_eq!(counts.max_dense_output_len, 4);
+    }
+
+    #[test]
+    fn pbr_rust_bcf_002_later_unphased_error_is_delayed_and_sticky() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let path = dir.path().join("delayed-phase.bcf");
+        write_fixture(
+            &path,
+            &[
+                record("1", "rs1", 10, ["0|1", "1|0"]),
+                record("1", "bad", 20, ["0/1", "1|1"]),
+                record("1", "unreached", 30, ["0|0", "0|0"]),
+            ],
+        );
+        let probe = BcfWorkProbe::default();
+        let mut haplotype_options = options(None);
+        haplotype_options.matrix_kind = MatrixKind::Haplotype;
+        let mut session = BcfBlockSession::open_with_probe(path, haplotype_options, probe.clone())
+            .expect("BCF haplotype session should open");
+
+        assert!(session
+            .next_block(1)
+            .expect("first phased block should decode")
+            .is_some());
+        let error = session
+            .next_block(1)
+            .expect_err("second block should expose unphased GT");
+        assert!(error.to_string().contains("unphased"));
+        let after_error = probe.snapshot();
+        assert!(session
+            .next_block(1)
+            .expect("failed BCF haplotype session should be sticky")
+            .is_none());
+        assert_eq!(probe.snapshot(), after_error);
+        assert_eq!(after_error.read_record_calls, 2);
+        assert_eq!(after_error.candidate_visits, 2);
+        assert_eq!(after_error.phase_decodes, 1);
+    }
+
+    #[test]
+    fn pbr_rust_bcf_002_unsupported_dosage_modes_retain_structured_errors() {
+        let mut sparse_dosage = options(None);
+        sparse_dosage.sparse = true;
+        sparse_dosage.dosage_source = DosageSource::Dosage;
+        let sparse_error = validate_bcf_options(&sparse_dosage)
+            .expect_err("sparse BCF dosage should remain unsupported");
+        assert!(matches!(
+            sparse_error,
+            GenoioError::UnsupportedRepresentation { .. }
+        ));
+
+        let mut haplotype_dosage = options(None);
+        haplotype_dosage.matrix_kind = MatrixKind::Haplotype;
+        haplotype_dosage.dosage_source = DosageSource::Dosage;
+        let haplotype_error = validate_bcf_options(&haplotype_dosage)
+            .expect_err("BCF haplotype dosage should remain unsupported");
+        assert!(matches!(
+            haplotype_error,
+            GenoioError::UnsupportedRepresentation { .. }
+        ));
     }
 }

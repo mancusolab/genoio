@@ -673,7 +673,7 @@ pub(super) fn flip_values_to_minor_allele(values: &mut [f32]) -> bool {
     true
 }
 
-fn flip_haplotype_values_to_minor_allele(values: &mut [f32]) -> bool {
+pub(super) fn flip_haplotype_values_to_minor_allele(values: &mut [f32]) -> bool {
     let a1_count = values.iter().sum::<f32>();
     let a0_count = values.len() as f32 - a1_count;
     if a1_count <= a0_count {
