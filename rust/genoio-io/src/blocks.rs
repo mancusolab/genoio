@@ -115,6 +115,51 @@ fn validate_block_output(output: Option<&BlockOutput>, block_size: usize) -> Res
     Ok(())
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by concrete block sessions introduced in later phases"
+    )
+)]
+pub(crate) fn checked_dense_block_len(n_rows: usize, block_size: usize) -> Result<usize> {
+    n_rows.checked_mul(block_size).ok_or_else(|| {
+        GenoioError::internal_contract(format!(
+            "dense block shape {n_rows} x {block_size} is out of range",
+        ))
+    })
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by concrete block sessions introduced in later phases"
+    )
+)]
+pub(crate) fn checked_sparse_indptr_len(block_size: usize) -> Result<usize> {
+    block_size
+        .checked_add(1)
+        .ok_or_else(|| GenoioError::internal_contract("sparse block column count is out of range"))
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by concrete block sessions introduced in later phases"
+    )
+)]
+pub(crate) fn block_diagnostics_snapshot(
+    cumulative: &DenseDiagnostics,
+    block_width: usize,
+) -> DenseDiagnostics {
+    DenseDiagnostics {
+        retained_variants: block_width,
+        ..cumulative.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use genoio_core::{
@@ -264,5 +309,52 @@ mod tests {
         assert_eq!(matrix.samples, Some(sample_metadata()));
         assert_eq!(matrix.variants, Some(variant_metadata(2)));
         assert_eq!(matrix.diagnostics, diagnostics(2));
+    }
+
+    #[test]
+    fn checked_block_capacities_follow_requested_dimensions() {
+        assert_eq!(
+            checked_dense_block_len(3, 4).expect("dense dimensions should fit"),
+            12
+        );
+        assert_eq!(
+            checked_sparse_indptr_len(4).expect("sparse dimensions should fit"),
+            5
+        );
+    }
+
+    #[test]
+    fn checked_block_capacities_reject_arithmetic_overflow() {
+        let dense_error = checked_dense_block_len(usize::MAX, 2)
+            .expect_err("dense output length overflow should fail");
+        let sparse_error = checked_sparse_indptr_len(usize::MAX)
+            .expect_err("sparse indptr length overflow should fail");
+
+        assert!(matches!(dense_error, GenoioError::InternalContract { .. }));
+        assert!(matches!(sparse_error, GenoioError::InternalContract { .. }));
+    }
+
+    #[test]
+    fn diagnostics_snapshot_preserves_cumulative_counts_and_uses_block_width() {
+        let cumulative = DenseDiagnostics {
+            requested_samples: 11,
+            retained_samples: 7,
+            missing_samples: 4,
+            candidate_variants: 23,
+            retained_variants: 19,
+            dropped_metadata_variants: 2,
+            dropped_genotype_variants: 2,
+        };
+
+        let snapshot = block_diagnostics_snapshot(&cumulative, 3);
+
+        assert_eq!(
+            snapshot,
+            DenseDiagnostics {
+                retained_variants: 3,
+                ..cumulative.clone()
+            }
+        );
+        assert_eq!(cumulative.retained_variants, 19);
     }
 }
