@@ -1,6 +1,9 @@
 # Benchmark Scripts
 
-These scripts compare bounded dense matrix construction across `genoio` and common format-specific readers.
+These scripts compare bounded dense matrix construction across `genoio` and
+common format-specific readers. The format-specific scripts time one yielded
+block. Use `benchmark_iter_blocks.py` to measure sustained streaming across
+multiple blocks.
 
 Defaults use `data/chr22_hg38` and read the first 1000 variants. Use `--max-variants` to adjust the workload.
 
@@ -19,6 +22,36 @@ python scripts/benchmark_plink2.py --scenario matrix-only --max-variants 10000 -
 python scripts/benchmark_plink2.py --kind haplo-hardcall --scenario matrix-only --backend genoio --max-variants 1000
 python scripts/benchmark_plink2.py --kind haplo-dosage --scenario matrix-only --backend genoio --max-variants 1000
 ```
+
+To benchmark `Dataset.iter_blocks()` itself, hold the total retained-variant
+workload constant and sweep the block size:
+
+```bash
+python scripts/benchmark_iter_blocks.py \
+  --source-format vcf \
+  --path data/chr22_hg38.vcf.gz \
+  --label candidate-05bc6c1 \
+  --block-sizes 128,512,2048 \
+  --max-variants 16384 \
+  --scenario all \
+  --warmups 1 \
+  --repeats 5 \
+  --output-json /tmp/genoio-iter-blocks.json
+```
+
+Each block size must divide `--max-variants`. The script reuses one `Dataset`,
+consumes the exact requested prefix, validates matrix and metadata shapes, and
+closes each iterator after the prefix. It doesn't concatenate blocks or reduce
+matrix values inside the timed section. This keeps memory bounded and avoids
+timing an unrelated Python copy.
+
+The reported median is a warm-cache measurement. Compare revisions with the
+same input file, release build, command, and machine. Give the baseline and
+candidate distinct `--label` values, such as `baseline-69d02b3` and
+`candidate-05bc6c1`. JSON reports include that label, the resolved source path,
+the `genoio` and Python versions, and platform and machine identifiers. Use
+`--kind dosage` for BGEN dosage files. Use `--kind haplo-hardcall` or
+`--kind haplo-dosage` for source-encoded haplotypes.
 
 Backend-specific runs are useful when an optional comparison package is unavailable:
 

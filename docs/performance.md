@@ -31,12 +31,14 @@ and a release-mode Rust extension. The headline comparison reads dense
 Treat these as local benchmarks, not universal speed guarantees. File layout,
 storage, filters, metadata requests, and Python environment all affect runtime.
 
-## Larger Block Reads
+## Single-block read scenarios
 
-The sweep below measures common block-read patterns: matrix-only reads,
-returning variant metadata, sample filtering, and genotype-stat filtering. VCF
-rows use 1,000 variants because the compressed VCF scenarios are more expensive
-than the packed binary formats. PLINK rows use 10,000 variants.
+The sweep below measures common first-block patterns: matrix-only reads,
+returning variant metadata, sample filtering, and genotype-stat filtering.
+These scenarios call `next(dataset.iter_blocks(...))`; they don't measure
+sustained iteration. VCF rows use 1,000 variants because the compressed VCF
+scenarios are more expensive than the packed binary formats. PLINK rows use
+10,000 variants.
 
 | Source | Scenario | Variants | Median | Notes |
 |---|---|---:|---:|---|
@@ -61,6 +63,38 @@ than the packed binary formats. PLINK rows use 10,000 variants.
 The main practical lesson: metadata and sample filters are cheap enough for
 routine use. Genotype-stat filters do more work because they must inspect
 genotypes before deciding which variants to keep.
+
+## Sustained `iter_blocks` throughput
+
+Use `scripts/benchmark_iter_blocks.py` to measure more than the first yielded
+block. It consumes the same exact retained-variant prefix for every requested
+block size, so the sweep changes boundary frequency without changing decoded
+work. The timed path only checks shapes and counts. It doesn't concatenate the
+matrices.
+
+```bash
+python scripts/benchmark_iter_blocks.py \
+  --source-format vcf \
+  --path data/chr22_hg38.vcf.gz \
+  --label candidate-05bc6c1 \
+  --block-sizes 128,512,2048 \
+  --max-variants 16384 \
+  --scenario all \
+  --warmups 1 \
+  --repeats 5 \
+  --output-json /tmp/genoio-iter-blocks.json
+```
+
+The total must be divisible by every block size. The script reports actual
+blocks, variants, rows, per-run times, median time, and variants per second.
+It reuses a single `Dataset` and closes every iterator explicitly, including
+bounded scans that stop before end of file.
+
+For an A/B comparison, use distinct labels such as `baseline-69d02b3` and
+`candidate-05bc6c1` while keeping the source, command, release build, and
+machine fixed. Each JSON report records the label, resolved source path,
+`genoio` version, Python version, platform, and machine so results can be
+audited after the run.
 
 ## BGEN Dosage Reads
 
@@ -109,6 +143,7 @@ make build-release
 Then run the relevant benchmark:
 
 ```bash
+python scripts/benchmark_iter_blocks.py --source-format vcf --path data/chr22_hg38.vcf.gz --label candidate-05bc6c1 --block-sizes 128,512,2048 --max-variants 16384 --scenario all --repeats 5
 python scripts/benchmark_vcf.py --scenario all --max-variants 1000 --repeats 5
 python scripts/benchmark_vcf.py --scenario matrix-only --max-variants 10000 --repeats 5
 python scripts/benchmark_plink1.py --max-variants 1000 --repeats 5
