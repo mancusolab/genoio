@@ -148,7 +148,7 @@ pub(in crate::plink::plink2) fn decode_plink2_haplotype_dosage_aux(
     let dosage_bits = (record_type >> 5) & 0x03;
     if dosage_bits == 0 {
         return Err(GenoioError::unsupported(
-            "pgen record does not contain dosage values",
+            "pgen record does not contain explicit phased dosage values",
         ));
     }
 
