@@ -3,11 +3,13 @@
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
 from fixture_writers import (
     write_bgen_dosage,
+    write_fixed_width_phased_dosage_plink2,
     write_ld_phased_dosage_plink2,
     write_ld_phased_hardcall_plink2,
     write_phased_dosage_plink2,
@@ -45,6 +47,15 @@ def write_phased_vcf(tmp_path: Path) -> Path:
 1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|0
 1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t1|1\t0|0
 """
+    )
+    return path
+
+
+def write_bcf_from_vcf(tmp_path: Path, vcf_path: Path) -> Path:
+    path = tmp_path / f"{vcf_path.stem}.bcf"
+    subprocess.run(
+        ["bcftools", "view", "--output-type", "b", "--output", str(path), str(vcf_path)],
+        check=True,
     )
     return path
 
@@ -332,6 +343,81 @@ def test_haplotype_blocks_stream_sparse_haplotype_columns(tmp_path):
     np.testing.assert_array_equal(scipy_sparse.hstack(blocks, format="csc").toarray(), full.toarray())
 
 
+@pytest.mark.parametrize(
+    "format",
+    [
+        pytest.param("vcf", id="text-vcf"),
+        pytest.param(
+            "bcf",
+            id="bcf",
+            marks=pytest.mark.skipif(
+                shutil.which("bcftools") is None,
+                reason="public BCF haplotype block matrix requires bcftools",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("sparse", "size"),
+    [
+        pytest.param(False, 1, id="dense-size-1"),
+        pytest.param("csc", 2, id="csc-exact"),
+        pytest.param("csr", 3, id="csr-oversized"),
+    ],
+)
+def test_pbr_py_matrix_001_pbr_py_meta_001_vcf_and_bcf_haplotype_blocks_match_full_read(
+    tmp_path,
+    format,
+    sparse,
+    size,
+):
+    import genoio
+
+    path = write_phased_vcf(tmp_path)
+    if format == "bcf":
+        path = write_bcf_from_vcf(tmp_path, path)
+    dataset = genoio.vcf(path)
+    read_options = {
+        "kind": "haplo",
+        "sparse": sparse,
+        "dtype": "float64",
+    }
+
+    full, full_samples, full_variants = cast(Any, dataset.read)(
+        **read_options,
+        return_samples=True,
+        return_variants=True,
+    )
+    blocks = list(
+        dataset.iter_blocks(
+            size,
+            **read_options,
+            return_samples=True,
+            return_variants=True,
+        )
+    )
+
+    assert blocks
+    if sparse:
+        assert all(getattr(scipy_sparse, f"isspmatrix_{sparse}")(block) for block, _, _ in blocks)
+        combined = scipy_sparse.hstack(
+            [block for block, _, _ in blocks],
+            format=sparse,
+        )
+        np.testing.assert_array_equal(combined.toarray(), full.toarray())
+    else:
+        np.testing.assert_array_equal(
+            np.concatenate([block for block, _, _ in blocks], axis=1),
+            full,
+        )
+    assert full.dtype == np.dtype("float64")
+    assert all(block.dtype == np.dtype("float64") for block, _, _ in blocks)
+    assert all(samples.schema == full_samples.schema for _, samples, _ in blocks)
+    assert all(samples.equals(full_samples) for _, samples, _ in blocks)
+    assert all(variants.schema == full_variants.schema for _, _, variants in blocks)
+    assert [row for _, _, variants in blocks for row in variants.rows()] == full_variants.rows()
+
+
 def test_vcf_sparse_haplotype_blocks_do_not_prefetch_metadata(tmp_path, monkeypatch):
     import genoio
     from genoio._api import Dataset
@@ -476,33 +562,106 @@ def test_plink2_haplotype_sample_filter_preserves_source_order_and_haplotype_row
 
 
 @pytest.mark.parametrize(
-    ("writer", "read_options", "assert_matrix"),
+    ("writer", "read_options", "size"),
     [
-        (
-            write_phased_hardcall_plink2,
-            {"kind": "haplo", "dosage": "hardcall"},
-            np.testing.assert_array_equal,
+        pytest.param(
+            write_fixed_width_phased_dosage_plink2,
+            {"kind": "haplo", "dosage": "dosage", "dtype": "float64"},
+            2,
+            id="fixed-dosage-dense",
         ),
-        (
+        pytest.param(
+            write_phased_hardcall_plink2,
+            {"kind": "haplo", "dosage": "hardcall", "dtype": "float32"},
+            1,
+            id="variable-hardcall-dense",
+        ),
+        pytest.param(
+            write_phased_hardcall_plink2,
+            {
+                "kind": "haplo",
+                "dosage": "hardcall",
+                "sparse": "csr",
+                "samples": ["S1", "S2"],
+                "dtype": "float64",
+            },
+            3,
+            id="variable-hardcall-csr",
+        ),
+        pytest.param(
             write_phased_dosage_plink2,
-            {"kind": "haplo", "dosage": "dosage"},
-            np.testing.assert_allclose,
+            {"kind": "haplo", "dosage": "dosage", "dtype": "float64"},
+            3,
+            id="variable-dosage-dense",
+        ),
+        pytest.param(
+            write_ld_phased_hardcall_plink2,
+            {"kind": "haplo", "dosage": "hardcall", "dtype": "float32"},
+            1,
+            id="ld-hardcall-dense",
+        ),
+        pytest.param(
+            write_ld_phased_hardcall_plink2,
+            {
+                "kind": "haplo",
+                "dosage": "hardcall",
+                "sparse": "csc",
+                "samples": ["S1", "S2"],
+                "dtype": "float64",
+            },
+            1,
+            id="ld-hardcall-csc",
+        ),
+        pytest.param(
+            write_ld_phased_dosage_plink2,
+            {"kind": "haplo", "dosage": "dosage", "dtype": "float32"},
+            1,
+            id="ld-dosage-dense",
         ),
     ],
 )
-def test_plink2_haplotype_blocks_concatenate_to_full_read(tmp_path, writer, read_options, assert_matrix):
+def test_pbr_py_matrix_001_pbr_py_meta_001_plink2_haplotype_storage_blocks_match_full_read(
+    tmp_path,
+    writer,
+    read_options,
+    size,
+):
     import genoio
 
     dataset = genoio.pfile(writer(tmp_path))
 
-    full, full_variants = dataset.read(**read_options, return_variants=True)
-    blocks = list(dataset.iter_blocks(size=1, **read_options, return_variants=True))
+    full, full_samples, full_variants = cast(Any, dataset.read)(
+        **read_options,
+        return_samples=True,
+        return_variants=True,
+    )
+    blocks = list(
+        dataset.iter_blocks(
+            size=size,
+            **read_options,
+            return_samples=True,
+            return_variants=True,
+        )
+    )
 
-    assert [variants["id"].to_list() for _, variants in blocks] == [["rs1"], ["rs2"]]
-    assert_matrix(np.concatenate([block for block, _ in blocks], axis=1), full)
-    assert [variant_id for _, variants in blocks for variant_id in variants["id"].to_list()] == full_variants[
-        "id"
-    ].to_list()
+    assert blocks
+    sparse_format = read_options.get("sparse")
+    if sparse_format:
+        assert all(getattr(scipy_sparse, f"isspmatrix_{sparse_format}")(block) for block, _, _ in blocks)
+        combined = scipy_sparse.hstack(
+            [block for block, _, _ in blocks],
+            format=sparse_format,
+        )
+        np.testing.assert_array_equal(combined.toarray(), full.toarray())
+    else:
+        np.testing.assert_array_equal(
+            np.concatenate([block for block, _, _ in blocks], axis=1),
+            full,
+        )
+    assert all(samples.schema == full_samples.schema for _, samples, _ in blocks)
+    assert all(samples.equals(full_samples) for _, samples, _ in blocks)
+    assert all(variants.schema == full_variants.schema for _, _, variants in blocks)
+    assert [row for _, _, variants in blocks for row in variants.rows()] == full_variants.rows()
 
 
 @pytest.mark.parametrize(
@@ -520,7 +679,12 @@ def test_plink2_haplotype_blocks_concatenate_to_full_read(tmp_path, writer, read
         ),
     ],
 )
-def test_plink2_haplotype_blocks_decode_ld_compressed_second_variant(tmp_path, writer, read_options, assert_matrix):
+def test_pbr_py_matrix_001_plink2_haplotype_blocks_decode_ld_compressed_second_variant(
+    tmp_path,
+    writer,
+    read_options,
+    assert_matrix,
+):
     import genoio
 
     dataset = genoio.pfile(writer(tmp_path))

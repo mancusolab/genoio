@@ -1,5 +1,7 @@
 # pattern: Imperative Shell
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,9 +11,15 @@ import pytest
 from fixture_writers import (
     _bgen_sample_identifier_block,
     write_bgen_dosage,
+    write_fixed_width_phased_dosage_plink2,
     write_fixed_width_plink2,
     write_fixed_width_plink2_dosage,
+    write_ld_phased_dosage_plink2,
+    write_ld_phased_hardcall_plink2,
+    write_phased_dosage_plink2,
+    write_phased_hardcall_plink2,
 )
+from scipy import sparse as scipy_sparse
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
@@ -126,6 +134,15 @@ def write_gt_only_vcf(tmp_path: Path) -> Path:
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
 1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1
 """
+    )
+    return path
+
+
+def write_bcf_from_vcf(tmp_path: Path, vcf_path: Path) -> Path:
+    path = tmp_path / f"{vcf_path.stem}.bcf"
+    subprocess.run(
+        ["bcftools", "view", "--output-type", "b", "--output", str(path), str(vcf_path)],
+        check=True,
     )
     return path
 
@@ -509,15 +526,90 @@ def test_dense_vcf_dosage_requires_ds_field_without_gt_fallback(tmp_path):
         dataset.read(dosage="dosage")
 
 
-def test_dense_vcf_dosage_blocks_match_full_dosage_read(tmp_path):
+@pytest.mark.parametrize(
+    "format",
+    [
+        pytest.param("vcf", id="text-vcf"),
+        pytest.param(
+            "bcf",
+            id="bcf",
+            marks=pytest.mark.skipif(
+                shutil.which("bcftools") is None,
+                reason="public BCF block matrix requires bcftools",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("read_options", "size"),
+    [
+        pytest.param(
+            {"dtype": "float64", "samples": ["S3", "S1"]},
+            1,
+            id="dense-hardcall",
+        ),
+        pytest.param(
+            {"sparse": "csc", "dtype": "float32", "samples": ["S3", "S1"]},
+            2,
+            id="csc-hardcall",
+        ),
+        pytest.param(
+            {"sparse": "csr", "dtype": "float64", "samples": ["S3", "S1"]},
+            3,
+            id="csr-hardcall",
+        ),
+        pytest.param(
+            {"dosage": "dosage", "missing": "nan", "dtype": "float64"},
+            1,
+            id="dense-dosage",
+        ),
+    ],
+)
+def test_pbr_py_matrix_001_pbr_py_meta_001_vcf_and_bcf_genotype_blocks_match_full_read(
+    tmp_path,
+    format,
+    read_options,
+    size,
+):
     import genoio
 
-    dataset = genoio.vcf(write_ds_vcf(tmp_path))
+    path = write_ds_vcf(tmp_path)
+    if format == "bcf":
+        path = write_bcf_from_vcf(tmp_path, path)
+    dataset = genoio.vcf(path)
 
-    full = dataset.read(dosage="dosage", missing="nan")
-    blocks = list(dataset.iter_blocks(1, dosage="dosage", missing="nan"))
+    full, full_samples, full_variants = cast(Any, dataset.read)(
+        **read_options,
+        return_samples=True,
+        return_variants=True,
+    )
+    blocks = list(
+        dataset.iter_blocks(
+            size,
+            **read_options,
+            return_samples=True,
+            return_variants=True,
+        )
+    )
 
-    np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+    assert blocks
+    sparse_format = read_options.get("sparse")
+    if sparse_format:
+        assert all(getattr(scipy_sparse, f"isspmatrix_{sparse_format}")(block) for block, _, _ in blocks)
+        combined = scipy_sparse.hstack(
+            [block for block, _, _ in blocks],
+            format=sparse_format,
+        )
+        np.testing.assert_array_equal(combined.toarray(), full.toarray())
+    else:
+        np.testing.assert_array_equal(
+            np.concatenate([block for block, _, _ in blocks], axis=1),
+            full,
+        )
+    assert all(samples.schema == full_samples.schema for _, samples, _ in blocks)
+    assert all(samples.equals(full_samples) for _, samples, _ in blocks)
+    assert all(variants.schema == full_variants.schema for _, _, variants in blocks)
+    assert [row for _, _, variants in blocks for row in variants.rows()] == full_variants.rows()
 
 
 def test_vcf_dosage_genotype_stat_filters_use_fractional_mac(tmp_path):
@@ -688,6 +780,119 @@ def test_dense_plink2_dosage_blocks_match_full_dosage_read(tmp_path):
     blocks = list(dataset.iter_blocks(1, dosage="dosage", missing="nan"))
 
     np.testing.assert_array_equal(np.concatenate(blocks, axis=1), full)
+
+
+@pytest.mark.parametrize(
+    ("writer", "read_options", "size"),
+    [
+        pytest.param(
+            write_fixed_width_plink2,
+            {"missing": "nan", "dtype": "float64"},
+            2,
+            id="fixed-hardcall-dense",
+        ),
+        pytest.param(
+            write_fixed_width_plink2_dosage,
+            {"dosage": "dosage", "missing": "nan", "dtype": "float64"},
+            1,
+            id="fixed-dosage-dense",
+        ),
+        pytest.param(
+            write_fixed_width_phased_dosage_plink2,
+            {"dosage": "dosage", "missing": "nan", "dtype": "float32"},
+            3,
+            id="fixed-phased-dosage-dense",
+        ),
+        pytest.param(
+            write_phased_hardcall_plink2,
+            {"missing": "nan", "dtype": "float64"},
+            1,
+            id="variable-hardcall-dense",
+        ),
+        pytest.param(
+            write_phased_hardcall_plink2,
+            {
+                "sparse": "csr",
+                "samples": ["S1", "S2"],
+                "missing": "raise",
+                "dtype": "float32",
+            },
+            3,
+            id="variable-hardcall-csr",
+        ),
+        pytest.param(
+            write_phased_dosage_plink2,
+            {"dosage": "dosage", "missing": "nan", "dtype": "float64"},
+            2,
+            id="variable-dosage-dense",
+        ),
+        pytest.param(
+            write_ld_phased_hardcall_plink2,
+            {"missing": "nan", "dtype": "float32"},
+            1,
+            id="ld-hardcall-dense",
+        ),
+        pytest.param(
+            write_ld_phased_hardcall_plink2,
+            {
+                "sparse": "csc",
+                "samples": ["S1", "S2"],
+                "missing": "raise",
+                "dtype": "float64",
+            },
+            1,
+            id="ld-hardcall-csc",
+        ),
+        pytest.param(
+            write_ld_phased_dosage_plink2,
+            {"dosage": "dosage", "missing": "nan", "dtype": "float32"},
+            1,
+            id="ld-dosage-dense",
+        ),
+    ],
+)
+def test_pbr_py_matrix_001_pbr_py_meta_001_plink2_genotype_storage_blocks_match_full_read(
+    tmp_path,
+    writer,
+    read_options,
+    size,
+):
+    import genoio
+
+    dataset = genoio.pfile(writer(tmp_path))
+
+    full, full_samples, full_variants = cast(Any, dataset.read)(
+        **read_options,
+        return_samples=True,
+        return_variants=True,
+    )
+    blocks = list(
+        dataset.iter_blocks(
+            size,
+            **read_options,
+            return_samples=True,
+            return_variants=True,
+        )
+    )
+
+    assert blocks
+    sparse_format = read_options.get("sparse")
+    if sparse_format:
+        assert all(getattr(scipy_sparse, f"isspmatrix_{sparse_format}")(block) for block, _, _ in blocks)
+        combined = scipy_sparse.hstack(
+            [block for block, _, _ in blocks],
+            format=sparse_format,
+        )
+        np.testing.assert_array_equal(combined.toarray(), full.toarray())
+    else:
+        np.testing.assert_array_equal(
+            np.concatenate([block for block, _, _ in blocks], axis=1),
+            full,
+        )
+    assert all(samples.schema == full_samples.schema for _, samples, _ in blocks)
+    assert all(samples.equals(full_samples) for _, samples, _ in blocks)
+    assert all(variants.schema == full_variants.schema for _, _, variants in blocks)
+    assert [row for _, _, variants in blocks for row in variants.rows()] == full_variants.rows()
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from bench_common import benchmark, compare_summaries, positive_int
+from bench_common import benchmark, compare_summaries, positive_int, read_first_block
 
 SCENARIOS = ("matrix-only", "with-variants", "sample-filtered", "genotype-filtered")
 KINDS = ("geno", "haplo-hardcall", "haplo-dosage")
@@ -62,11 +62,10 @@ def _genoio_label(kind: str, scenario: str) -> str:
 def read_genoio_matrix_only(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
-    return next(
-        genoio.pfile(prefix).iter_blocks(
-            max_variants,
-            **_read_options(kind),
-        )
+    return read_first_block(
+        genoio.pfile(prefix),
+        max_variants,
+        **_read_options(kind),
     )
 
 
@@ -74,12 +73,11 @@ def read_genoio_with_variants(prefix: Path, max_variants: int, kind: str = "geno
     import genoio
 
     global _last_variant_metadata_length
-    matrix, variants = next(
-        genoio.pfile(prefix).iter_blocks(
-            max_variants,
-            return_variants=True,
-            **_read_options(kind),
-        )
+    matrix, variants = read_first_block(
+        genoio.pfile(prefix),
+        max_variants,
+        return_variants=True,
+        **_read_options(kind),
     )
     _last_variant_metadata_length = variants.height
     return matrix
@@ -90,24 +88,22 @@ def read_genoio_sample_filtered(prefix: Path, max_variants: int, kind: str = "ge
 
     sample_ids = _read_psam_sample_ids(prefix.with_suffix(".psam"))
     keep_count = max(1, len(sample_ids) // 2)
-    return next(
-        genoio.pfile(prefix).iter_blocks(
-            max_variants,
-            samples=sample_ids[:keep_count],
-            **_read_options(kind),
-        )
+    return read_first_block(
+        genoio.pfile(prefix),
+        max_variants,
+        samples=sample_ids[:keep_count],
+        **_read_options(kind),
     )
 
 
 def read_genoio_genotype_filtered(prefix: Path, max_variants: int, kind: str = "geno") -> np.ndarray:
     import genoio
 
-    return next(
-        genoio.pfile(prefix).iter_blocks(
-            max_variants,
-            variants=genoio.maf(min=0.01),
-            **_read_options(kind),
-        )
+    return read_first_block(
+        genoio.pfile(prefix),
+        max_variants,
+        variants=genoio.maf(min=0.01),
+        **_read_options(kind),
     )
 
 

@@ -9,7 +9,9 @@ mod common;
 mod plink1;
 mod plink2;
 
+pub(crate) use plink1::Plink1BlockSession;
 pub use plink1::{read_plink1_dense_windowed, read_plink1_metadata, read_plink1_sparse_windowed};
+pub(crate) use plink2::Plink2BlockSession;
 pub use plink2::{
     read_plink2_dense_windowed, read_plink2_dosage_dense_windowed,
     read_plink2_haplotypes_dense_windowed, read_plink2_haplotypes_dosage_dense_windowed,

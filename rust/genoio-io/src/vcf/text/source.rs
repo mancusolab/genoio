@@ -34,7 +34,7 @@ type IndexedCompressedVcfReader<'a, R> = noodles::io::Reader<csi::io::Query<'a, 
 pub(super) type IndexedBgzfReader<'a> = IndexedCompressedVcfReader<'a, bgzf::io::Reader<File>>;
 pub(super) type ThreadedIndexedBgzfReader<'a> =
     IndexedCompressedVcfReader<'a, bgzf::io::MultithreadedReader<File>>;
-type IndexChunk = csi::binning_index::index::reference_sequence::bin::Chunk;
+pub(super) type IndexChunk = csi::binning_index::index::reference_sequence::bin::Chunk;
 pub(super) type PlainVcfReader = noodles::io::Reader<BufReader<File>>;
 
 pub(super) struct TextVcfInput<R> {
@@ -105,33 +105,60 @@ pub(super) fn open_text_vcf_input(
     requested_samples: Option<&[String]>,
     threads: Option<usize>,
 ) -> Result<TextVcfSource> {
+    open_text_vcf_input_with_hooks(path, requested_samples, threads, || {}, || {})
+}
+
+pub(super) fn open_text_vcf_input_with_hooks(
+    path: &Path,
+    requested_samples: Option<&[String]>,
+    threads: Option<usize>,
+    mut on_source_open: impl FnMut(),
+    mut on_header_parse: impl FnMut(),
+) -> Result<TextVcfSource> {
     if is_compressed_vcf(path) {
         match threads {
-            Some(threads) => open_text_vcf_input_from_reader(
-                path,
-                requested_samples,
-                open_threaded_compressed_reader(path, threads)?,
-            )
-            .map(TextVcfSource::ThreadedCompressed),
-            None => open_text_vcf_input_from_reader(
-                path,
-                requested_samples,
-                open_compressed_reader(path)?,
-            )
-            .map(TextVcfSource::Compressed),
+            Some(threads) => {
+                let reader =
+                    open_threaded_compressed_reader_with_hook(path, threads, &mut on_source_open)?;
+                open_text_vcf_input_from_reader_with_hook(
+                    path,
+                    requested_samples,
+                    reader,
+                    &mut on_header_parse,
+                )
+                .map(TextVcfSource::ThreadedCompressed)
+            }
+            None => {
+                let reader = open_compressed_reader_with_hook(path, &mut on_source_open)?;
+                open_text_vcf_input_from_reader_with_hook(
+                    path,
+                    requested_samples,
+                    reader,
+                    &mut on_header_parse,
+                )
+                .map(TextVcfSource::Compressed)
+            }
         }
     } else {
-        open_text_vcf_input_from_reader(path, requested_samples, open_plain_reader(path)?)
-            .map(TextVcfSource::Plain)
+        let reader = open_plain_reader_with_hook(path, &mut on_source_open)?;
+        open_text_vcf_input_from_reader_with_hook(
+            path,
+            requested_samples,
+            reader,
+            &mut on_header_parse,
+        )
+        .map(TextVcfSource::Plain)
     }
 }
 
-fn open_text_vcf_input_from_reader<R: BufRead>(
+pub(super) fn open_text_vcf_input_from_reader_with_hook<R: BufRead>(
     path: &Path,
     requested_samples: Option<&[String]>,
     mut reader: noodles::io::Reader<R>,
+    on_header_parse: impl FnOnce(),
 ) -> Result<TextVcfInput<R>> {
     let all_samples = read_sample_records_from_header(path, reader.get_mut())?;
+    on_header_parse();
     let mut selection = select_samples_source_order(&all_samples, requested_samples, path)?;
     if requested_samples.is_some() {
         for (sample, source_index) in selection.samples.iter_mut().zip(&selection.source_indices) {
@@ -231,10 +258,18 @@ where
     read_records(IndexedTextVcfInput { selection, region }, &mut reader)
 }
 
-fn open_bgzf_reader(path: &Path) -> Result<bgzf::io::Reader<File>> {
-    File::open(path)
-        .map(bgzf::io::Reader::new)
-        .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))
+pub(super) fn open_bgzf_reader(path: &Path) -> Result<bgzf::io::Reader<File>> {
+    open_bgzf_reader_with_hook(path, || {})
+}
+
+pub(super) fn open_bgzf_reader_with_hook(
+    path: &Path,
+    on_source_open: impl FnOnce(),
+) -> Result<bgzf::io::Reader<File>> {
+    let file = File::open(path)
+        .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
+    on_source_open();
+    Ok(bgzf::io::Reader::new(file))
 }
 
 fn open_threaded_bgzf_reader(
@@ -254,13 +289,23 @@ fn open_threaded_bgzf_reader(
     ))
 }
 
-fn index_chunks_for_region(
+pub(super) fn index_chunks_for_region(
     path: &Path,
     region: &RegionPredicate,
 ) -> Result<Option<Vec<IndexChunk>>> {
-    let index = read_associated_index(path).map_err(|error| {
-        GenoioError::invalid_source(path, format!("vcf index read error: {error}"))
-    })?;
+    index_chunks_for_region_with_hooks(path, region, || {}, || {})
+}
+
+pub(super) fn index_chunks_for_region_with_hooks(
+    path: &Path,
+    region: &RegionPredicate,
+    on_tabix_index_read: impl FnOnce(),
+    on_csi_index_read: impl FnOnce(),
+) -> Result<Option<Vec<IndexChunk>>> {
+    let index = read_associated_index_with_hooks(path, on_tabix_index_read, on_csi_index_read)
+        .map_err(|error| {
+            GenoioError::invalid_source(path, format!("vcf index read error: {error}"))
+        })?;
     let region = noodles_region_from_predicate(path, region)?;
     let Some(header) = index.header() else {
         return Ok(None);
@@ -279,12 +324,21 @@ fn index_chunks_for_region(
         })
 }
 
-fn read_associated_index(path: &Path) -> std::io::Result<Box<dyn BinningIndex>> {
+fn read_associated_index_with_hooks(
+    path: &Path,
+    on_tabix_index_read: impl FnOnce(),
+    on_csi_index_read: impl FnOnce(),
+) -> std::io::Result<Box<dyn BinningIndex>> {
     match tabix::fs::read(companion_index_path(path, "tbi")) {
-        Ok(index) => Ok(Box::new(index)),
+        Ok(index) => {
+            on_tabix_index_read();
+            Ok(Box::new(index))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            csi::fs::read(companion_index_path(path, "csi"))
-                .map(|index| Box::new(index) as Box<dyn BinningIndex>)
+            csi::fs::read(companion_index_path(path, "csi")).map(|index| {
+                on_csi_index_read();
+                Box::new(index) as Box<dyn BinningIndex>
+            })
         }
         Err(error) => Err(error),
     }
@@ -312,22 +366,41 @@ fn position_from_u32(path: &Path, value: u32, label: &str) -> Result<Position> {
 }
 
 pub(super) fn open_compressed_reader(path: &Path) -> Result<CompressedVcfReader> {
+    open_compressed_reader_with_hook(path, || {})
+}
+
+fn open_compressed_reader_with_hook(
+    path: &Path,
+    on_source_open: impl FnOnce(),
+) -> Result<CompressedVcfReader> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
+    on_source_open();
     let reader = BufReader::with_capacity(VCF_TEXT_BUFFER_SIZE, MultiGzDecoder::new(file));
     Ok(noodles::io::Reader::new(reader))
 }
 
-fn open_threaded_compressed_reader(
+fn open_threaded_compressed_reader_with_hook(
     path: &Path,
     threads: usize,
+    on_source_open: impl FnOnce(),
 ) -> Result<ThreadedCompressedVcfReader> {
-    open_threaded_bgzf_reader(path, threads).map(noodles::io::Reader::new)
+    let reader = open_threaded_bgzf_reader(path, threads)?;
+    on_source_open();
+    Ok(noodles::io::Reader::new(reader))
 }
 
 pub(super) fn open_plain_reader(path: &Path) -> Result<PlainVcfReader> {
+    open_plain_reader_with_hook(path, || {})
+}
+
+fn open_plain_reader_with_hook(
+    path: &Path,
+    on_source_open: impl FnOnce(),
+) -> Result<PlainVcfReader> {
     let file = File::open(path)
         .map_err(|error| GenoioError::invalid_source(path, format!("vcf open error: {error}")))?;
+    on_source_open();
     let reader = BufReader::with_capacity(VCF_TEXT_BUFFER_SIZE, file);
     Ok(noodles::io::Reader::new(reader))
 }

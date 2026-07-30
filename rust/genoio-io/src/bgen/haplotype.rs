@@ -8,11 +8,14 @@
 use std::path::Path;
 
 use genoio_core::{
-    select_samples_source_order, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, PartialFilterDecision, SampleMetadataBuffers, SampleRecord,
-    VariantFilter, VariantMetadataBuffers, VariantWindow,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError,
+    PartialFilterDecision, SampleMetadataBuffers, SampleRecord, VariantFilter,
+    VariantMetadataBuffers, VariantWindow,
 };
 
+use crate::blocks::{
+    block_diagnostics_snapshot, checked_dense_block_len, BlockReadOptions, DosageSource, MatrixKind,
+};
 use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
 use crate::matrix::apply_dense_missing_policy_to_variant;
@@ -20,29 +23,7 @@ use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionA
 
 use super::decode::{decode_buffered_haplotype_values, HaplotypeDecodeBuffers};
 use super::filter::apply_genotype_filter_result;
-use super::index::{indexed_region_records, BgenIndexRecord};
-use super::session::{BgenIndexedReadContext, BgenReadSession, BgenVariantCursor};
-
-fn empty_dense_output_for_samples(
-    samples: Vec<SampleRecord>,
-    mut diagnostics: genoio_core::DenseDiagnostics,
-    return_samples: bool,
-    return_variants: bool,
-) -> Result<DenseGenotypeMatrix> {
-    diagnostics.retained_variants = 0;
-    let n_samples = samples.len();
-    let samples = SampleMetadataBuffers::optional_from_records(&samples, return_samples, true)?;
-    let variants = return_variants.then(|| VariantMetadataBuffers::with_capacity(0));
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        0,
-        Vec::new(),
-        DenseLayout::SampleMajor,
-        samples,
-        variants,
-        diagnostics,
-    )
-}
+use super::session::BgenBlockSession;
 
 #[expect(
     clippy::too_many_arguments,
@@ -58,141 +39,182 @@ pub fn read_bgen_haplotypes_dosage_dense_windowed(
     return_samples: bool,
     return_variants: bool,
 ) -> Result<DenseGenotypeMatrix> {
-    let mut session = BgenReadSession::open(bgen)?;
-    let all_samples = session.read_samples(sample)?;
-    let selection = select_samples_source_order(&all_samples, requested_samples, bgen)?;
-    let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
-    let mut diagnostics = selection.diagnostics.clone();
-    if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        diagnostics.retained_variants = 0;
-        return empty_dense_output_for_samples(
-            haplotype_samples,
-            diagnostics,
-            return_samples,
-            return_variants,
-        );
+    let retained_skip = variant_window.map_or(0, |window| window.start);
+    let options = BlockReadOptions {
+        matrix_kind: MatrixKind::Haplotype,
+        sparse: false,
+        requested_samples: requested_samples.map(<[String]>::to_vec),
+        variant_filter: variant_filter.cloned(),
+        dosage_source: DosageSource::Dosage,
+        missing_policy,
+        return_samples,
+        return_variants,
+    };
+    let mut session = BgenBlockSession::open_windowed(
+        bgen.to_path_buf(),
+        sample.map(Path::to_path_buf),
+        options,
+        retained_skip,
+    )?;
+    let block_size = match variant_window {
+        Some(window) => window.len,
+        None => session.source_record_capacity(),
+    };
+    match session.next_haplotype_block(block_size)? {
+        Some(matrix) => Ok(matrix),
+        None => session.empty_haplotype_output(),
     }
-    if let Some(index_records) = indexed_region_records(bgen, variant_filter)? {
-        let context = BgenIndexedReadContext {
-            session: &mut session,
-            selection,
-            diagnostics,
-            variant_filter,
-            variant_window,
-            missing_policy,
-            return_samples,
-            return_variants,
-        };
-        return read_bgen_haplotypes_dosage_dense_indexed(context, &index_records);
-    }
+}
 
-    session.seek_to_variants()?;
-
-    let header_variant_count = usize::try_from(session.header.variant_count)
-        .map_err(|_| GenoioError::invalid_source(bgen, "bgen variant count is out of range"))?;
-    let output_variant_capacity = variant_window.map_or(header_variant_count, |window| {
-        window.len.min(header_variant_count)
-    });
-    let n_haplotypes = selection.samples.len() * 2;
-    let mut variants =
-        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
-    let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut decode_buffers = HaplotypeDecodeBuffers::default();
-    let mut retention = RetainedVariantState::new(variant_window);
-    let mut output_variant_count = 0_usize;
-
-    let variant_count = session.header.variant_count;
-    let sample_count = session.header.sample_count;
-    let mut cursor = BgenVariantCursor::sequential(variant_count);
-    loop {
-        if retention.window_is_satisfied() {
-            break;
+impl BgenBlockSession {
+    pub(super) fn next_haplotype_block(
+        &mut self,
+        block_size: usize,
+    ) -> Result<Option<DenseGenotypeMatrix>> {
+        if self.eof || block_size == 0 {
+            return Ok(None);
         }
-        if cursor.next(&mut session)?.is_none() {
-            break;
-        }
-        let mut variant = session.read_variant()?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Skip => {
-                session.skip_payload()?;
-                continue;
-            }
-            MetadataRetentionAction::Stop => break,
-            MetadataRetentionAction::Include => {
-                session.read_payload_into(&mut decode_buffers.probability)?;
-            }
-            MetadataRetentionAction::DecodeGenotypes => {
-                session.read_payload_into(&mut decode_buffers.probability)?;
-                decode_buffered_haplotype_values(
-                    bgen,
-                    sample_count,
-                    &selection.source_indices,
-                    &mut decode_buffers,
-                )?;
-                let (retain_variant, stats) = evaluate_dosage_filter(
-                    &decode_buffers.selected_collapsed_values,
-                    &decode_buffers.selected_collapsed_missing_indices,
-                    variant_filter.ok_or_else(|| {
+
+        let n_haplotypes = self.selection.samples.len().checked_mul(2).ok_or_else(|| {
+            GenoioError::internal_contract("bgen haplotype row count is out of range")
+        })?;
+        let output_len = checked_dense_block_len(n_haplotypes, block_size)?;
+        self.record_dense_allocation(output_len);
+        let mut variant_major_values = Vec::with_capacity(output_len);
+        let mut variants = self
+            .return_variants
+            .then(|| VariantMetadataBuffers::with_capacity(block_size));
+        let retained_skip = std::mem::take(&mut self.retained_skip);
+        let mut retention = RetainedVariantState::new(Some(VariantWindow {
+            start: retained_skip,
+            len: block_size,
+        }));
+        let mut output_variant_count = 0_usize;
+        let sample_count = self.io.header.sample_count;
+
+        while !retention.window_is_satisfied() {
+            let Some(position) = self.next_position()? else {
+                break;
+            };
+            let mut variant = self.io.read_variant()?;
+            let partial_decision = self
+                .variant_filter
+                .as_ref()
+                .map_or(PartialFilterDecision::Accept, |filter| {
+                    filter.partial_decision(&variant)
+                });
+            match retention.metadata_decision(partial_decision, &mut self.diagnostics) {
+                MetadataRetentionAction::Skip => {
+                    self.io.skip_payload()?;
+                    position.validate_if_indexed(&mut self.io)?;
+                    continue;
+                }
+                MetadataRetentionAction::Stop => {
+                    self.io.skip_payload()?;
+                    position.validate_if_indexed(&mut self.io)?;
+                    break;
+                }
+                MetadataRetentionAction::Include => {
+                    self.io.read_payload_into(
+                        &mut haplotype_buffers_mut(&mut self.haplotype_buffers)?.probability,
+                    )?;
+                    position.validate_if_indexed(&mut self.io)?;
+                    self.record_payload_decode();
+                }
+                MetadataRetentionAction::DecodeGenotypes => {
+                    self.io.read_payload_into(
+                        &mut haplotype_buffers_mut(&mut self.haplotype_buffers)?.probability,
+                    )?;
+                    position.validate_if_indexed(&mut self.io)?;
+                    self.record_payload_decode();
+                    let buffers = haplotype_buffers_mut(&mut self.haplotype_buffers)?;
+                    decode_buffered_haplotype_values(
+                        &self.io.bgen,
+                        sample_count,
+                        &self.selection.source_indices,
+                        buffers,
+                    )?;
+                    let filter = self.variant_filter.as_ref().ok_or_else(|| {
                         GenoioError::internal_contract(
                             "genotype decision requires a variant filter",
                         )
-                    })?,
-                    &variant,
-                    return_variants,
-                )?;
-                match apply_genotype_filter_result(
-                    &mut retention,
-                    &mut diagnostics,
-                    &mut variant,
-                    retain_variant,
-                    stats,
-                ) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => continue,
-                    RetentionAction::Stop => {
-                        break;
+                    })?;
+                    let (retain_variant, stats) = evaluate_dosage_filter(
+                        &buffers.selected_collapsed_values,
+                        &buffers.selected_collapsed_missing_indices,
+                        filter,
+                        &variant,
+                        self.return_variants,
+                    )?;
+                    match apply_genotype_filter_result(
+                        &mut retention,
+                        &mut self.diagnostics,
+                        &mut variant,
+                        retain_variant,
+                        stats,
+                    ) {
+                        RetentionAction::Include => {}
+                        RetentionAction::Skip => {
+                            continue;
+                        }
+                        RetentionAction::Stop => {
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
-            decode_buffered_haplotype_values(
-                bgen,
-                sample_count,
-                &selection.source_indices,
-                &mut decode_buffers,
+            if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
+                let buffers = haplotype_buffers_mut(&mut self.haplotype_buffers)?;
+                decode_buffered_haplotype_values(
+                    &self.io.bgen,
+                    sample_count,
+                    &self.selection.source_indices,
+                    buffers,
+                )?;
+            }
+            let buffers = haplotype_buffers_mut(&mut self.haplotype_buffers)?;
+            apply_dense_missing_policy_to_variant(
+                &mut buffers.selected_haplotype_values,
+                &buffers.selected_haplotype_missing_indices,
+                self.missing_policy,
             )?;
+            variant_major_values.extend_from_slice(&buffers.selected_haplotype_values);
+            if let Some(variants) = variants.as_mut() {
+                variants.push_record(&variant)?;
+            }
+            output_variant_count += 1;
         }
-        if let Some(variants) = variants.as_mut() {
-            variants.push_record(&variant)?;
-        }
-        apply_dense_missing_policy_to_variant(
-            &mut decode_buffers.selected_haplotype_values,
-            &decode_buffers.selected_haplotype_missing_indices,
-            missing_policy,
-        )?;
-        variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
-        output_variant_count += 1;
-    }
 
-    let n_samples = n_haplotypes;
-    let n_variants = output_variant_count;
-    diagnostics.retained_variants = n_variants;
-    let samples =
-        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        n_variants,
-        variant_major_values,
-        DenseLayout::VariantMajor,
-        samples,
-        variants,
-        diagnostics,
-    )
+        if output_variant_count == 0 {
+            return Ok(None);
+        }
+        let haplotype_samples = expand_selected_samples_to_haplotypes(&self.selection);
+        let samples = SampleMetadataBuffers::optional_from_records(
+            &haplotype_samples,
+            self.return_samples,
+            true,
+        )?;
+        let diagnostics = block_diagnostics_snapshot(&self.diagnostics, output_variant_count);
+        DenseGenotypeMatrix::new_with_layout(
+            n_haplotypes,
+            output_variant_count,
+            variant_major_values,
+            DenseLayout::VariantMajor,
+            samples,
+            variants,
+            diagnostics,
+        )
+        .map(Some)
+    }
+}
+
+fn haplotype_buffers_mut(
+    buffers: &mut Option<HaplotypeDecodeBuffers>,
+) -> Result<&mut HaplotypeDecodeBuffers> {
+    buffers.as_mut().ok_or_else(|| {
+        GenoioError::internal_contract("bgen haplotype session is missing haplotype decode buffers")
+    })
 }
 
 pub(super) fn expand_selected_samples_to_haplotypes(
@@ -208,134 +230,4 @@ pub(super) fn expand_selected_samples_to_haplotypes(
         }
     }
     haplotype_samples
-}
-
-fn read_bgen_haplotypes_dosage_dense_indexed(
-    context: BgenIndexedReadContext<'_>,
-    index_records: &[BgenIndexRecord],
-) -> Result<DenseGenotypeMatrix> {
-    let BgenIndexedReadContext {
-        session,
-        selection,
-        mut diagnostics,
-        variant_filter,
-        variant_window,
-        missing_policy,
-        return_samples,
-        return_variants,
-    } = context;
-    let bgen = session.bgen;
-    let sample_count = session.header.sample_count;
-    let haplotype_samples = expand_selected_samples_to_haplotypes(&selection);
-    let output_variant_capacity = variant_window.map_or(index_records.len(), |window| {
-        window.len.min(index_records.len())
-    });
-    let n_haplotypes = selection.samples.len() * 2;
-    let mut variants =
-        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
-    let mut variant_major_values = Vec::with_capacity(n_haplotypes * output_variant_capacity);
-    let mut decode_buffers = HaplotypeDecodeBuffers::default();
-    let mut retention = RetainedVariantState::new(variant_window);
-    let mut output_variant_count = 0_usize;
-
-    let mut cursor = BgenVariantCursor::indexed(index_records);
-    loop {
-        if retention.window_is_satisfied() {
-            break;
-        }
-        let Some(position) = cursor.next(session)? else {
-            break;
-        };
-        let mut variant = session.read_variant()?;
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Skip => {
-                session.skip_payload()?;
-                position.validate_if_indexed(session)?;
-                continue;
-            }
-            MetadataRetentionAction::Stop => {
-                session.skip_payload()?;
-                position.validate_if_indexed(session)?;
-                break;
-            }
-            MetadataRetentionAction::Include => {
-                session.read_payload_into(&mut decode_buffers.probability)?;
-            }
-            MetadataRetentionAction::DecodeGenotypes => {
-                session.read_payload_into(&mut decode_buffers.probability)?;
-                decode_buffered_haplotype_values(
-                    bgen,
-                    sample_count,
-                    &selection.source_indices,
-                    &mut decode_buffers,
-                )?;
-                let (retain_variant, stats) = evaluate_dosage_filter(
-                    &decode_buffers.selected_collapsed_values,
-                    &decode_buffers.selected_collapsed_missing_indices,
-                    variant_filter.ok_or_else(|| {
-                        GenoioError::internal_contract(
-                            "genotype decision requires a variant filter",
-                        )
-                    })?,
-                    &variant,
-                    return_variants,
-                )?;
-                match apply_genotype_filter_result(
-                    &mut retention,
-                    &mut diagnostics,
-                    &mut variant,
-                    retain_variant,
-                    stats,
-                ) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => {
-                        position.validate_if_indexed(session)?;
-                        continue;
-                    }
-                    RetentionAction::Stop => {
-                        position.validate_if_indexed(session)?;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !matches!(partial_decision, PartialFilterDecision::NeedGenotypes) {
-            decode_buffered_haplotype_values(
-                bgen,
-                sample_count,
-                &selection.source_indices,
-                &mut decode_buffers,
-            )?;
-        }
-        position.validate_if_indexed(session)?;
-        if let Some(variants) = variants.as_mut() {
-            variants.push_record(&variant)?;
-        }
-        apply_dense_missing_policy_to_variant(
-            &mut decode_buffers.selected_haplotype_values,
-            &decode_buffers.selected_haplotype_missing_indices,
-            missing_policy,
-        )?;
-        variant_major_values.extend_from_slice(&decode_buffers.selected_haplotype_values);
-        output_variant_count += 1;
-    }
-
-    let n_samples = n_haplotypes;
-    let n_variants = output_variant_count;
-    diagnostics.retained_variants = n_variants;
-    let samples =
-        SampleMetadataBuffers::optional_from_records(&haplotype_samples, return_samples, true)?;
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        n_variants,
-        variant_major_values,
-        DenseLayout::VariantMajor,
-        samples,
-        variants,
-        diagnostics,
-    )
 }

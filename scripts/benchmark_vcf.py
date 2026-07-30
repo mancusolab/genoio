@@ -11,7 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from bench_common import benchmark, compare_summaries, matrix_summary, nonnegative_float, positive_int, print_result
+from bench_common import (
+    benchmark,
+    compare_summaries,
+    matrix_summary,
+    nonnegative_float,
+    positive_int,
+    print_result,
+    read_first_block,
+)
 
 SCENARIOS = (
     "metadata",
@@ -101,12 +109,11 @@ def _requested_sample_ids(args: argparse.Namespace) -> list[str]:
 def read_genoio_matrix_only(args: argparse.Namespace) -> Any:
     import genoio
 
-    matrix = next(
-        genoio.vcf(args.vcf).iter_blocks(
-            args.max_variants,
-            variants=genoio_filter(args),
-            **_read_options(args.kind, args.sparse),
-        )
+    matrix = read_first_block(
+        genoio.vcf(args.vcf),
+        args.max_variants,
+        variants=genoio_filter(args),
+        **_read_options(args.kind, args.sparse),
     )
     return matrix
 
@@ -142,13 +149,12 @@ def read_genoio_with_variants(args: argparse.Namespace) -> Any:
     import genoio
 
     global _last_variant_metadata_length
-    matrix, variants = next(
-        genoio.vcf(args.vcf).iter_blocks(
-            args.max_variants,
-            variants=genoio_filter(args),
-            return_variants=True,
-            **_read_options(args.kind, args.sparse),
-        )
+    matrix, variants = read_first_block(
+        genoio.vcf(args.vcf),
+        args.max_variants,
+        variants=genoio_filter(args),
+        return_variants=True,
+        **_read_options(args.kind, args.sparse),
     )
     _last_variant_metadata_length = variants.height
     return matrix
@@ -157,13 +163,12 @@ def read_genoio_with_variants(args: argparse.Namespace) -> Any:
 def read_genoio_sample_filtered(args: argparse.Namespace) -> Any:
     import genoio
 
-    matrix = next(
-        genoio.vcf(args.vcf).iter_blocks(
-            args.max_variants,
-            variants=genoio_filter(args),
-            samples=_requested_sample_ids(args),
-            **_read_options(args.kind, args.sparse),
-        )
+    matrix = read_first_block(
+        genoio.vcf(args.vcf),
+        args.max_variants,
+        variants=genoio_filter(args),
+        samples=_requested_sample_ids(args),
+        **_read_options(args.kind, args.sparse),
     )
     return matrix
 
@@ -171,12 +176,11 @@ def read_genoio_sample_filtered(args: argparse.Namespace) -> Any:
 def read_genoio_genotype_filtered(args: argparse.Namespace) -> Any:
     import genoio
 
-    matrix = next(
-        genoio.vcf(args.vcf).iter_blocks(
-            args.max_variants,
-            variants=genoio_filter(args) & genoio.maf(min=0.01),
-            **_read_options(args.kind, args.sparse),
-        )
+    matrix = read_first_block(
+        genoio.vcf(args.vcf),
+        args.max_variants,
+        variants=genoio_filter(args) & genoio.maf(min=0.01),
+        **_read_options(args.kind, args.sparse),
     )
     return matrix
 
@@ -184,13 +188,12 @@ def read_genoio_genotype_filtered(args: argparse.Namespace) -> Any:
 def read_genoio_indexed_region(args: argparse.Namespace) -> Any:
     import genoio
 
-    matrix, variants = next(
-        genoio.vcf(args.vcf).iter_blocks(
-            args.max_variants,
-            variants=genoio.region(args.region) & genoio_filter(args),
-            return_variants=True,
-            **_read_options(args.kind, args.sparse),
-        )
+    matrix, variants = read_first_block(
+        genoio.vcf(args.vcf),
+        args.max_variants,
+        variants=genoio.region(args.region) & genoio_filter(args),
+        return_variants=True,
+        **_read_options(args.kind, args.sparse),
     )
     _validate_region_variants(variants, args.region)
     return matrix
@@ -199,14 +202,13 @@ def read_genoio_indexed_region(args: argparse.Namespace) -> Any:
 def read_genoio_indexed_region_sample_filtered(args: argparse.Namespace) -> Any:
     import genoio
 
-    matrix, variants = next(
-        genoio.vcf(args.vcf).iter_blocks(
-            args.max_variants,
-            variants=genoio.region(args.region) & genoio_filter(args),
-            samples=_requested_sample_ids(args),
-            return_variants=True,
-            **_read_options(args.kind, args.sparse),
-        )
+    matrix, variants = read_first_block(
+        genoio.vcf(args.vcf),
+        args.max_variants,
+        variants=genoio.region(args.region) & genoio_filter(args),
+        samples=_requested_sample_ids(args),
+        return_variants=True,
+        **_read_options(args.kind, args.sparse),
     )
     _validate_region_variants(variants, args.region)
     return matrix

@@ -4,8 +4,14 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
+use genoio_core::{DenseMissingPolicy, GenoioError, SparseGenotypeMatrix, VariantFilter};
+
 mod common;
 
+use common::bcf::write_genotype_dosage_fixture;
 use common::plink_output as plink_io;
 use common::unique_dir;
 use common::vcf_output as genoio_io;
@@ -63,6 +69,94 @@ F1 S3 0 0 0 -9
     (bed, bim, fam)
 }
 
+fn write_three_variant_plink_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let bed = dir.join("three.bed");
+    let bim = dir.join("three.bim");
+    let fam = dir.join("three.fam");
+    fs::write(&bed, [0x6c, 0x1b, 0x01, 0x0b, 0x2c, 0x08]).expect("bed fixture should be written");
+    write_text(
+        &bim,
+        "\
+1 rs1 0 10 G A
+1 rs2 0 20 T C
+2 rs3 0 30 A G
+",
+    );
+    write_text(
+        &fam,
+        "\
+F1 S1 0 0 1 -9
+F1 S2 0 0 2 -9
+F1 S3 0 0 0 -9
+",
+    );
+    (bed, bim, fam)
+}
+
+fn plink1_sparse_block_options(
+    requested_samples: Option<Vec<String>>,
+    variant_filter: Option<VariantFilter>,
+) -> BlockReadOptions {
+    BlockReadOptions {
+        matrix_kind: MatrixKind::Genotype,
+        sparse: true,
+        requested_samples,
+        variant_filter,
+        dosage_source: DosageSource::Hardcall,
+        missing_policy: DenseMissingPolicy::Raise,
+        return_samples: true,
+        return_variants: true,
+    }
+}
+
+fn collect_plink1_sparse_blocks(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    options: BlockReadOptions,
+    block_size: usize,
+) -> Vec<SparseGenotypeMatrix> {
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 {
+            bed: bed.to_path_buf(),
+            bim: bim.to_path_buf(),
+            fam: fam.to_path_buf(),
+        },
+        options,
+        block_size,
+    )
+    .expect("persistent sparse plink1 reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader
+        .next_block()
+        .expect("persistent sparse plink1 block should decode")
+    {
+        let BlockOutput::Sparse(matrix) = output else {
+            panic!("plink1 sparse reader should return sparse blocks");
+        };
+        blocks.push(matrix);
+    }
+    blocks
+}
+
+fn concatenate_sparse_blocks(blocks: &[SparseGenotypeMatrix]) -> (Vec<i32>, Vec<i32>, Vec<f32>) {
+    let mut indptr = vec![0];
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+    for block in blocks {
+        let nnz_offset =
+            i32::try_from(indices.len()).expect("test sparse nonzero count should fit i32");
+        indptr.extend(block.indptr.iter().skip(1).map(|pointer| {
+            nnz_offset
+                .checked_add(*pointer)
+                .expect("test sparse pointer should fit i32")
+        }));
+        indices.extend_from_slice(&block.indices);
+        data.extend_from_slice(&block.data);
+    }
+    (indptr, indices, data)
+}
+
 #[test]
 fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
     let dir = unique_dir("vcf-sparse-parity");
@@ -83,6 +177,96 @@ fn vcf_sparse_reconstructs_dense_when_no_missing_calls() {
     assert_eq!(
         sparse_values_dense_output(&sparse),
         dense_values_sample_major_output(&dense)
+    );
+}
+
+#[test]
+fn pbr_rust_textvcf_002_sequential_sparse_genotype_blocks_preserve_csc_parity() {
+    let dir = unique_dir("pbr-text-vcf-sparse-blocks");
+    let path = dir.join("sparse.vcf");
+    write_vcf(
+        &path,
+        "\
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/1\t0/0\t1/1
+1\t30\trs3\tG\tA\t.\tPASS\t.\tGT\t0/0\t0/0\t0/1
+",
+    );
+    let expected =
+        genoio_io::read_vcf_sparse(&path, None, None).expect("whole sparse VCF should decode");
+    let mut reader = BlockReader::open(
+        BlockSource::Vcf { vcf: path },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Genotype,
+            sparse: true,
+            requested_samples: None,
+            variant_filter: None,
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Raise,
+            return_samples: true,
+            return_variants: true,
+        },
+        2,
+    )
+    .expect("persistent sparse text VCF reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader
+        .next_block()
+        .expect("sparse text VCF block should decode")
+    {
+        let BlockOutput::Sparse(block) = output else {
+            panic!("sparse text VCF session should return sparse output");
+        };
+        blocks.push(block);
+    }
+    let (indptr, indices, data) = concatenate_sparse_blocks(&blocks);
+
+    assert_eq!(indptr, expected.indptr);
+    assert_eq!(indices, expected.indices);
+    assert_eq!(data, expected.data);
+    assert_eq!(
+        blocks.iter().map(|block| block.n_cols).collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+}
+
+#[test]
+fn pbr_rust_bcf_001_sparse_gt_blocks_match_whole_reads() {
+    let dir = unique_dir("pbr-bcf-sparse-blocks");
+    let path = dir.join("sparse.bcf");
+    write_genotype_dosage_fixture(&path);
+    let expected =
+        genoio_io::read_vcf_sparse(&path, None, None).expect("whole sparse BCF should decode");
+    let mut reader = BlockReader::open(
+        BlockSource::Bcf { bcf: path },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Genotype,
+            sparse: true,
+            requested_samples: None,
+            variant_filter: None,
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Raise,
+            return_samples: true,
+            return_variants: true,
+        },
+        2,
+    )
+    .expect("persistent sparse BCF reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader.next_block().expect("sparse BCF block should decode") {
+        let BlockOutput::Sparse(block) = output else {
+            panic!("BCF sparse session should return sparse output");
+        };
+        blocks.push(block);
+    }
+    let (indptr, indices, data) = concatenate_sparse_blocks(&blocks);
+
+    assert_eq!(indptr, expected.indptr);
+    assert_eq!(indices, expected.indices);
+    assert_eq!(data, expected.data);
+    assert_eq!(
+        blocks.iter().map(|block| block.n_cols).collect::<Vec<_>>(),
+        vec![2, 1]
     );
 }
 
@@ -155,6 +339,99 @@ fn plink1_sparse_reconstructs_dense_when_no_missing_calls() {
         sparse_values_dense_output(&sparse),
         dense_values_sample_major_output(&dense)
     );
+}
+
+#[test]
+fn pbr_rust_plink1_002_sparse_blocks_match_stateless_csc_at_unit_and_partial_widths() {
+    let dir = unique_dir("pbr-plink1-sparse-block-parity");
+    let (bed, bim, fam) = write_three_variant_plink_fixture(&dir);
+    let expected =
+        ::genoio_io::read_plink1_sparse_windowed(&bed, &bim, &fam, None, None, None, true, true)
+            .expect("whole sparse plink1 read should decode");
+
+    for (block_size, expected_widths) in [(1, vec![1, 1, 1]), (2, vec![2, 1])] {
+        let blocks = collect_plink1_sparse_blocks(
+            &bed,
+            &bim,
+            &fam,
+            plink1_sparse_block_options(None, None),
+            block_size,
+        );
+        let (indptr, indices, data) = concatenate_sparse_blocks(&blocks);
+        let ids = blocks
+            .iter()
+            .flat_map(|block| {
+                variant_ids(variants(&block.variants))
+                    .into_iter()
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            blocks.iter().map(|block| block.n_cols).collect::<Vec<_>>(),
+            expected_widths
+        );
+        assert_eq!(indptr, expected.indptr);
+        assert_eq!(indices, expected.indices);
+        assert_eq!(data, expected.data);
+        assert_eq!(ids, variant_ids(variants(&expected.variants)));
+        assert!(blocks.iter().all(|block| block.samples == expected.samples));
+    }
+}
+
+#[test]
+fn pbr_rust_plink1_002_sparse_blocks_preserve_sample_metadata_and_genotype_filters() {
+    let dir = unique_dir("pbr-plink1-sparse-filter-parity");
+    let (bed, bim, fam) = write_three_variant_plink_fixture(&dir);
+    let requested_samples = vec!["S3".to_owned(), "S1".to_owned()];
+    let filter = VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("genotype-stat filter should parse");
+    let expected = ::genoio_io::read_plink1_sparse_windowed(
+        &bed,
+        &bim,
+        &fam,
+        Some(&requested_samples),
+        Some(&filter),
+        None,
+        true,
+        true,
+    )
+    .expect("filtered whole sparse plink1 read should decode");
+    let blocks = collect_plink1_sparse_blocks(
+        &bed,
+        &bim,
+        &fam,
+        plink1_sparse_block_options(Some(requested_samples), Some(filter)),
+        1,
+    );
+    let (indptr, indices, data) = concatenate_sparse_blocks(&blocks);
+
+    assert_eq!(indptr, expected.indptr);
+    assert_eq!(indices, expected.indices);
+    assert_eq!(data, expected.data);
+    assert!(blocks.iter().all(|block| block.samples == expected.samples));
+}
+
+#[test]
+fn pbr_rust_plink1_002_sparse_blocks_reject_retained_missing_calls() {
+    let dir = unique_dir("pbr-plink1-sparse-missing");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2c]);
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 { bed, bim, fam },
+        plink1_sparse_block_options(None, None),
+        1,
+    )
+    .expect("persistent sparse plink1 reader should open");
+
+    let error = reader
+        .next_block()
+        .expect_err("retained sparse missing hard calls should fail");
+
+    assert!(matches!(error, GenoioError::MissingData { .. }));
 }
 
 #[test]

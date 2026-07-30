@@ -8,15 +8,16 @@ Yes. Dense reads return NumPy arrays, so convert each block with
 ```python
 import jax.numpy as jnp
 
-for X, variants in ds.iter_blocks(
+with ds.iter_blocks(
     size=4096,
     variants=genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic(),
     return_variants=True,
-):
-    # Convert inside the loop so the analysis does not need one whole-genome
-    # genotype matrix in device memory.
-    X_jax = jnp.asarray(X)
-    scan_block(X_jax, variants)
+) as blocks:
+    for X, variants in blocks:
+        # Convert inside the loop so the analysis does not need one whole-genome
+        # genotype matrix in device memory.
+        X_jax = jnp.asarray(X)
+        scan_block(X_jax, variants)
 ```
 
 Keep the host-to-device transfer cost in mind. `genoio` reads data on the CPU;
@@ -30,14 +31,15 @@ CPU arrays without copying.
 ```python
 import torch
 
-for X, variants in ds.iter_blocks(
+with ds.iter_blocks(
     size=4096,
     variants=genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic(),
     return_variants=True,
-):
-    # from_numpy shares CPU memory with X. Clone if downstream code mutates it.
-    X_tensor = torch.from_numpy(X).to(device)
-    scan_block(X_tensor, variants)
+) as blocks:
+    for X, variants in blocks:
+        # from_numpy shares CPU memory with X. Clone if downstream code mutates it.
+        X_tensor = torch.from_numpy(X).to(device)
+        scan_block(X_tensor, variants)
 ```
 
 If you move tensors to a GPU, PyTorch will copy the data to that device. For
@@ -75,9 +77,22 @@ GWAS-style scans. It returns fixed-width chunks of retained variants, which is a
 good fit for algorithms that apply the same test to many independent variant
 columns.
 
+Plain iteration closes the reader when all blocks are consumed. If a loop may
+stop early, use the returned iterator as a context manager:
+
+```python
+with ds.iter_blocks(4096, return_variants=True) as blocks:
+    for X, variants in blocks:
+        scan_block(X, variants)
+        if enough_results():
+            break
+```
+
 Use [`iter_regions(...)`](api/reading.md#genoio.Dataset.iter_regions) for cis
 scans or other local analyses. It takes a sequence of region filters and returns
-one matrix per requested interval.
+one matrix per requested interval. Each region delegates to a complete
+`read()` call, so `iter_regions(...)` does not own a reader across yields and
+does not require a context manager.
 
 ## Are samples reordered?
 

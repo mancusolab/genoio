@@ -11,16 +11,13 @@ use std::path::Path;
 use genoio_core::{
     select_samples_source_order, DenseDiagnostics, DenseGenotypeMatrix, DenseLayout,
     DenseSampleSelection, GenoioError, SampleMetadataBuffers, SampleRecord, SparseGenotypeMatrix,
-    VariantMetadataBuffers, VariantWindow,
+    VariantMetadataBuffers,
 };
 
 use crate::error::Result;
 
 use super::metadata::parse_psam;
-use super::pgen::{
-    read_supported_pgen_header, read_supported_pgen_header_prefix, validate_plink2_sample_count,
-    PgenHeader,
-};
+use super::pgen::{read_supported_pgen_header_prefix, validate_plink2_sample_count, PgenHeader};
 
 pub(super) struct Plink2ReadContext {
     pub(super) header: PgenHeader,
@@ -29,15 +26,6 @@ pub(super) struct Plink2ReadContext {
 }
 
 impl Plink2ReadContext {
-    pub(super) fn new(
-        pgen: &Path,
-        psam: &Path,
-        requested_samples: Option<&[String]>,
-    ) -> Result<Self> {
-        let header = read_supported_pgen_header(pgen)?;
-        Self::from_header(pgen, psam, requested_samples, header)
-    }
-
     pub(super) fn new_prefix(
         pgen: &Path,
         psam: &Path,
@@ -82,15 +70,6 @@ pub(super) fn require_pvar(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn variant_output_capacity(
-    header: &PgenHeader,
-    variant_window: Option<VariantWindow>,
-) -> usize {
-    variant_window.map_or(header.variant_ct, |window| {
-        window.len.min(header.variant_ct)
-    })
-}
-
 pub(super) fn empty_dense_output_for_samples(
     samples: Vec<SampleRecord>,
     mut diagnostics: DenseDiagnostics,
@@ -116,19 +95,6 @@ pub(super) fn empty_dense_output_for_samples(
         samples,
         variants,
         diagnostics,
-    )
-}
-
-pub(super) fn empty_sparse_output_for_selection(
-    selection: DenseSampleSelection,
-    return_samples: bool,
-    return_variants: bool,
-) -> Result<SparseGenotypeMatrix> {
-    empty_sparse_output_for_samples(
-        selection.samples,
-        selection.diagnostics,
-        return_samples,
-        return_variants,
     )
 }
 

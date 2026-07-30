@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+import sys
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast, overload
+from types import TracebackType
+from typing import Any, Literal, Self, TypeVar, cast, overload
 
 import numpy as np
 import polars as pl
@@ -42,6 +44,8 @@ from ._read_options import (
 from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile, resolve_vcf
 
 _Region = TypeVar("_Region")
+_NativeResult = TypeVar("_NativeResult")
+_BlockResult = TypeVar("_BlockResult", covariant=True)
 _RUST_ERROR_MAP = (
     (_rust.RustInternalError, InternalError),
     (_rust.RustSampleFilterError, SampleFilterError),
@@ -71,6 +75,119 @@ class _ReadPayload:
             return_samples=options.return_samples,
             return_variants=options.return_variants,
         )
+
+
+class BlockIterator(Iterator[_BlockResult]):
+    r"""Iterate over blocks while owning one persistent native reader.
+
+    `Dataset.iter_blocks()` constructs this object. Plain iteration closes the
+    reader on exhaustion. Use it as a context manager when control flow may
+    stop early so the native reader closes when the `with` block exits.
+
+    `close()` is idempotent. A closed iterator remains exhausted.
+    """
+
+    __slots__ = (
+        "_dataset",
+        "_size",
+        "_read_options",
+        "_validated_options",
+        "_members",
+        "_options",
+        "_native",
+        "_closed",
+        "__weakref__",
+    )
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        size: int,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+        members: dict[str, str],
+        options: dict[str, Any],
+    ) -> None:
+        self._dataset = dataset
+        self._size = size
+        self._read_options = read_options
+        self._validated_options = validated_options
+        self._members = members
+        self._options = options
+        self._native: _rust._BlockReader | None = None
+        self._closed = False
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> _BlockResult:
+        if self._closed:
+            raise StopIteration
+        try:
+            native = self._native
+            if native is None:
+                native = _call_native(
+                    _rust._BlockReader,
+                    self._dataset.source.format.value,
+                    self._members,
+                    self._read_options.kind,
+                    self._validated_options.sparse_format is not None,
+                    self._options,
+                    self._size,
+                )
+                self._native = native
+            rust_result = _call_native(native.next_block)
+            if rust_result is None:
+                self.close()
+                raise StopIteration
+            payload = self._dataset._assemble_read_payload(
+                rust_result,
+                read_options=self._read_options,
+                validated_options=self._validated_options,
+            )
+            return cast(_BlockResult, payload.to_result(self._read_options))
+        except BaseException as primary:
+            self._close_after_failure(primary)
+            raise
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, traceback
+        try:
+            self.close()
+        except BaseException as close_error:
+            if exc_value is None:
+                raise
+            exc_value.add_note(_close_failure_note(close_error))
+        return False
+
+    def close(self) -> None:
+        """Close the native reader without opening an unadvanced iterator."""
+        if self._closed:
+            return
+        self._closed = True
+        native, self._native = self._native, None
+        if native is not None:
+            _call_native(native.close)
+
+    def _close_after_failure(self, primary: BaseException) -> None:
+        try:
+            self.close()
+        except BaseException as close_error:
+            primary.add_note(_close_failure_note(close_error))
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,7 +492,7 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Iterator[SparseMatrixResult]: ...
+    ) -> BlockIterator[SparseMatrixResult]: ...
 
     @overload
     def iter_blocks(
@@ -386,7 +503,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]]: ...
+    ) -> BlockIterator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -397,7 +514,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
+    ) -> BlockIterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -408,7 +525,7 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
+    ) -> BlockIterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -418,7 +535,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame]]: ...
+    ) -> BlockIterator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -428,7 +545,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Iterator[tuple[np.ndarray, pl.DataFrame]]: ...
+    ) -> BlockIterator[tuple[np.ndarray, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -438,12 +555,20 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[np.ndarray, pl.DataFrame]]: ...
+    ) -> BlockIterator[tuple[np.ndarray, pl.DataFrame]]: ...
 
     @overload
-    def iter_blocks(self, size: int, **read_options: object) -> Iterator[np.ndarray]: ...
+    def iter_blocks(
+        self,
+        size: int,
+        **read_options: object,
+    ) -> BlockIterator[np.ndarray]: ...
 
-    def iter_blocks(self, size: int, **read_options: object) -> Iterator[ReadResult]:
+    def iter_blocks(
+        self,
+        size: int,
+        **read_options: object,
+    ) -> BlockIterator[ReadResult]:
         r"""Yield consecutive variant blocks from this dataset.
 
         Each yielded block has at most `size` variants and follows the same
@@ -453,6 +578,19 @@ class Dataset:
         same-path `.bgen.bgi` index when present. Haplotype blocks follow the
         same source-encoded representation rules as [`genoio.Dataset.read`][].
 
+        Source opening and record decoding are lazy: source and record errors
+        can be raised when the iterator is first advanced or between yielded
+        blocks. Exhaustion and read failure close the native reader. When a loop
+        may stop before exhaustion, use the returned iterator as a context
+        manager:
+
+        ```python
+        with dataset.iter_blocks(10_000, return_variants=True) as blocks:
+            for matrix, variants in blocks:
+                if analysis_is_complete(matrix, variants):
+                    break
+        ```
+
         **Arguments:**
 
         - `size`: maximum number of variants per yielded block.
@@ -460,7 +598,14 @@ class Dataset:
 
         **Returns:**
 
-        Iterator yielding matrices or matrix/metadata tuples.
+        [`genoio.BlockIterator`][] yielding matrices or matrix/metadata tuples.
+
+        **Raises:**
+
+        - `genoio.InvalidOptionError`: if `size` or a read option is invalid.
+        - `genoio.InvalidSourceError`: if lazy source opening or decoding fails.
+        - `genoio.MissingDataError`: if a yielded block violates the requested
+          missing-data policy.
         """
         _validate_block_size(size)
         normalized_options = _read_options_with_defaults(read_options)
@@ -470,7 +615,19 @@ class Dataset:
             normalized_options.dosage,
             validated_options.sparse_format,
         )
-        return self._block_iterator(size, normalized_options, validated_options)
+        members, options = self._native_read_arguments(
+            read_options=normalized_options,
+            validated_options=validated_options,
+            variant_window=None,
+        )
+        return BlockIterator(
+            self,
+            size,
+            normalized_options,
+            validated_options,
+            members,
+            options,
+        )
 
     @overload
     def iter_regions(
@@ -590,30 +747,6 @@ class Dataset:
         for region in regions:
             yield region, cast(ReadResult, read(variants=region, **read_options))
 
-    def _block_iterator(
-        self,
-        size: int,
-        read_options: _ReadOptions,
-        validated_options: _ValidatedReadOptions,
-    ) -> Iterator[ReadResult]:
-        start = 0
-        while True:
-            # Variant windows are expressed in retained-variant coordinates.
-            # Rust applies metadata/genotype filters before deciding whether a
-            # retained variant belongs to this block.
-            payload = self._read_payload(
-                read_options=read_options,
-                validated_options=validated_options,
-                variant_window={"start": start, "len": size},
-            )
-            variant_count = payload.matrix.shape[1]
-            if variant_count == 0:
-                break
-            yield payload.to_result(read_options)
-            if variant_count < size:
-                break
-            start += size
-
     def _read_validated(
         self,
         *,
@@ -621,22 +754,21 @@ class Dataset:
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
     ) -> ReadResult:
-        # Whole reads expose the public return contract immediately. Block
-        # reads use _read_payload first so pagination can inspect matrix shape
-        # without unpacking the public tuple form.
+        # Whole reads expose the public return contract after assembling the
+        # stateless native payload.
         return self._read_payload(
             read_options=read_options,
             validated_options=validated_options,
             variant_window=variant_window,
         ).to_result(read_options)
 
-    def _read_payload(
+    def _native_read_arguments(
         self,
         *,
         read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
-    ) -> _ReadPayload:
+    ) -> tuple[dict[str, str], dict[str, Any]]:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
             "samples": None if read_options.samples is None else list(read_options.samples),
@@ -648,8 +780,16 @@ class Dataset:
             "return_variants": read_options.return_variants,
             "matrix_only": not read_options.return_samples and not read_options.return_variants,
         }
+        return members, options
+
+    def _assemble_read_payload(
+        self,
+        rust_result: dict[str, Any],
+        *,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+    ) -> _ReadPayload:
         if validated_options.sparse_format is None:
-            rust_result = self._read_from_rust(read_options.kind, False, members, options)
             genotype_matrix = dense_array_from_rust(
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
@@ -657,7 +797,6 @@ class Dataset:
                 values_layout=str(rust_result.get("values_layout", "sample_major")),
             )
         else:
-            rust_result = self._read_from_rust(read_options.kind, True, members, options)
             genotype_matrix = sparse_matrix_from_rust(
                 indptr=rust_result["indptr"],
                 indices=rust_result["indices"],
@@ -666,8 +805,6 @@ class Dataset:
                 dtype=validated_options.dtype,
                 sparse_format=validated_options.sparse_format,
             )
-        # Metadata frames are assembled only when requested. Large PLINK2
-        # block reads can otherwise avoid parsing full variant metadata.
         sample_metadata = (
             samples_frame(
                 rust_result["samples"],
@@ -678,6 +815,30 @@ class Dataset:
         )
         variant_metadata = variants_frame(rust_result["variants"]) if read_options.return_variants else None
         return _ReadPayload(genotype_matrix, sample_metadata, variant_metadata)
+
+    def _read_payload(
+        self,
+        *,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+        variant_window: dict[str, int] | None,
+    ) -> _ReadPayload:
+        members, options = self._native_read_arguments(
+            read_options=read_options,
+            validated_options=validated_options,
+            variant_window=variant_window,
+        )
+        rust_result = self._read_from_rust(
+            read_options.kind,
+            validated_options.sparse_format is not None,
+            members,
+            options,
+        )
+        return self._assemble_read_payload(
+            rust_result,
+            read_options=read_options,
+            validated_options=validated_options,
+        )
 
     def _read_from_rust(
         self,
@@ -690,12 +851,7 @@ class Dataset:
             read = _rust.read_haplotypes_sparse if sparse else _rust.read_haplotypes_dense
         else:
             read = _rust.read_sparse if sparse else _rust.read_dense
-        try:
-            return read(self.source.format.value, members, options)
-        except _RUST_PUBLIC_ERROR_TYPES as error:
-            raise _public_rust_error(error) from error
-        except ValueError as error:
-            raise _public_read_error(error) from error
+        return _call_native(read, self.source.format.value, members, options)
 
     def _metadata(self) -> dict[str, Any]:
         if self._metadata_cache is None:
@@ -811,6 +967,24 @@ def _validate_variant_stats(stats: object) -> None:
         raise InvalidOptionError("variant stats are not implemented until a later phase")
 
 
+def _call_native(
+    native_call: Callable[..., _NativeResult],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> _NativeResult:
+    try:
+        return native_call(*args, **kwargs)
+    except _RUST_PUBLIC_ERROR_TYPES as error:
+        raise _public_rust_error(error) from error
+    except ValueError as error:
+        raise _public_read_error(error) from error
+
+
+def _close_failure_note(error: BaseException) -> str:
+    return f"native block reader close failed: {type(error).__name__}: {error}"
+
+
 def _public_rust_error(error: Exception) -> Exception:
     for rust_error_type, public_error_type in _RUST_ERROR_MAP:
         if isinstance(error, rust_error_type):
@@ -825,3 +999,5 @@ def _public_read_error(error: ValueError) -> Exception:
 def _validate_block_size(size: int) -> None:
     if not isinstance(size, int) or isinstance(size, bool) or size < 1:
         raise InvalidOptionError("block size must be a positive integer")
+    if size > sys.maxsize:
+        raise InvalidOptionError(f"block size exceeds this platform's limit of {sys.maxsize}")

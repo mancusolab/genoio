@@ -117,43 +117,105 @@ def test_canonical_sources_sparse_reads_match_dense_when_no_missing_calls_remain
 
     for dataset in canonical_datasets.values():
         dense = dataset.read(variants=expr)
-        sparse = dataset.read(variants=expr, sparse=True)
+        sparse_matrix = dataset.read(variants=expr, sparse=True)
 
-        assert scipy_sparse.isspmatrix_csc(sparse)
-        np.testing.assert_array_equal(sparse.toarray(), dense)
+        assert scipy_sparse.isspmatrix_csc(sparse_matrix)
+        np.testing.assert_array_equal(sparse_matrix.toarray(), dense)
 
 
-def test_canonical_sources_blocks_concatenate_to_filtered_full_reads(canonical_datasets):
+@pytest.mark.parametrize(
+    ("sparse", "dtype", "size", "filter_mode"),
+    [
+        pytest.param(False, "float32", 1, "three-variants", id="dense-size-1"),
+        pytest.param(False, "float64", 2, "three-variants", id="dense-partial-final"),
+        pytest.param(False, "float32", 3, "three-variants", id="dense-exact"),
+        pytest.param(False, "float64", 5, "three-variants", id="dense-oversized"),
+        pytest.param("csc", "float32", 1, "complete-only", id="csc"),
+        pytest.param("csr", "float64", 3, "complete-only", id="csr"),
+    ],
+)
+def test_pbr_py_matrix_001_pbr_py_meta_001_canonical_blocks_match_filtered_reads(
+    canonical_datasets,
+    sparse,
+    dtype,
+    size,
+    filter_mode,
+):
     import genoio
 
-    read_options = {"variants": genoio.chrom("2") | genoio.id_in(["rs1"]), "samples": ["S3", "S1"]}
+    variants = (
+        genoio.chrom("2") | genoio.id_in(["rs1"]) if filter_mode == "three-variants" else genoio.missing_rate(0.0)
+    )
+    read_options = {
+        "variants": variants,
+        "samples": ["S3", "S1"],
+        "sparse": sparse,
+        "dtype": dtype,
+    }
 
     for dataset in canonical_datasets.values():
-        full, full_variants = dataset.read(**read_options, return_variants=True)
-        blocks = list(dataset.iter_blocks(size=2, **read_options, return_variants=True))
+        full, full_samples, full_variants = dataset.read(
+            **read_options,
+            return_samples=True,
+            return_variants=True,
+        )
+        blocks = list(
+            dataset.iter_blocks(
+                size=size,
+                **read_options,
+                return_samples=True,
+                return_variants=True,
+            )
+        )
 
-        assert [variants["id"].to_list() for _, variants in blocks] == [["rs1", "indel1"], ["rs4"]]
-        np.testing.assert_array_equal(np.concatenate([block for block, _ in blocks], axis=1), full)
-        assert full_variants["id"].to_list() == ["rs1", "indel1", "rs4"]
+        assert blocks
+        assert all(block.shape[1] <= size for block, _, _ in blocks)
+        if sparse:
+            assert all(getattr(scipy_sparse, f"isspmatrix_{sparse}")(block) for block, _, _ in blocks)
+            combined = scipy_sparse.hstack([block for block, _, _ in blocks], format=sparse)
+            np.testing.assert_array_equal(combined.toarray(), full.toarray())
+        else:
+            np.testing.assert_array_equal(
+                np.concatenate([block for block, _, _ in blocks], axis=1),
+                full,
+            )
+        assert full.dtype == np.dtype(dtype)
+        assert all(block.dtype == np.dtype(dtype) for block, _, _ in blocks)
+        assert all(samples.schema == full_samples.schema for _, samples, _ in blocks)
+        assert all(samples.equals(full_samples) for _, samples, _ in blocks)
+        assert all(block_variants.schema == full_variants.schema for _, _, block_variants in blocks)
+        assert [row for _, _, block_variants in blocks for row in block_variants.rows()] == full_variants.rows()
 
 
-def test_canonical_sources_allow_filters_that_retain_zero_variants(canonical_datasets):
+@pytest.mark.parametrize("sparse", [False, "csr"])
+def test_pbr_py_matrix_001_canonical_blocks_allow_filters_that_retain_zero_variants(
+    canonical_datasets,
+    sparse,
+):
     import genoio
 
     expr = genoio.chrom("21")
 
     for dataset in canonical_datasets.values():
         dense, samples, variants = dataset.read(variants=expr, return_samples=True, return_variants=True)
-        sparse = dataset.read(variants=expr, sparse=True)
+        sparse_matrix = dataset.read(variants=expr, sparse=True)
         imputed = dataset.read(variants=expr, missing="impute")
-        blocks = list(dataset.iter_blocks(size=2, variants=expr, return_variants=True))
+        blocks = list(
+            dataset.iter_blocks(
+                size=2,
+                variants=expr,
+                sparse=sparse,
+                dtype="float64",
+                return_variants=True,
+            )
+        )
 
         assert dense.shape == (len(EXPECTED_SAMPLES), 0)
         assert samples["iid"].to_list() == EXPECTED_SAMPLES
         assert variants.shape == (0, 5)
         assert variants.columns == ["chrom", "pos", "id", "a0", "a1"]
-        assert scipy_sparse.isspmatrix_csc(sparse)
-        assert sparse.shape == dense.shape
-        assert sparse.nnz == 0
+        assert scipy_sparse.isspmatrix_csc(sparse_matrix)
+        assert sparse_matrix.shape == dense.shape
+        assert sparse_matrix.nnz == 0
         np.testing.assert_array_equal(imputed, dense)
         assert blocks == []

@@ -23,6 +23,11 @@ pub(super) struct DosageOverlayTarget<'a> {
     pub(super) missing_indices: &'a mut Vec<usize>,
 }
 
+pub(super) struct DosageEntryScratch<'a> {
+    pub(super) source_indices: &'a mut Vec<usize>,
+    pub(super) totals: &'a mut Vec<Option<f32>>,
+}
+
 pub(super) fn overlay_variable_width_dosages(
     path: &Path,
     record: &[u8],
@@ -30,7 +35,12 @@ pub(super) fn overlay_variable_width_dosages(
     dosage_bits: u8,
     sample_ct: usize,
     mut target: DosageOverlayTarget<'_>,
-) -> Result<()> {
+    mut dosage_entries: Option<DosageEntryScratch<'_>>,
+) -> Result<usize> {
+    if let Some(entries) = dosage_entries.as_mut() {
+        entries.source_indices.clear();
+        entries.totals.clear();
+    }
     let mut selected_samples = SelectedSampleCursor::new(target.source_indices);
     match dosage_bits {
         1 => overlay_difflist_dosages(
@@ -40,6 +50,7 @@ pub(super) fn overlay_variable_width_dosages(
             sample_ct,
             &mut selected_samples,
             &mut target,
+            dosage_entries.as_mut(),
         )?,
         2 => {
             let dosage_bytes_len = sample_ct.checked_mul(2).ok_or_else(|| {
@@ -49,8 +60,20 @@ pub(super) fn overlay_variable_width_dosages(
             for sample_index in 0..sample_ct {
                 let byte_index = cursor + sample_index * 2;
                 let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
-                overlay_selected_pgen_dosage(sample_index, raw, &mut selected_samples, &mut target);
+                let dosage = overlay_selected_pgen_dosage(
+                    path,
+                    sample_index,
+                    raw,
+                    true,
+                    &mut selected_samples,
+                    &mut target,
+                )?;
+                if let Some(entries) = dosage_entries.as_mut() {
+                    entries.source_indices.push(sample_index);
+                    entries.totals.push(dosage);
+                }
             }
+            cursor += dosage_bytes_len;
         }
         3 => {
             let bitarray_len = sample_ct.div_ceil(8);
@@ -69,15 +92,22 @@ pub(super) fn overlay_variable_width_dosages(
                 if bit_is_set(bitarray, sample_index) {
                     let byte_index = cursor + dosage_index * 2;
                     let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
-                    overlay_selected_pgen_dosage(
+                    let dosage = overlay_selected_pgen_dosage(
+                        path,
                         sample_index,
                         raw,
+                        false,
                         &mut selected_samples,
                         &mut target,
-                    );
+                    )?;
+                    if let Some(entries) = dosage_entries.as_mut() {
+                        entries.source_indices.push(sample_index);
+                        entries.totals.push(dosage);
+                    }
                     dosage_index += 1;
                 }
             }
+            cursor += dosage_bytes_len;
         }
         other => {
             return Err(GenoioError::invalid_source(
@@ -86,7 +116,7 @@ pub(super) fn overlay_variable_width_dosages(
             ));
         }
     }
-    Ok(())
+    Ok(cursor)
 }
 
 fn overlay_difflist_dosages(
@@ -96,6 +126,7 @@ fn overlay_difflist_dosages(
     sample_ct: usize,
     selected_samples: &mut SelectedSampleCursor<'_>,
     target: &mut DosageOverlayTarget<'_>,
+    mut dosage_entries: Option<&mut DosageEntryScratch<'_>>,
 ) -> Result<()> {
     let list_len = read_base128_varint(path, record, cursor)?;
     if list_len == 0 {
@@ -116,7 +147,7 @@ fn overlay_difflist_dosages(
         &mut values_start,
         sample_ct,
         &layout,
-        |_, _| {},
+        |_, _| Ok(()),
     )?;
 
     let dosage_bytes_len = list_len.checked_mul(2).ok_or_else(|| {
@@ -136,7 +167,19 @@ fn overlay_difflist_dosages(
         |sample_index, dosage_index| {
             let byte_index = values_start + dosage_index * 2;
             let raw = u16::from_le_bytes([record[byte_index], record[byte_index + 1]]);
-            overlay_selected_pgen_dosage(sample_index, raw, selected_samples, target);
+            let dosage = overlay_selected_pgen_dosage(
+                path,
+                sample_index,
+                raw,
+                false,
+                selected_samples,
+                target,
+            )?;
+            if let Some(entries) = dosage_entries.as_deref_mut() {
+                entries.source_indices.push(sample_index);
+                entries.totals.push(dosage);
+            }
+            Ok(())
         },
     )?;
     *cursor = values_start + dosage_bytes_len;
@@ -184,7 +227,7 @@ fn walk_difflist_ids(
     cursor: &mut usize,
     sample_ct: usize,
     layout: &DifflistIdLayout,
-    mut visit: impl FnMut(usize, usize),
+    mut visit: impl FnMut(usize, usize) -> Result<()>,
 ) -> Result<()> {
     let mut previous_sample_id = None;
     let mut entry_index = 0;
@@ -194,7 +237,7 @@ fn walk_difflist_ids(
         let mut sample_id =
             read_fixed_width_sample_id(path, record, &mut first_id_cursor, layout.sample_id_width)?;
         validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
-        visit(sample_id, entry_index);
+        visit(sample_id, entry_index)?;
         entry_index += 1;
         for _ in 1..group_len {
             let delta = read_base128_varint(path, record, cursor)?;
@@ -202,7 +245,7 @@ fn walk_difflist_ids(
                 GenoioError::invalid_source(path, "pgen difflist sample id is out of range")
             })?;
             validate_difflist_sample_id(path, sample_id, sample_ct, &mut previous_sample_id)?;
-            visit(sample_id, entry_index);
+            visit(sample_id, entry_index)?;
             entry_index += 1;
         }
     }
@@ -210,19 +253,23 @@ fn walk_difflist_ids(
 }
 
 fn overlay_selected_pgen_dosage(
+    path: &Path,
     source_index: usize,
     raw: u16,
+    allow_missing_sentinel: bool,
     selected_samples: &mut SelectedSampleCursor<'_>,
     target: &mut DosageOverlayTarget<'_>,
-) {
+) -> Result<Option<f32>> {
+    let dosage = decode_pgen_dosage(path, raw, allow_missing_sentinel)?;
     if let Some(selected_index) = selected_samples.selected_index_for(source_index) {
-        apply_pgen_dosage(
-            raw,
+        apply_decoded_pgen_dosage(
+            dosage,
             &mut target.values[selected_index],
             target.missing_indices,
             selected_index,
         );
     }
+    Ok(dosage)
 }
 
 pub(super) fn overlay_fixed_width_dosages(
@@ -231,36 +278,63 @@ pub(super) fn overlay_fixed_width_dosages(
     source_indices: &[usize],
     values: &mut [f32],
     missing_indices: &mut Vec<usize>,
+    mut dosage_totals: Option<&mut Vec<Option<f32>>>,
 ) -> Result<()> {
     missing_indices.clear();
-    for (selected_index, source_index) in source_indices.iter().copied().enumerate() {
+    if let Some(totals) = dosage_totals.as_deref_mut() {
+        totals.clear();
+        totals.reserve(dosage_bytes.len() / 2);
+    }
+    let mut selected_samples = SelectedSampleCursor::new(source_indices);
+    for source_index in 0..dosage_bytes.len() / 2 {
         let byte_index = source_index.checked_mul(2).ok_or_else(|| {
             GenoioError::invalid_source(path, "pgen dosage offset is out of range")
         })?;
         ensure_record_bytes(path, dosage_bytes, byte_index, 2)?;
         let raw = u16::from_le_bytes([dosage_bytes[byte_index], dosage_bytes[byte_index + 1]]);
-        apply_pgen_dosage(
-            raw,
-            &mut values[selected_index],
-            missing_indices,
-            selected_index,
-        );
+        let dosage = decode_pgen_dosage(path, raw, true)?;
+        if let Some(totals) = dosage_totals.as_deref_mut() {
+            totals.push(dosage);
+        }
+        if let Some(selected_index) = selected_samples.selected_index_for(source_index) {
+            apply_decoded_pgen_dosage(
+                dosage,
+                &mut values[selected_index],
+                missing_indices,
+                selected_index,
+            );
+        }
     }
     Ok(())
 }
 
-fn apply_pgen_dosage(
-    raw: u16,
+fn decode_pgen_dosage(path: &Path, raw: u16, allow_missing_sentinel: bool) -> Result<Option<f32>> {
+    if raw == u16::MAX && allow_missing_sentinel {
+        return Ok(None);
+    }
+    if raw > super::PGEN_MAX_DOSAGE_RAW {
+        let message = if raw == u16::MAX {
+            "pgen sparse dosage entry uses the full-track missing sentinel".to_owned()
+        } else {
+            format!("pgen dosage raw value {raw} is reserved; expected 0..=32768")
+        };
+        return Err(GenoioError::invalid_source(path, message));
+    }
+    Ok(Some(f32::from(raw) * super::PGEN_DOSAGE_SCALE))
+}
+
+fn apply_decoded_pgen_dosage(
+    dosage: Option<f32>,
     value: &mut f32,
     missing_indices: &mut Vec<usize>,
     selected_index: usize,
 ) {
-    if raw == u16::MAX {
+    let Some(dosage) = dosage else {
         *value = 0.0;
         insert_sorted_unique_index(missing_indices, selected_index);
         return;
-    }
-    *value = f32::from(raw) * (2.0 / 32768.0);
+    };
+    *value = dosage;
     remove_sorted_index(missing_indices, selected_index);
 }
 
@@ -269,6 +343,37 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    fn variable_record(dosage_bits: u8, raw: u16) -> Vec<u8> {
+        let mut record = match dosage_bits {
+            1 => vec![1, 0],
+            2 => Vec::new(),
+            3 => vec![1],
+            other => panic!("unsupported test dosage type {other}"),
+        };
+        record.extend(raw.to_le_bytes());
+        record
+    }
+
+    fn decode_variable_raw(dosage_bits: u8, raw: u16) -> Result<(f32, bool)> {
+        let record = variable_record(dosage_bits, raw);
+        let mut values = vec![0.0];
+        let mut missing_indices = Vec::new();
+        overlay_variable_width_dosages(
+            Path::new("test.pgen"),
+            &record,
+            0,
+            dosage_bits,
+            1,
+            DosageOverlayTarget {
+                source_indices: &[0],
+                values: &mut values,
+                missing_indices: &mut missing_indices,
+            },
+            None,
+        )?;
+        Ok((values[0], !missing_indices.is_empty()))
+    }
 
     #[test]
     fn variable_width_dosage_overlay_preserves_hardcall_inferred_values() {
@@ -290,6 +395,7 @@ mod tests {
                 values: &mut values,
                 missing_indices: &mut missing_indices,
             },
+            None,
         )
         .expect("dosage overlay should decode");
 
@@ -318,6 +424,7 @@ mod tests {
                 values: &mut values,
                 missing_indices: &mut missing_indices,
             },
+            None,
         )
         .expect("dosage-list overlay should decode");
 
@@ -353,6 +460,7 @@ mod tests {
                 values: &mut values,
                 missing_indices: &mut missing_indices,
             },
+            None,
         )
         .expect("multi-group dosage-list overlay should decode");
 
@@ -361,5 +469,64 @@ mod tests {
             vec![1.0 * (2.0 / 32768.0), 65.0 * (2.0 / 32768.0), 9.0,]
         );
         assert!(missing_indices.is_empty());
+    }
+
+    #[test]
+    fn pbr_rust_plink2_003_raw_dosage_domain_is_representation_aware() {
+        for dosage_bits in [1, 2, 3] {
+            let (value, missing) =
+                decode_variable_raw(dosage_bits, 32_768).expect("32768 must be valid");
+            assert_eq!(value, 2.0);
+            assert!(!missing);
+        }
+
+        let (_, missing) =
+            decode_variable_raw(2, u16::MAX).expect("full-track sentinel must be valid");
+        assert!(missing);
+
+        for (dosage_bits, raw) in [
+            (1, 32_769),
+            (1, 65_534),
+            (1, 65_535),
+            (2, 32_769),
+            (2, 65_534),
+            (3, 32_769),
+            (3, 65_534),
+            (3, 65_535),
+        ] {
+            let error = decode_variable_raw(dosage_bits, raw)
+                .expect_err("reserved or context-invalid raw dosage must fail");
+            assert!(
+                matches!(error, GenoioError::InvalidSource { .. }),
+                "type {dosage_bits}, raw {raw}: {error}"
+            );
+        }
+
+        for raw in [32_769_u16, 65_534_u16] {
+            let mut values = vec![0.0];
+            let mut missing_indices = Vec::new();
+            let error = overlay_fixed_width_dosages(
+                Path::new("test.pgen"),
+                &raw.to_le_bytes(),
+                &[0],
+                &mut values,
+                &mut missing_indices,
+                None,
+            )
+            .expect_err("reserved fixed-width raw dosage must fail");
+            assert!(matches!(error, GenoioError::InvalidSource { .. }));
+        }
+        let mut values = vec![0.0];
+        let mut missing_indices = Vec::new();
+        overlay_fixed_width_dosages(
+            Path::new("test.pgen"),
+            &u16::MAX.to_le_bytes(),
+            &[0],
+            &mut values,
+            &mut missing_indices,
+            None,
+        )
+        .expect("fixed-width full-track sentinel must be accepted");
+        assert_eq!(missing_indices, vec![0]);
     }
 }

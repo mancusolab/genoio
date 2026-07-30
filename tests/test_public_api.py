@@ -1,7 +1,9 @@
 # pattern: Imperative Shell
 
+import ast
 import sys
 from importlib.metadata import metadata, version
+from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +94,7 @@ def test_import_exposes_public_names_without_reference_packages():
 
     expected_names = {
         "__version__",
+        "BlockIterator",
         "vcf",
         "bfile",
         "bgen",
@@ -125,6 +128,43 @@ def test_python_version_export_matches_installed_metadata():
     import genoio
 
     assert genoio.__version__ == version("genoio")
+
+
+def test_package_declares_inline_type_information():
+    assert files("genoio").joinpath("py.typed").is_file()
+
+
+def test_native_stub_matches_runtime_exports():
+    from genoio import _rust
+
+    stub_module = ast.parse(Path("src/genoio/_rust.pyi").read_text())
+    stub_exports = {
+        node.name
+        for node in stub_module.body
+        if isinstance(node, ast.ClassDef | ast.FunctionDef) and not node.name.startswith("_")
+    }
+    runtime_exports = {name for name in dir(_rust) if not name.startswith("_")}
+
+    assert stub_exports == runtime_exports
+
+
+def test_pbr_py_private_001_native_block_reader_is_typed_but_not_public():
+    import genoio
+    from genoio import _rust
+
+    stub_module = ast.parse(Path("src/genoio/_rust.pyi").read_text())
+    stub_classes = {node.name: node for node in stub_module.body if isinstance(node, ast.ClassDef)}
+    reader_stub = stub_classes["_BlockReader"]
+    reader_methods = {node.name: node for node in reader_stub.body if isinstance(node, ast.FunctionDef)}
+
+    assert hasattr(_rust, "_BlockReader")
+    assert set(reader_methods) == {"__init__", "next_block", "close"}
+    assert all(
+        argument.annotation is not None for method in reader_methods.values() for argument in method.args.args[1:]
+    )
+    assert all(method.returns is not None for method in reader_methods.values())
+    assert "_BlockReader" not in genoio.__all__
+    assert not hasattr(genoio, "_BlockReader")
 
 
 def test_package_metadata_includes_release_urls_and_license():

@@ -55,6 +55,7 @@ docs = [
 python-source = "src"
 module-name = "genoio._rust"
 manifest-path = "rust/genoio-py/Cargo.toml"
+features = ["extension-module"]
 
 [tool.ruff]
 line-length = 120

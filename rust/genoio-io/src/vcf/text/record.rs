@@ -7,10 +7,14 @@
 
 use std::path::Path;
 
-use genoio_core::{GenoioError, RegionPredicate, VariantMetadataBuffers, VariantMetadataView};
+use genoio_core::{
+    DenseDiagnostics, GenoioError, PartialFilterDecision, RegionPredicate, VariantFilter,
+    VariantMetadataBuffers, VariantMetadataView,
+};
 use noodles_vcf as noodles;
 
 use crate::error::Result;
+use crate::retention::{MetadataRetentionAction, RetainedVariantState};
 
 use super::super::finite_qual;
 
@@ -25,6 +29,17 @@ pub(super) struct TextVariantView<'a> {
     ref_allele: &'a str,
     alternate_bases: noodles::record::AlternateBases<'a>,
     qual: Option<f32>,
+}
+
+pub(super) struct PreparedTextCandidate<'a> {
+    pub(super) variant: TextVariantView<'a>,
+    pub(super) needs_genotype_decision: bool,
+}
+
+pub(super) enum TextCandidateAction<'a> {
+    Skip,
+    Stop,
+    Decode(PreparedTextCandidate<'a>),
 }
 
 impl VariantMetadataView for TextVariantView<'_> {
@@ -145,6 +160,34 @@ pub(super) fn text_variant_view_from_text_record<'a>(
         alternate_bases,
         qual,
     })
+}
+
+/// Apply candidate-local metadata policy shared by stateless and persistent text reads.
+pub(super) fn prepare_text_candidate<'a>(
+    path: &Path,
+    record: &'a noodles::Record,
+    region: Option<&RegionPredicate>,
+    variant_filter: Option<&VariantFilter>,
+    retention: &mut RetainedVariantState,
+    diagnostics: &mut DenseDiagnostics,
+) -> Result<TextCandidateAction<'a>> {
+    let variant = text_variant_view_from_text_record(path, record)?;
+    if skip_variant_for_region(&variant, region) {
+        return Ok(TextCandidateAction::Skip);
+    }
+    let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
+        filter.partial_decision_view(&variant)
+    });
+    match retention.metadata_decision(partial_decision, diagnostics) {
+        MetadataRetentionAction::Skip => return Ok(TextCandidateAction::Skip),
+        MetadataRetentionAction::Stop => return Ok(TextCandidateAction::Stop),
+        MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
+    }
+    validate_biallelic_variant(path, &variant)?;
+    Ok(TextCandidateAction::Decode(PreparedTextCandidate {
+        variant,
+        needs_genotype_decision: matches!(partial_decision, PartialFilterDecision::NeedGenotypes),
+    }))
 }
 
 pub(super) fn append_public_variant_metadata_from_text_record(

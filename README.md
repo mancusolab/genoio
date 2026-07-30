@@ -37,10 +37,11 @@ samples = ds.samples()
 y = load_phenotype_vector(samples["iid"])
 C = load_covariates(samples["iid"])
 
-for X, variants in ds.iter_blocks(10_000, return_variants=True):
-    # X has shape (samples, variants_in_this_block).
-    # `y` and `C` must be aligned to the rows described by `samples`.
-    association_scan(X, y, C, variants=variants)
+with ds.iter_blocks(10_000, return_variants=True) as blocks:
+    for X, variants in blocks:
+        # X has shape (samples, variants_in_this_block).
+        # `y` and `C` must be aligned to the rows described by `samples`.
+        association_scan(X, y, C, variants=variants)
 ```
 
 Use `read(...)` for one matrix, `iter_blocks(...)` for streaming scans, and

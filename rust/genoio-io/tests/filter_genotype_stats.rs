@@ -3,10 +3,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
+use genoio_core::DenseMissingPolicy;
+
 const PGEN_DOSAGE_TOLERANCE: f32 = 2.0 / 32768.0;
 
 mod common;
 
+use common::bcf::write_haplotype_filter_fixture;
 use common::dense::assert_values_with_nan;
 use common::plink_output as plink_io;
 use common::plink_output::{
@@ -232,6 +238,99 @@ fn filter_genotype_stats_plink2_dosage_uses_fractional_mac() {
     assert_eq!(dense.diagnostics.candidate_variants, 2);
     assert_eq!(dense.diagnostics.retained_variants, 1);
     assert_eq!(dense.diagnostics.dropped_genotype_variants, 1);
+}
+
+#[test]
+fn pbr_rust_plink2_004_hardcall_haplotype_session_uses_genotype_stat_filters() {
+    let dir = unique_dir("pbr-plink2-haplotype-filter-genotype");
+    let pgen = dir.join("haplotype.pgen");
+    let pvar = dir.join("haplotype.pvar");
+    let psam = dir.join("haplotype.psam");
+    let pgen_bytes = variable_width_pgen(&[0x10, 0x10], &[&[0x25, 0x00], &[0x00, 0x00]], 3);
+    fs::write(&pgen, pgen_bytes).expect("pgen fixture should be written");
+    fs::write(
+        &pvar,
+        "#CHROM POS ID REF ALT\n1 10 dropped A G\n1 20 retained C T\n",
+    )
+    .expect("pvar fixture should be written");
+    fs::write(&psam, "#IID\nS1\nS2\nS3\n").expect("psam fixture should be written");
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "mac",
+        "params": {"max": 1}
+    }))
+    .expect("filter should parse");
+    let mut reader = BlockReader::open(
+        BlockSource::Plink2 { pgen, pvar, psam },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Haplotype,
+            sparse: false,
+            requested_samples: None,
+            variant_filter: Some(filter),
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Nan,
+            return_samples: true,
+            return_variants: true,
+        },
+        1,
+    )
+    .expect("hardcall haplotype filter session should open");
+
+    let BlockOutput::Dense(block) = reader
+        .next_block()
+        .expect("filtered hardcall haplotype block should decode")
+        .expect("one hardcall haplotype block should be retained")
+    else {
+        panic!("hardcall haplotype session should return a dense block");
+    };
+    assert_eq!(block.n_samples, 6);
+    assert_eq!(block.n_variants, 1);
+    assert_eq!(
+        plink_variant_ids(plink_variants(&block.variants)),
+        vec!["retained"]
+    );
+    assert_eq!(block.diagnostics.candidate_variants, 2);
+    assert_eq!(block.diagnostics.dropped_genotype_variants, 1);
+}
+
+#[test]
+fn pbr_rust_bcf_002_haplotype_blocks_filter_before_phase_decode() {
+    let dir = unique_dir("pbr-bcf-haplotype-filter-order");
+    let path = dir.join("mixed-phase.bcf");
+    write_haplotype_filter_fixture(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("MAF filter should parse");
+
+    for sparse in [false, true] {
+        let mut reader = BlockReader::open(
+            BlockSource::Bcf { bcf: path.clone() },
+            BlockReadOptions {
+                matrix_kind: MatrixKind::Haplotype,
+                sparse,
+                requested_samples: None,
+                variant_filter: Some(filter.clone()),
+                dosage_source: DosageSource::Hardcall,
+                missing_policy: DenseMissingPolicy::Raise,
+                return_samples: true,
+                return_variants: true,
+            },
+            1,
+        )
+        .expect("filtered BCF haplotype reader should open");
+
+        assert!(reader
+            .next_block()
+            .expect("phased retained BCF block should decode")
+            .is_some());
+        assert!(reader
+            .next_block()
+            .expect("unphased genotype-stat reject should not phase-decode")
+            .is_none());
+    }
 }
 
 #[test]

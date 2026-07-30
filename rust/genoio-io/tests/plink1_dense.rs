@@ -3,11 +3,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
+use genoio_core::{DenseGenotypeMatrix, DenseMissingPolicy, GenoioError, VariantFilter};
+
 mod common;
 
 use common::dense::assert_values_with_nan;
 use common::plink_output as genoio_io;
-use common::plink_output::dense_missing_sample_major_output as dense_missing_sample_major;
+use common::plink_output::{
+    dense_missing_sample_major_output as dense_missing_sample_major,
+    dense_values_sample_major_output, variant_ids, variants,
+};
 use common::unique_dir;
 
 fn write_text(path: &Path, contents: &str) {
@@ -55,6 +63,115 @@ F1 S4 0 0 1 -9
 ",
     );
     (bed, bim, fam)
+}
+
+fn plink1_block_options(
+    requested_samples: Option<Vec<String>>,
+    variant_filter: Option<VariantFilter>,
+    missing_policy: DenseMissingPolicy,
+    return_metadata: bool,
+) -> BlockReadOptions {
+    BlockReadOptions {
+        matrix_kind: MatrixKind::Genotype,
+        sparse: false,
+        requested_samples,
+        variant_filter,
+        dosage_source: DosageSource::Hardcall,
+        missing_policy,
+        return_samples: return_metadata,
+        return_variants: return_metadata,
+    }
+}
+
+fn collect_plink1_dense_blocks(
+    bed: &Path,
+    bim: &Path,
+    fam: &Path,
+    options: BlockReadOptions,
+    block_size: usize,
+) -> Vec<DenseGenotypeMatrix> {
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 {
+            bed: bed.to_path_buf(),
+            bim: bim.to_path_buf(),
+            fam: fam.to_path_buf(),
+        },
+        options,
+        block_size,
+    )
+    .expect("persistent plink1 reader should open");
+    let mut blocks = Vec::new();
+    while let Some(output) = reader
+        .next_block()
+        .expect("persistent plink1 block should decode")
+    {
+        let BlockOutput::Dense(matrix) = output else {
+            panic!("plink1 dense reader should return dense blocks");
+        };
+        blocks.push(matrix);
+    }
+    assert!(reader
+        .next_block()
+        .expect("persistent plink1 EOF should be sticky")
+        .is_none());
+    blocks
+}
+
+#[test]
+fn pbr_rust_block_001_block_reader_debug_reports_backend_and_lifecycle_only() {
+    let dir = unique_dir("plink1-block-reader-debug");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 { bed, bim, fam },
+        plink1_block_options(None, None, DenseMissingPolicy::Nan, false),
+        2,
+    )
+    .expect("persistent plink1 reader should open");
+
+    assert_eq!(
+        format!("{reader:?}"),
+        "BlockReader { backend: \"plink1\", lifecycle: \"active\", block_size: 2 }"
+    );
+    while reader
+        .next_block()
+        .expect("persistent plink1 block should decode")
+        .is_some()
+    {}
+    assert_eq!(
+        format!("{reader:?}"),
+        "BlockReader { backend: \"plink1\", lifecycle: \"eof\", block_size: 2 }"
+    );
+}
+
+fn concatenate_dense_blocks_sample_major(blocks: &[DenseGenotypeMatrix]) -> Vec<f32> {
+    let Some(first) = blocks.first() else {
+        return Vec::new();
+    };
+    let block_values = blocks
+        .iter()
+        .map(dense_values_sample_major_output)
+        .collect::<Vec<_>>();
+    let mut values = Vec::with_capacity(
+        first.n_samples * blocks.iter().map(|block| block.n_variants).sum::<usize>(),
+    );
+    for sample_index in 0..first.n_samples {
+        for (block, block_values) in blocks.iter().zip(&block_values) {
+            let start = sample_index * block.n_variants;
+            values.extend_from_slice(&block_values[start..start + block.n_variants]);
+        }
+    }
+    values
+}
+
+fn concatenate_block_variant_ids(blocks: &[DenseGenotypeMatrix]) -> Vec<String> {
+    blocks
+        .iter()
+        .flat_map(|block| {
+            variant_ids(variants(&block.variants))
+                .into_iter()
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 #[test]
@@ -165,4 +282,245 @@ fn plink1_dense_filters_samples_in_source_order() {
     assert_eq!(dense.diagnostics.requested_samples, 2);
     assert_eq!(dense.diagnostics.retained_samples, 2);
     assert_eq!(dense.diagnostics.missing_samples, 0);
+}
+
+#[test]
+fn pbr_rust_plink1_001_dense_blocks_match_whole_read_at_exact_and_partial_boundaries() {
+    let dir = unique_dir("pbr-plink1-dense-boundaries");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
+    let expected = ::genoio_io::read_plink1_dense_windowed(
+        &bed,
+        &bim,
+        &fam,
+        None,
+        None,
+        None,
+        DenseMissingPolicy::Nan,
+        true,
+        true,
+    )
+    .expect("whole plink1 read should decode");
+
+    for (block_size, expected_widths) in [(3, vec![3]), (2, vec![2, 1])] {
+        let blocks = collect_plink1_dense_blocks(
+            &bed,
+            &bim,
+            &fam,
+            plink1_block_options(None, None, DenseMissingPolicy::Nan, true),
+            block_size,
+        );
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.n_variants)
+                .collect::<Vec<_>>(),
+            expected_widths
+        );
+        assert_values_with_nan(
+            &concatenate_dense_blocks_sample_major(&blocks),
+            &dense_values_sample_major_output(&expected),
+        );
+        assert_eq!(
+            concatenate_block_variant_ids(&blocks),
+            variant_ids(variants(&expected.variants))
+        );
+        assert!(blocks.iter().all(|block| block.samples == expected.samples));
+    }
+}
+
+#[test]
+fn pbr_rust_plink1_001_dense_blocks_preserve_samples_filters_metadata_and_imputation() {
+    let dir = unique_dir("pbr-plink1-dense-filters");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
+    let requested_samples = vec!["S3".to_owned(), "S1".to_owned()];
+    let filter = VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "maf",
+        "params": {"min": 0.1}
+    }))
+    .expect("genotype-stat filter should parse");
+    let expected = ::genoio_io::read_plink1_dense_windowed(
+        &bed,
+        &bim,
+        &fam,
+        Some(&requested_samples),
+        Some(&filter),
+        None,
+        DenseMissingPolicy::Impute,
+        true,
+        true,
+    )
+    .expect("filtered whole plink1 read should decode");
+
+    let blocks = collect_plink1_dense_blocks(
+        &bed,
+        &bim,
+        &fam,
+        plink1_block_options(
+            Some(requested_samples),
+            Some(filter),
+            DenseMissingPolicy::Impute,
+            true,
+        ),
+        1,
+    );
+
+    assert_eq!(
+        concatenate_dense_blocks_sample_major(&blocks),
+        dense_values_sample_major_output(&expected)
+    );
+    assert_eq!(
+        concatenate_block_variant_ids(&blocks),
+        variant_ids(variants(&expected.variants))
+    );
+    assert!(blocks.iter().all(|block| block.samples == expected.samples));
+}
+
+#[test]
+fn pbr_rust_plink1_001_dense_blocks_handle_matrix_only_all_filtered_and_missing_rejection() {
+    let dir = unique_dir("pbr-plink1-dense-empty-missing");
+    let (bed, bim, fam) = write_plink_fixture(&dir, &[0x6c, 0x1b, 0x01, 0x07, 0x2d, 0x38]);
+    let all_filtered = VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "chrom",
+        "params": {"value": "X"}
+    }))
+    .expect("metadata filter should parse");
+
+    let matrix_only = collect_plink1_dense_blocks(
+        &bed,
+        &bim,
+        &fam,
+        plink1_block_options(None, None, DenseMissingPolicy::Nan, false),
+        2,
+    );
+    assert!(matrix_only
+        .iter()
+        .all(|block| block.samples.is_none() && block.variants.is_none()));
+
+    let empty = collect_plink1_dense_blocks(
+        &bed,
+        &bim,
+        &fam,
+        plink1_block_options(None, Some(all_filtered), DenseMissingPolicy::Nan, true),
+        2,
+    );
+    assert!(empty.is_empty());
+
+    let mut reader = BlockReader::open(
+        BlockSource::Plink1 { bed, bim, fam },
+        plink1_block_options(None, None, DenseMissingPolicy::Raise, true),
+        2,
+    )
+    .expect("persistent plink1 reader should open");
+    let error = reader
+        .next_block()
+        .expect_err("retained missing hard calls should be rejected");
+    assert!(matches!(error, GenoioError::MissingData { .. }));
+}
+
+#[test]
+fn pbr_rust_plink1_001_rejects_unsupported_plink1_block_representations() {
+    let source = BlockSource::Plink1 {
+        bed: PathBuf::from("unused.bed"),
+        bim: PathBuf::from("unused.bim"),
+        fam: PathBuf::from("unused.fam"),
+    };
+    let options = plink1_block_options(None, None, DenseMissingPolicy::Nan, true);
+
+    let dosage_error = BlockReader::open(
+        source.clone(),
+        BlockReadOptions {
+            dosage_source: DosageSource::Dosage,
+            ..options.clone()
+        },
+        2,
+    )
+    .expect_err("plink1 dosage blocks should be rejected before source opening");
+    let haplotype_error = BlockReader::open(
+        source,
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Haplotype,
+            ..options
+        },
+        2,
+    )
+    .expect_err("plink1 haplotype blocks should be rejected before source opening");
+
+    assert!(matches!(
+        dosage_error,
+        GenoioError::UnsupportedRepresentation { .. }
+    ));
+    assert!(matches!(
+        haplotype_error,
+        GenoioError::UnsupportedRepresentation { .. }
+    ));
+}
+
+#[test]
+fn pbr_rust_plink1_002_dense_and_sparse_readers_advance_and_drop_independently() {
+    let first_dir = unique_dir("pbr-plink1-independent-dense");
+    let second_dir = unique_dir("pbr-plink1-independent-sparse");
+    let first_paths = write_plink_fixture(&first_dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c, 0x38]);
+    let second_paths = write_plink_fixture(&second_dir, &[0x6c, 0x1b, 0x01, 0x0b, 0x2c, 0x38]);
+    let mut dense_reader = BlockReader::open(
+        BlockSource::Plink1 {
+            bed: first_paths.0,
+            bim: first_paths.1,
+            fam: first_paths.2,
+        },
+        plink1_block_options(None, None, DenseMissingPolicy::Nan, true),
+        1,
+    )
+    .expect("persistent dense plink1 reader should open");
+    let mut sparse_reader = BlockReader::open(
+        BlockSource::Plink1 {
+            bed: second_paths.0,
+            bim: second_paths.1,
+            fam: second_paths.2,
+        },
+        BlockReadOptions {
+            sparse: true,
+            missing_policy: DenseMissingPolicy::Raise,
+            ..plink1_block_options(None, None, DenseMissingPolicy::Nan, true)
+        },
+        1,
+    )
+    .expect("persistent sparse plink1 reader should open");
+
+    let dense_first = dense_reader
+        .next_block()
+        .expect("dense reader should advance")
+        .expect("dense reader should yield a block");
+    let sparse_first = sparse_reader
+        .next_block()
+        .expect("sparse reader should advance")
+        .expect("sparse reader should yield a block");
+    let dense_second = dense_reader
+        .next_block()
+        .expect("dense reader should advance independently")
+        .expect("dense reader should yield a second block");
+    drop(sparse_reader);
+    let dense_third = dense_reader
+        .next_block()
+        .expect("dense reader should survive sparse-reader drop")
+        .expect("dense reader should yield a third block");
+
+    let BlockOutput::Dense(dense_first) = dense_first else {
+        panic!("dense reader should return dense output");
+    };
+    let BlockOutput::Sparse(sparse_first) = sparse_first else {
+        panic!("sparse reader should return sparse output");
+    };
+    let BlockOutput::Dense(dense_second) = dense_second else {
+        panic!("dense reader should return dense output");
+    };
+    let BlockOutput::Dense(dense_third) = dense_third else {
+        panic!("dense reader should return dense output");
+    };
+    assert_eq!(variant_ids(variants(&dense_first.variants)), vec!["rs1"]);
+    assert_eq!(variant_ids(variants(&sparse_first.variants)), vec!["rs1"]);
+    assert_eq!(variant_ids(variants(&dense_second.variants)), vec!["rs2"]);
+    assert_eq!(variant_ids(variants(&dense_third.variants)), vec!["indel1"]);
 }

@@ -1,0 +1,693 @@
+// pattern: Functional Core
+//! Packed hard-call storage and genotype-stat evaluation.
+//!
+//! Readers keep biallelic diploid hard calls in two-bit words while decoding.
+//! This module owns expansion into dense buffers, sparse-compatible missing
+//! checks, and the stats used by genotype filters.
+
+use genoio_core::{
+    GenoioError, GenotypeFilterPlan, VariantFilter, VariantMetadataView, VariantStats,
+};
+
+use crate::error::Result;
+
+use super::counts::HardcallCounts;
+
+/// Two-bit hard-call buffer in source-sample order.
+///
+/// Codes use the PLINK/PGEN convention after normalization: 0, 1, and 2 are
+/// called genotypes, and 3 is missing. Expansion helpers convert these codes to
+/// `f32` values and missing masks for selected samples.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PackedHardcalls {
+    words: Vec<u64>,
+    sample_ct: usize,
+}
+
+impl PackedHardcalls {
+    const SAMPLES_PER_WORD: usize = 32;
+    const BITS_PER_SAMPLE: usize = 2;
+    const LOW_BITS: u64 = 0x5555_5555_5555_5555;
+
+    pub(crate) fn resize(&mut self, sample_ct: usize) {
+        self.sample_ct = sample_ct;
+        self.words
+            .resize(sample_ct.div_ceil(Self::SAMPLES_PER_WORD), 0);
+        self.mask_unused_slots();
+    }
+
+    pub(crate) fn load_pgen_payload(&mut self, payload: &[u8], sample_ct: usize) {
+        self.load_payload(payload, sample_ct);
+    }
+
+    pub(crate) fn load_plink1_bed_payload(&mut self, payload: &[u8], sample_ct: usize) {
+        self.load_payload(payload, sample_ct);
+        self.rotate_plink1_to_canonical();
+    }
+
+    fn load_payload(&mut self, payload: &[u8], sample_ct: usize) {
+        self.resize(sample_ct);
+        for (word_index, word) in self.words.iter_mut().enumerate() {
+            let start = word_index * 8;
+            let end = payload.len().min(start + 8);
+            let mut bytes = [0_u8; 8];
+            if start < end {
+                bytes[..end - start].copy_from_slice(&payload[start..end]);
+            }
+            *word = u64::from_le_bytes(bytes);
+        }
+        self.mask_unused_slots();
+    }
+
+    pub(crate) fn clear_to(&mut self, category: u8) {
+        let category = u64::from(category & 0b11);
+        let mut word = 0_u64;
+        for slot_index in 0..Self::SAMPLES_PER_WORD {
+            word |= category << (slot_index * Self::BITS_PER_SAMPLE);
+        }
+        self.words.fill(word);
+        self.mask_unused_slots();
+    }
+
+    pub(crate) fn set(&mut self, sample_index: usize, category: u8) {
+        debug_assert!(sample_index < self.sample_ct);
+        let word_index = sample_index / Self::SAMPLES_PER_WORD;
+        let shift = (sample_index % Self::SAMPLES_PER_WORD) * Self::BITS_PER_SAMPLE;
+        let mask = 0b11_u64 << shift;
+        self.words[word_index] =
+            (self.words[word_index] & !mask) | (u64::from(category & 0b11) << shift);
+    }
+
+    pub(crate) fn get(&self, sample_index: usize) -> u8 {
+        debug_assert!(sample_index < self.sample_ct);
+        let word_index = sample_index / Self::SAMPLES_PER_WORD;
+        let shift = (sample_index % Self::SAMPLES_PER_WORD) * Self::BITS_PER_SAMPLE;
+        ((self.words[word_index] >> shift) & 0b11) as u8
+    }
+
+    pub(crate) fn sample_ct(&self) -> usize {
+        self.sample_ct
+    }
+
+    pub(crate) fn copy_from(&mut self, other: &Self) {
+        self.sample_ct = other.sample_ct;
+        self.words.clear();
+        self.words.extend_from_slice(&other.words);
+    }
+
+    pub(crate) fn invert_0_2(&mut self) {
+        for sample_index in 0..self.sample_ct {
+            match self.get(sample_index) {
+                0 => self.set(sample_index, 2),
+                2 => self.set(sample_index, 0),
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn expand_selected(
+        &self,
+        source_indices: &[usize],
+        values: &mut Vec<f32>,
+        missing_indices: &mut Vec<usize>,
+    ) {
+        values.clear();
+        missing_indices.clear();
+        for (sample_index, source_index) in source_indices.iter().enumerate() {
+            let (value, is_missing) = decode_hardcall_code(self.get(*source_index));
+            values.push(value);
+            if is_missing {
+                missing_indices.push(sample_index);
+            }
+        }
+    }
+
+    pub(crate) fn stats_for_selected(&self, source_indices: &[usize]) -> Result<VariantStats> {
+        let counts = self.counts_for_selected(source_indices)?;
+        counts.variant_stats()
+    }
+
+    fn counts_for_selected(&self, source_indices: &[usize]) -> Result<HardcallCounts> {
+        let mut counts = HardcallCounts::default();
+        for source_index in source_indices {
+            if *source_index >= self.sample_ct {
+                return Err(GenoioError::invalid_source(
+                    "<hardcall>",
+                    "selected sample index is outside hard-call sample count",
+                ));
+            }
+            match self.get(*source_index) {
+                0 => counts.hom_ref += 1,
+                1 => counts.het += 1,
+                2 => counts.hom_alt += 1,
+                3 => counts.missing += 1,
+                _ => unreachable!("two-bit hard-call code should be masked"),
+            }
+        }
+        Ok(counts)
+    }
+
+    pub(crate) fn stats_for_selection(
+        &self,
+        source_indices: &[usize],
+        all_samples_selected: bool,
+    ) -> Result<VariantStats> {
+        if all_samples_selected {
+            return self.stats_for_all();
+        }
+        self.stats_for_selected(source_indices)
+    }
+
+    pub(crate) fn evaluate_filter_plan_for_selection(
+        &self,
+        plan: GenotypeFilterPlan,
+        source_indices: &[usize],
+        all_samples_selected: bool,
+    ) -> Result<Option<bool>> {
+        if matches!(plan, GenotypeFilterPlan::Generic) {
+            return Ok(None);
+        }
+        if matches!(plan, GenotypeFilterPlan::Polymorphic) {
+            return self
+                .is_polymorphic_for_selection(source_indices, all_samples_selected)
+                .map(Some);
+        }
+        let counts = if all_samples_selected {
+            self.counts_for_all()
+        } else {
+            self.counts_for_selected(source_indices)?
+        };
+        counts.evaluate_plan(plan)
+    }
+
+    pub(crate) fn is_polymorphic_for_selection(
+        &self,
+        source_indices: &[usize],
+        all_samples_selected: bool,
+    ) -> Result<bool> {
+        if all_samples_selected {
+            return Ok(self.is_polymorphic_for_all());
+        }
+        self.is_polymorphic_for_selected(source_indices)
+    }
+
+    fn is_polymorphic_for_selected(&self, source_indices: &[usize]) -> Result<bool> {
+        let mut has_ref = false;
+        let mut has_alt = false;
+        for source_index in source_indices {
+            if *source_index >= self.sample_ct {
+                return Err(GenoioError::invalid_source(
+                    "<hardcall>",
+                    "selected sample index is outside hard-call sample count",
+                ));
+            }
+            match self.get(*source_index) {
+                0 => has_ref = true,
+                1 => {
+                    has_ref = true;
+                    has_alt = true;
+                }
+                2 => has_alt = true,
+                3 => {}
+                _ => unreachable!("two-bit hard-call code should be masked"),
+            }
+            if has_ref && has_alt {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn is_polymorphic_for_all(&self) -> bool {
+        let mut has_ref = false;
+        let mut has_alt = false;
+        for (word_index, word) in self.words.iter().copied().enumerate() {
+            let valid_lanes = self.valid_lane_mask(word_index);
+            let low_bits = word & valid_lanes;
+            let high_bits = (word >> 1) & valid_lanes;
+
+            has_ref |= (!high_bits & valid_lanes) != 0;
+            has_alt |= ((low_bits ^ high_bits) & valid_lanes) != 0;
+            if has_ref && has_alt {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn stats_for_all(&self) -> Result<VariantStats> {
+        self.counts_for_all().variant_stats()
+    }
+
+    fn counts_for_all(&self) -> HardcallCounts {
+        let mut counts = HardcallCounts::default();
+
+        for (word_index, word) in self.words.iter().copied().enumerate() {
+            let valid_lanes = self.valid_lane_mask(word_index);
+            let low_bits = word & valid_lanes;
+            let high_bits = (word >> 1) & valid_lanes;
+
+            counts.hom_ref += ((!low_bits & !high_bits) & valid_lanes).count_ones() as u64;
+            counts.het += (low_bits & !high_bits & valid_lanes).count_ones() as u64;
+            counts.hom_alt += (!low_bits & high_bits & valid_lanes).count_ones() as u64;
+            counts.missing += (low_bits & high_bits & valid_lanes).count_ones() as u64;
+        }
+
+        counts
+    }
+
+    fn valid_lane_mask(&self, word_index: usize) -> u64 {
+        let word_start = word_index * Self::SAMPLES_PER_WORD;
+        let remaining = self.sample_ct.saturating_sub(word_start);
+        match remaining.min(Self::SAMPLES_PER_WORD) {
+            0 => 0,
+            Self::SAMPLES_PER_WORD => Self::LOW_BITS,
+            used_slots => ((1_u64 << (used_slots * Self::BITS_PER_SAMPLE)) - 1) & Self::LOW_BITS,
+        }
+    }
+
+    fn rotate_plink1_to_canonical(&mut self) {
+        const HIGH_BITS: u64 = 0xaaaa_aaaa_aaaa_aaaa;
+        for word in &mut self.words {
+            let old_high_bits_in_low_position = (*word >> 1) & Self::LOW_BITS;
+            let new_low_bits = (*word & Self::LOW_BITS) ^ old_high_bits_in_low_position;
+            let new_high_bits = (!*word) & HIGH_BITS;
+            *word = new_low_bits | new_high_bits;
+        }
+        self.mask_unused_slots();
+    }
+
+    fn mask_unused_slots(&mut self) {
+        let used_slots = self.sample_ct % Self::SAMPLES_PER_WORD;
+        if used_slots == 0 || self.words.is_empty() {
+            return;
+        }
+        let used_bits = used_slots * Self::BITS_PER_SAMPLE;
+        let mask = (1_u64 << used_bits) - 1;
+        if let Some(last_word) = self.words.last_mut() {
+            *last_word &= mask;
+        }
+    }
+}
+
+pub(crate) fn evaluate_packed_hardcall_filter<V: VariantMetadataView + ?Sized>(
+    packed: &PackedHardcalls,
+    source_indices: &[usize],
+    all_samples_selected: bool,
+    filter: &VariantFilter,
+    filter_plan: GenotypeFilterPlan,
+    variant: Option<&V>,
+    require_stats: bool,
+) -> Result<(bool, Option<VariantStats>)> {
+    // Matrix-only reads can answer common genotype-stat filters from packed
+    // counts alone. Metadata output still asks for stats so they can be
+    // attached to retained variant rows.
+    if !require_stats {
+        if let Some(retain) = packed.evaluate_filter_plan_for_selection(
+            filter_plan,
+            source_indices,
+            all_samples_selected,
+        )? {
+            return Ok((retain, None));
+        }
+    }
+
+    let stats = packed.stats_for_selection(source_indices, all_samples_selected)?;
+    let retain = if let Some(variant) = variant {
+        filter.evaluate_view(variant, Some(&stats))
+    } else {
+        filter.evaluate_genotype_stats(&stats).ok_or_else(|| {
+            GenoioError::internal_contract(
+                "genotype-stats-only fast path received metadata-dependent filter",
+            )
+        })?
+    };
+    Ok((retain, Some(stats)))
+}
+
+pub(crate) fn decode_hardcall_code(code: u8) -> (f32, bool) {
+    match code {
+        0b00 => (0.0, false),
+        0b01 => (1.0, false),
+        0b10 => (2.0, false),
+        0b11 => (0.0, true),
+        _ => unreachable!("two-bit hard-call code should be masked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use genoio_core::DenseMissingPolicy;
+
+    use super::*;
+    use crate::hardcall::{
+        flush_hardcall_batch_into_sample_major, HardcallBatch, HARDCALL_BATCH_SIZE,
+    };
+    use crate::matrix::{apply_dense_missing_policy_to_variant, write_sample_major_variant_slot};
+
+    fn stats_from_expanded_hardcalls(
+        values: &[f32],
+        missing_indices: &[usize],
+    ) -> genoio_core::VariantStats {
+        let mut hom_ref = 0_u64;
+        let mut het = 0_u64;
+        let mut hom_alt = 0_u64;
+        let mut missing_cursor = 0_usize;
+        for (index, value) in values.iter().enumerate() {
+            if missing_indices
+                .get(missing_cursor)
+                .is_some_and(|&missing_index| missing_index == index)
+            {
+                missing_cursor += 1;
+                continue;
+            }
+            match *value as u8 {
+                0 => hom_ref += 1,
+                1 => het += 1,
+                2 => hom_alt += 1,
+                _ => panic!("test hardcall value must be in {{0, 1, 2}}"),
+            }
+        }
+        genoio_core::variant_stats_from_counts(
+            hom_ref,
+            het,
+            hom_alt,
+            u64::try_from(missing_indices.len()).expect("test missing count fits in u64"),
+        )
+        .expect("test hardcall stats should compute")
+    }
+
+    fn assert_values_with_nan(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "expected NaN, observed {actual}");
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn plink1_payload_rotates_to_canonical_hardcall_codes() {
+        let mut packed = PackedHardcalls::default();
+
+        packed.load_plink1_bed_payload(&[0b1110_0100], 4);
+
+        assert_eq!(packed.get(0), 2);
+        assert_eq!(packed.get(1), 3);
+        assert_eq!(packed.get(2), 1);
+        assert_eq!(packed.get(3), 0);
+    }
+
+    #[test]
+    fn packed_hardcalls_round_trip_and_expand_selected() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(35);
+        packed.clear_to(0);
+        packed.set(0, 0);
+        packed.set(1, 1);
+        packed.set(2, 2);
+        packed.set(3, 3);
+        packed.set(34, 2);
+
+        assert_eq!(packed.get(0), 0);
+        assert_eq!(packed.get(1), 1);
+        assert_eq!(packed.get(2), 2);
+        assert_eq!(packed.get(3), 3);
+        assert_eq!(packed.get(34), 2);
+
+        let mut values = vec![99.0];
+        let mut missing_indices = vec![99];
+        packed.expand_selected(&[3, 1, 34, 0], &mut values, &mut missing_indices);
+
+        assert_eq!(values, vec![0.0, 1.0, 2.0, 0.0]);
+        assert_eq!(missing_indices, vec![0]);
+    }
+
+    #[test]
+    fn hardcall_batch_expands_like_variant_at_a_time() {
+        let sample_ct = 5;
+        let source_indices = (0..sample_ct).collect::<Vec<_>>();
+        let n_variants = HARDCALL_BATCH_SIZE + 3;
+        let mut packed_variants = Vec::with_capacity(n_variants);
+        let mut expected_values = vec![0.0; sample_ct * n_variants];
+        let mut scratch_values = Vec::new();
+        let mut scratch_missing_indices = Vec::new();
+
+        for variant_index in 0..n_variants {
+            let mut packed = PackedHardcalls::default();
+            packed.resize(sample_ct);
+            for sample_index in 0..sample_ct {
+                packed.set(sample_index, ((variant_index + sample_index) % 4) as u8);
+            }
+            packed.expand_selected(
+                &source_indices,
+                &mut scratch_values,
+                &mut scratch_missing_indices,
+            );
+            apply_dense_missing_policy_to_variant(
+                &mut scratch_values,
+                &scratch_missing_indices,
+                DenseMissingPolicy::Nan,
+            )
+            .expect("test missing policy should apply");
+            write_sample_major_variant_slot(
+                &mut expected_values,
+                sample_ct,
+                n_variants,
+                variant_index,
+                &scratch_values,
+            )
+            .expect("expected dense slot should write");
+            packed_variants.push(packed);
+        }
+
+        let mut batch = HardcallBatch::new(sample_ct);
+        let mut actual_values = vec![0.0; sample_ct * n_variants];
+        let mut variant_values = Vec::with_capacity(sample_ct);
+        let mut missing_indices = Vec::new();
+        let mut batch_start = 0;
+        for packed in &packed_variants {
+            batch.push(packed);
+            if batch.is_full() {
+                flush_hardcall_batch_into_sample_major(
+                    &mut batch,
+                    &source_indices,
+                    &mut batch_start,
+                    n_variants,
+                    &mut actual_values,
+                    DenseMissingPolicy::Nan,
+                    &mut variant_values,
+                    &mut missing_indices,
+                )
+                .expect("batch flush should succeed");
+            }
+        }
+        flush_hardcall_batch_into_sample_major(
+            &mut batch,
+            &source_indices,
+            &mut batch_start,
+            n_variants,
+            &mut actual_values,
+            DenseMissingPolicy::Nan,
+            &mut variant_values,
+            &mut missing_indices,
+        )
+        .expect("batch flush should succeed");
+
+        assert_values_with_nan(&actual_values, &expected_values);
+    }
+
+    #[test]
+    fn packed_hardcalls_copy_and_invert_0_2() {
+        let mut source = PackedHardcalls::default();
+        source.resize(5);
+        source.clear_to(3);
+        source.set(0, 0);
+        source.set(1, 1);
+        source.set(2, 2);
+
+        let mut copy = PackedHardcalls::default();
+        copy.copy_from(&source);
+        copy.invert_0_2();
+
+        assert_eq!(
+            (0..5)
+                .map(|sample_index| copy.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![2, 1, 0, 3, 3]
+        );
+        assert_eq!(
+            (0..5)
+                .map(|sample_index| source.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 3]
+        );
+    }
+
+    #[test]
+    fn packed_hardcalls_loads_pgen_payload_and_masks_unused_trailing_slots() {
+        let mut packed = PackedHardcalls::default();
+        packed.load_pgen_payload(&[0b1110_0100, 0xff], 5);
+
+        assert_eq!(
+            (0..5)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 3]
+        );
+
+        packed.resize(8);
+        assert_eq!(
+            (0..8)
+                .map(|sample_index| packed.get(sample_index))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 3, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn packed_hardcalls_stats_for_selected_matches_expanded_stats() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(8);
+        for (sample_index, category) in [0, 1, 2, 3, 2, 0, 1, 3].into_iter().enumerate() {
+            packed.set(sample_index, category);
+        }
+
+        for source_indices in [&[0, 1, 2, 3, 4, 5, 6, 7][..], &[7, 3][..], &[][..]] {
+            let mut values = Vec::new();
+            let mut missing_indices = Vec::new();
+            packed.expand_selected(source_indices, &mut values, &mut missing_indices);
+
+            let expected = stats_from_expanded_hardcalls(&values, &missing_indices);
+            let actual = packed
+                .stats_for_selected(source_indices)
+                .expect("packed stats should compute");
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn packed_hardcalls_detects_polymorphic_for_selection() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(8);
+        for (sample_index, category) in [0, 0, 3, 0, 2, 3, 1, 0].into_iter().enumerate() {
+            packed.set(sample_index, category);
+        }
+
+        assert!(packed
+            .is_polymorphic_for_selection(&[0, 1, 2, 3, 4, 5, 6, 7], true)
+            .expect("valid all-sample selection should evaluate"));
+        assert!(packed
+            .is_polymorphic_for_selection(&[0, 4], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(packed
+            .is_polymorphic_for_selection(&[1, 6], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(!packed
+            .is_polymorphic_for_selection(&[0, 1, 3, 7], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(!packed
+            .is_polymorphic_for_selection(&[2, 5], false)
+            .expect("valid selected samples should evaluate"));
+        assert!(packed.is_polymorphic_for_selection(&[8], false).is_err());
+    }
+
+    #[test]
+    fn packed_hardcalls_evaluate_compiled_filter_plans_for_selection() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(8);
+        for (sample_index, category) in [0, 1, 2, 3, 2, 0, 1, 3].into_iter().enumerate() {
+            packed.set(sample_index, category);
+        }
+
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::MacRange {
+                        min: Some(2),
+                        max: Some(8),
+                    },
+                    &[0, 1, 2, 3, 4, 5, 6, 7],
+                    true,
+                )
+                .expect("valid plan should evaluate"),
+            Some(true)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::MafRange {
+                        min: Some(0.4),
+                        max: Some(0.5),
+                    },
+                    &[0, 1, 2, 3, 4, 5, 6, 7],
+                    true,
+                )
+                .expect("valid plan should evaluate"),
+            Some(true)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::Conjunction(
+                        genoio_core::GenotypeFilterConjunction {
+                            polymorphic: true,
+                            mac_min: Some(2),
+                            mac_max: None,
+                            maf_min: None,
+                            maf_max: None,
+                            missing_rate_max: Some(0.20),
+                        },
+                    ),
+                    &[0, 1, 2, 3, 4, 5, 6, 7],
+                    true,
+                )
+                .expect("valid plan should evaluate"),
+            Some(false)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::MissingRateMax { max: 0.0 },
+                    &[0, 5],
+                    false,
+                )
+                .expect("valid selected plan should evaluate"),
+            Some(true)
+        );
+        assert_eq!(
+            packed
+                .evaluate_filter_plan_for_selection(
+                    genoio_core::GenotypeFilterPlan::Generic,
+                    &[0, 1],
+                    false,
+                )
+                .expect("generic plan should fall back"),
+            None
+        );
+    }
+
+    #[test]
+    fn packed_hardcalls_stats_for_all_matches_expanded_stats_with_partial_word() {
+        let mut packed = PackedHardcalls::default();
+        packed.resize(35);
+        for sample_index in 0..packed.sample_ct() {
+            packed.set(sample_index, (sample_index % 4) as u8);
+        }
+
+        let source_indices = (0..packed.sample_ct()).collect::<Vec<_>>();
+        let mut values = Vec::new();
+        let mut missing_indices = Vec::new();
+        packed.expand_selected(&source_indices, &mut values, &mut missing_indices);
+
+        let expected = stats_from_expanded_hardcalls(&values, &missing_indices);
+        let actual = packed
+            .stats_for_selection(&source_indices, true)
+            .expect("packed stats should compute");
+
+        assert_eq!(actual, expected);
+    }
+}

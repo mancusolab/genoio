@@ -20,24 +20,41 @@ use super::{
 };
 
 pub(in crate::plink::plink2) fn read_supported_pgen_header(path: &Path) -> Result<PgenHeader> {
-    read_supported_pgen_header_inner(path, None)
+    let mut file = File::open(path).map_err(|source| GenoioError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    read_supported_pgen_header_inner(path, &mut file, None)
 }
 
 pub(in crate::plink::plink2) fn read_supported_pgen_header_prefix(
     path: &Path,
     requested_variant_ct: usize,
 ) -> Result<PgenHeader> {
-    read_supported_pgen_header_inner(path, Some(requested_variant_ct))
-}
-
-fn read_supported_pgen_header_inner(
-    path: &Path,
-    requested_variant_ct: Option<usize>,
-) -> Result<PgenHeader> {
     let mut file = File::open(path).map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    read_supported_pgen_header_inner(path, &mut file, Some(requested_variant_ct))
+}
+
+pub(in crate::plink::plink2) fn read_supported_pgen_header_from_file(
+    path: &Path,
+    file: &mut File,
+) -> Result<PgenHeader> {
+    read_supported_pgen_header_inner(path, file, None)
+}
+
+fn read_supported_pgen_header_inner(
+    path: &Path,
+    file: &mut File,
+    requested_variant_ct: Option<usize>,
+) -> Result<PgenHeader> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| GenoioError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut header = [0_u8; PGEN_HEADER_LEN as usize];
     file.read_exact(&mut header)
         .map_err(|source| GenoioError::Io {
@@ -55,7 +72,7 @@ fn read_supported_pgen_header_inner(
     match header[2] {
         PGEN_MODE_FIXED_WIDTH_HARDCALLS => fixed_width_header(
             path,
-            &file,
+            file,
             counts,
             header[11],
             FixedWidthHeaderSpec {
@@ -66,7 +83,7 @@ fn read_supported_pgen_header_inner(
         ),
         PGEN_MODE_FIXED_WIDTH_DOSAGE => fixed_width_header(
             path,
-            &file,
+            file,
             counts,
             header[11],
             FixedWidthHeaderSpec {
@@ -77,7 +94,7 @@ fn read_supported_pgen_header_inner(
         ),
         PGEN_MODE_FIXED_WIDTH_PHASED_DOSAGE => fixed_width_header(
             path,
-            &file,
+            file,
             counts,
             header[11],
             FixedWidthHeaderSpec {
@@ -92,13 +109,13 @@ fn read_supported_pgen_header_inner(
             let (record_types, record_offsets) = match prefix_variant_ct {
                 Some(prefix_variant_ct) => read_variable_width_header_body_prefix(
                     path,
-                    &mut file,
+                    file,
                     counts.variant_ct,
                     header[11],
                     prefix_variant_ct,
                 )?,
                 None => {
-                    read_variable_width_header_body(path, &mut file, counts.variant_ct, header[11])?
+                    read_variable_width_header_body(path, file, counts.variant_ct, header[11])?
                 }
             };
             Ok(PgenHeader {
@@ -224,8 +241,8 @@ fn read_variable_width_header_body(
             record_lengths.push(u32::from_le_bytes(bytes));
         }
     }
-    for record_type in &record_types {
-        validate_supported_variable_record_type(path, *record_type)?;
+    for (variant_index, record_type) in record_types.iter().copied().enumerate() {
+        validate_supported_variable_record_type_at(path, variant_index, record_type)?;
     }
     let header_end = file.stream_position().map_err(|source| GenoioError::Io {
         path: path.to_path_buf(),
@@ -347,8 +364,8 @@ fn read_variable_width_header_body_prefix(
     }
     // Only validate the prefix that may be decoded for this block. Unsupported
     // later records should not prevent first-block reads from succeeding.
-    for record_type in &record_types {
-        validate_supported_variable_record_type(path, *record_type)?;
+    for (variant_index, record_type) in record_types.iter().copied().enumerate() {
+        validate_supported_variable_record_type_at(path, variant_index, record_type)?;
     }
     if let Some(prefix_end) = record_offsets.last() {
         validate_record_end(path, file, *prefix_end)?;
@@ -538,16 +555,10 @@ fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Resu
         ));
     }
     let dosage_bits = (record_type >> 5) & 0x03;
-    if dosage_bits != 0 && record_type & 0x10 != 0 {
+    if record_type & 0x80 != 0 && dosage_bits == 0 {
         return Err(GenoioError::invalid_source(
             path,
-            "unsupported pgen hardcall-phase track with dosage",
-        ));
-    }
-    if record_type & 0x80 != 0 && dosage_bits != 2 {
-        return Err(GenoioError::invalid_source(
-            path,
-            "unsupported pgen phased-dosage track without full dosage track",
+            "pgen phased-dosage track is present without a dosage track",
         ));
     }
     match record_type & 0x07 {
@@ -557,6 +568,22 @@ fn validate_supported_variable_record_type(path: &Path, record_type: u8) -> Resu
             format!("unsupported pgen main-track compression type {compression}"),
         )),
     }
+}
+
+fn validate_supported_variable_record_type_at(
+    path: &Path,
+    variant_index: usize,
+    record_type: u8,
+) -> Result<()> {
+    validate_supported_variable_record_type(path, record_type)?;
+    if variant_index.is_multiple_of(PGEN_VARIANT_BLOCK_SIZE) && matches!(record_type & 0x07, 2 | 3)
+    {
+        return Err(GenoioError::invalid_source(
+            path,
+            "pgen LD-compressed record appears before any non-LD record in its variant block; LD compression is forbidden for the first record of a variant block",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn fixed_width_dosage_record_len(sample_ct: usize) -> usize {

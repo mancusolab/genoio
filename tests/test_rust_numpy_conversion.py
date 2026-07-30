@@ -174,3 +174,59 @@ def test_rust_variant_major_haplotype_values_report_layout_without_transpose(tmp
         values,
         np.array([0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
     )
+
+
+def test_pbr_py_native_001_block_reader_dense_values_keep_numpy_ownership(tmp_path):
+    reader = _rust._BlockReader(
+        "vcf",
+        {"vcf": str(_write_tiny_vcf(tmp_path))},
+        "geno",
+        False,
+        {
+            "samples": None,
+            "variants": None,
+            "dosage": "hardcall",
+            "missing": "raise",
+            "return_samples": False,
+            "return_variants": False,
+            "matrix_only": True,
+        },
+        1,
+    )
+
+    block = reader.next_block()
+    assert block is not None
+    values = block["values"]
+
+    assert isinstance(values, np.ndarray)
+    assert values.dtype == np.dtype("float32")
+    assert values.flags.writeable
+    assert not _is_bytearray_backed(values)
+
+
+def test_pbr_py_native_001_block_reader_sparse_values_keep_numpy_ownership(tmp_path):
+    reader = _rust._BlockReader(
+        "vcf",
+        {"vcf": str(_write_tiny_vcf(tmp_path))},
+        "geno",
+        True,
+        {
+            "samples": None,
+            "variants": None,
+            "dosage": "hardcall",
+            "missing": "raise",
+            "return_samples": False,
+            "return_variants": False,
+            "matrix_only": True,
+        },
+        1,
+    )
+
+    block = reader.next_block()
+
+    assert block is not None
+    assert block["indptr"].dtype == np.dtype("int32")
+    assert block["indices"].dtype == np.dtype("int32")
+    assert block["data"].dtype == np.dtype("float32")
+    assert not _is_bytearray_backed(block["indptr"])
+    assert not _is_bytearray_backed(block["indices"])

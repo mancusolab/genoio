@@ -22,16 +22,19 @@ mod io;
 mod main_track;
 
 use self::dosage_track::{
-    overlay_fixed_width_dosages, overlay_variable_width_dosages, DosageOverlayTarget,
+    overlay_fixed_width_dosages, overlay_variable_width_dosages, DosageEntryScratch,
+    DosageOverlayTarget,
 };
 pub(super) use self::haplotype_track::{
     decode_plink2_haplotype_dosage_aux, decode_plink2_haplotype_hardcall_aux,
     read_plink2_variant_haplotype_dosage_track, read_plink2_variant_haplotype_main_track,
+    skip_hardcall_phase_track, validate_full_phased_dosage_track,
+    validate_variable_phased_dosage_record,
 };
 use self::header::fixed_width_dosage_record_len;
 pub(super) use self::header::{
-    open_pgen_payload, read_supported_pgen_header, read_supported_pgen_header_prefix,
-    validate_plink2_dimensions, validate_plink2_sample_count,
+    open_pgen_payload, read_supported_pgen_header, read_supported_pgen_header_from_file,
+    read_supported_pgen_header_prefix, validate_plink2_dimensions, validate_plink2_sample_count,
 };
 use self::io::read_fixed_width_phased_dosage_variant_record;
 pub(super) use self::io::{
@@ -80,6 +83,8 @@ pub(super) struct PgenDecoderState {
     pub(super) packed: PackedGenotypes,
     pub(super) values: Vec<f32>,
     pub(super) missing_indices: Vec<usize>,
+    dosage_source_indices: Vec<usize>,
+    dosage_source_totals: Vec<Option<f32>>,
 }
 
 /// Reused selected-output buffers for PLINK2 haplotype reads.
@@ -93,6 +98,17 @@ pub(super) struct PgenHaplotypeDecodeState {
     pub(super) selected_haplotype_missing_indices: Vec<usize>,
     pub(super) selected_collapsed_values: Vec<f32>,
     pub(super) selected_collapsed_missing_indices: Vec<usize>,
+    selected_phase_swapped: Vec<Option<bool>>,
+    dosage_source_indices: Vec<usize>,
+    dosage_source_totals: Vec<Option<f32>>,
+    validated_phased_dosages: Vec<Option<ValidatedPhasedDosage>>,
+    selected_explicit_phase: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::plink::plink2) enum ValidatedPhasedDosage {
+    Missing,
+    Present { total: f32, left: f32, right: f32 },
 }
 
 struct SelectedSampleCursor<'a> {
@@ -150,6 +166,8 @@ impl PgenDecoderState {
             packed: PackedGenotypes::default(),
             values: Vec::with_capacity(selected_sample_ct),
             missing_indices: Vec::new(),
+            dosage_source_indices: Vec::with_capacity(sample_ct),
+            dosage_source_totals: Vec::with_capacity(sample_ct),
         }
     }
 }
@@ -219,6 +237,81 @@ pub(super) fn read_plink2_variant_dosage(
     }
 }
 
+pub(super) fn read_plink2_variant_dosage_main_track(
+    path: &Path,
+    file: &mut File,
+    header: &PgenHeader,
+    variant_index: usize,
+    decoder_state: &mut PgenDecoderState,
+) -> Result<usize> {
+    read_plink2_variant_haplotype_main_track(path, file, header, variant_index, decoder_state)
+}
+
+pub(super) fn decode_plink2_variant_dosage_aux(
+    path: &Path,
+    header: &PgenHeader,
+    variant_index: usize,
+    cursor: usize,
+    source_indices: &[usize],
+    decoder_state: &mut PgenDecoderState,
+) -> Result<()> {
+    if !matches!(header.layout, PgenLayout::VariableWidth) {
+        return Err(GenoioError::internal_contract(
+            "separate pgen dosage auxiliary decode requires variable-width storage",
+        ));
+    }
+    let record_type = header.record_types[variant_index];
+    let dosage_bits = (record_type >> 5) & 0x03;
+    if dosage_bits == 0 {
+        return Err(GenoioError::unsupported(
+            "pgen record does not contain dosage values",
+        ));
+    }
+    let cursor = if record_type & 0x10 != 0 {
+        skip_hardcall_phase_track(
+            path,
+            decoder_state.record.as_slice(),
+            cursor,
+            &decoder_state.packed,
+        )?
+    } else {
+        cursor
+    };
+    decoder_state.packed.expand_selected(
+        source_indices,
+        &mut decoder_state.values,
+        &mut decoder_state.missing_indices,
+    );
+    let phase_cursor = overlay_variable_width_dosages(
+        path,
+        decoder_state.record.as_slice(),
+        cursor,
+        dosage_bits,
+        header.sample_ct,
+        DosageOverlayTarget {
+            source_indices,
+            values: &mut decoder_state.values,
+            missing_indices: &mut decoder_state.missing_indices,
+        },
+        Some(DosageEntryScratch {
+            source_indices: &mut decoder_state.dosage_source_indices,
+            totals: &mut decoder_state.dosage_source_totals,
+        }),
+    )?;
+    validate_variable_phased_dosage_record(
+        path,
+        decoder_state.record.as_slice(),
+        record_type,
+        phase_cursor,
+        dosage_bits,
+        (
+            &decoder_state.dosage_source_indices,
+            &decoder_state.dosage_source_totals,
+        ),
+        None,
+    )
+}
+
 fn read_fixed_width_dosage_variant_values(
     path: &Path,
     file: &mut File,
@@ -263,6 +356,7 @@ fn read_fixed_width_dosage_variant_values(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,
+        None,
     )
 }
 
@@ -299,6 +393,15 @@ fn read_fixed_width_phased_dosage_variant_values(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,
+        Some(&mut decoder_state.dosage_source_totals),
+    )?;
+    validate_full_phased_dosage_track(
+        path,
+        &decoder_state.record,
+        dosage_end,
+        header.sample_ct,
+        &decoder_state.dosage_source_totals,
+        None,
     )
 }
 
@@ -337,7 +440,7 @@ fn read_variable_width_dosage_variant_values(
             "pgen record does not contain dosage values",
         ));
     }
-    let cursor = decode_variable_width_main_track(
+    let mut cursor = decode_variable_width_main_track(
         path,
         record,
         record_type,
@@ -352,13 +455,16 @@ fn read_variable_width_dosage_variant_values(
             .copy_from(&decoder_state.packed);
         decoder_state.has_previous_non_ld = true;
     }
+    if record_type & 0x10 != 0 {
+        cursor = skip_hardcall_phase_track(path, record, cursor, &decoder_state.packed)?;
+    }
 
     decoder_state.packed.expand_selected(
         source_indices,
         &mut decoder_state.values,
         &mut decoder_state.missing_indices,
     );
-    overlay_variable_width_dosages(
+    let phase_cursor = overlay_variable_width_dosages(
         path,
         record,
         cursor,
@@ -369,5 +475,21 @@ fn read_variable_width_dosage_variant_values(
             values: &mut decoder_state.values,
             missing_indices: &mut decoder_state.missing_indices,
         },
+        Some(DosageEntryScratch {
+            source_indices: &mut decoder_state.dosage_source_indices,
+            totals: &mut decoder_state.dosage_source_totals,
+        }),
+    )?;
+    validate_variable_phased_dosage_record(
+        path,
+        record,
+        record_type,
+        phase_cursor,
+        dosage_bits,
+        (
+            &decoder_state.dosage_source_indices,
+            &decoder_state.dosage_source_totals,
+        ),
+        None,
     )
 }

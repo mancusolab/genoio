@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from bench_common import benchmark, nonnegative_float, positive_int
+from bench_common import benchmark, nonnegative_float, positive_int, read_first_block
 
 SOURCE_FORMATS = ("vcf", "bfile", "pfile", "bgen")
 SCENARIOS = ("rust", "numpy")
@@ -222,46 +222,42 @@ def validate_source_window_variant_ids(variant_ids: list[str]) -> None:
 
 def read_rust_filtered(args: argparse.Namespace) -> np.ndarray:
     dataset = dataset_for_args(args)
-    return next(
-        dataset.iter_blocks(
-            args.max_variants,
-            variants=combined_filter(args),
-            **read_options(args),
-        )
+    return read_first_block(
+        dataset,
+        args.max_variants,
+        variants=combined_filter(args),
+        **read_options(args),
     )
 
 
 def read_rust_source_window_filtered(args: argparse.Namespace, variant_ids: list[str]) -> np.ndarray:
     dataset = dataset_for_args(args)
-    return next(
-        dataset.iter_blocks(
-            args.max_variants,
-            variants=source_window_filter(args, variant_ids),
-            **read_options(args),
-        )
+    return read_first_block(
+        dataset,
+        args.max_variants,
+        variants=source_window_filter(args, variant_ids),
+        **read_options(args),
     )
 
 
 def read_base_block(args: argparse.Namespace) -> np.ndarray:
     dataset = dataset_for_args(args)
-    return next(
-        dataset.iter_blocks(
-            args.max_variants,
-            variants=base_filter(args),
-            **read_options(args),
-        )
+    return read_first_block(
+        dataset,
+        args.max_variants,
+        variants=base_filter(args),
+        **read_options(args),
     )
 
 
 def read_base_block_with_variants(args: argparse.Namespace) -> tuple[np.ndarray, Any]:
     dataset = dataset_for_args(args)
-    return next(
-        dataset.iter_blocks(
-            args.max_variants,
-            variants=base_filter(args),
-            return_variants=True,
-            **read_options(args),
-        )
+    return read_first_block(
+        dataset,
+        args.max_variants,
+        variants=base_filter(args),
+        return_variants=True,
+        **read_options(args),
     )
 
 
@@ -298,23 +294,25 @@ def read_numpy_retained_postfiltered(args: argparse.Namespace) -> np.ndarray:
     pieces: list[np.ndarray] = []
     empty: np.ndarray | None = None
     retained = 0
-    for block in dataset.iter_blocks(
+    iterator = dataset.iter_blocks(
         args.max_variants,
         variants=base_filter(args),
         **read_options(args),
-    ):
-        matrix = np.asarray(block)
-        if empty is None:
-            empty = matrix[:, :0]
-        mask = numpy_variant_mask_for_args(matrix, args)
-        filtered = matrix[:, mask]
-        if filtered.shape[1] == 0:
-            continue
-        remaining = args.max_variants - retained
-        pieces.append(filtered[:, :remaining])
-        retained += min(filtered.shape[1], remaining)
-        if retained >= args.max_variants:
-            break
+    )
+    with iterator as blocks:
+        for block in blocks:
+            matrix = np.asarray(block)
+            if empty is None:
+                empty = matrix[:, :0]
+            mask = numpy_variant_mask_for_args(matrix, args)
+            filtered = matrix[:, mask]
+            if filtered.shape[1] == 0:
+                continue
+            remaining = args.max_variants - retained
+            pieces.append(filtered[:, :remaining])
+            retained += min(filtered.shape[1], remaining)
+            if retained >= args.max_variants:
+                break
     if pieces:
         return np.concatenate(pieces, axis=1)
     if empty is not None:

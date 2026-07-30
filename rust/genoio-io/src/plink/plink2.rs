@@ -25,8 +25,11 @@ mod dosage;
 mod haplotype;
 mod metadata;
 mod pgen;
+mod session;
 mod source;
 mod sparse;
+
+pub(crate) use session::Plink2BlockSession;
 
 #[doc(inline)]
 pub use dense::read_plink2_dense_windowed;

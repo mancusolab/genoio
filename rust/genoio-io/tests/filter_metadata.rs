@@ -9,7 +9,10 @@ use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::{header::Format, Header};
 use noodles_tabix as tabix;
 
-use genoio_core::DenseLayout;
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
+use genoio_core::{DenseLayout, DenseMissingPolicy};
 
 mod common;
 
@@ -277,6 +280,53 @@ fn indexed_vcf_region_filter_fetches_exact_start_and_end_positions() {
     assert_eq!(variant_ids(variants), vec!["rs20", "rs30"]);
     assert_eq!(variants.positions, vec![20, 30]);
     assert_eq!(dense.diagnostics.candidate_variants, 2);
+}
+
+#[test]
+fn pbr_rust_textvcf_002_indexed_region_session_starts_at_authoritative_tabix_chunk() {
+    let dir = unique_dir("pbr-text-vcf-indexed-chunks");
+    let path = dir.join("indexed.vcf.gz");
+    write_indexed_vcf(&path);
+    let filter = genoio_core::VariantFilter::from_json_value(serde_json::json!({
+        "op": "predicate",
+        "name": "region",
+        "params": {"value": "1:20-30"}
+    }))
+    .expect("region filter should parse");
+    let mut reader = BlockReader::open(
+        BlockSource::Vcf { vcf: path },
+        BlockReadOptions {
+            matrix_kind: MatrixKind::Genotype,
+            sparse: false,
+            requested_samples: None,
+            variant_filter: Some(filter),
+            dosage_source: DosageSource::Hardcall,
+            missing_policy: DenseMissingPolicy::Nan,
+            return_samples: true,
+            return_variants: true,
+        },
+        1,
+    )
+    .expect("indexed persistent text VCF reader should open");
+
+    for (expected_id, expected_candidates) in [("rs20", 1), ("rs30", 2)] {
+        let BlockOutput::Dense(block) = reader
+            .next_block()
+            .expect("indexed text VCF block should decode")
+            .expect("indexed text VCF block should exist")
+        else {
+            panic!("indexed dense text VCF should return dense output");
+        };
+        assert_eq!(variant_ids(variants(&block.variants)), vec![expected_id]);
+        assert_eq!(
+            block.diagnostics.candidate_variants, expected_candidates,
+            "chunk traversal should not restart or visit the out-of-region prefix"
+        );
+    }
+    assert!(reader
+        .next_block()
+        .expect("indexed text VCF should reach EOF")
+        .is_none());
 }
 
 #[test]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +64,8 @@ def _smoke_bgen(tmp_path: Path) -> None:
 
 def main() -> None:
     print(f"imported genoio from {genoio.__file__}")
+    if not files("genoio").joinpath("py.typed").is_file():
+        raise AssertionError("installed genoio wheel is missing py.typed")
     with tempfile.TemporaryDirectory(prefix="genoio-wheel-smoke-") as tmpdir:
         tmp_path = Path(tmpdir)
         _smoke_vcf(tmp_path)

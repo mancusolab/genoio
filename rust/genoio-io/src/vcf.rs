@@ -24,6 +24,9 @@ mod bcf;
 mod policy;
 mod text;
 
+pub(crate) use bcf::BcfBlockSession;
+pub(crate) use text::TextVcfBlockSession;
+
 /// Read VCF/BCF sample metadata and public variant metadata as columnar buffers.
 pub fn read_vcf_public_metadata(path: &Path) -> Result<MetadataOutput> {
     if is_bcf_path(path) {

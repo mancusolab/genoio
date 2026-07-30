@@ -4,8 +4,14 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use ::genoio_io::{
+    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+};
+use genoio_core::{DenseLayout, DenseMissingPolicy};
+
 mod common;
 
+use common::bcf::write_genotype_dosage_fixture;
 use common::dense::assert_values_with_nan;
 use common::unique_dir;
 use common::vcf_output as genoio_io;
@@ -609,4 +615,132 @@ fn vcf_dense_rejects_multi_alt_records_even_when_gt_uses_first_alt() {
         genoio_io::read_vcf_dense(&path, None, None).expect_err("multi-ALT records should fail");
 
     assert!(error.to_string().contains("multi-ALT"));
+}
+
+#[test]
+fn pbr_rust_textvcf_001_sequential_plain_gt_and_compressed_ds_persist_across_blocks() {
+    let dir = unique_dir("pbr-text-vcf-sequential-dense");
+    let plain = dir.join("hardcalls.vcf");
+    let compressed = dir.join("dosages.vcf.gz");
+    let header = "\
+##fileformat=VCFv4.2
+##contig=<ID=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">
+##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2
+";
+    let records = "\
+1\t10\trs1\tA\tG\t.\tPASS\t.\tGT:DS\t0/0:0.1\t0/1:0.9
+1\t20\trs2\tC\tT\t.\tPASS\t.\tGT:DS\t0/1:1.2\t1/1:1.8
+1\t30\trs3\tG\tA\t.\tPASS\t.\tGT:DS\t1/1:1.9\t0/0:0.2
+";
+    write_file(&plain, &format!("{header}{records}"));
+    write_bgzf_file(&compressed, &format!("{header}{records}"));
+
+    for (path, dosage_source, expected) in [
+        (
+            plain,
+            DosageSource::Hardcall,
+            vec![vec![0.0, 1.0, 1.0, 2.0], vec![2.0, 0.0]],
+        ),
+        (
+            compressed,
+            DosageSource::Dosage,
+            vec![vec![0.1, 1.2, 0.9, 1.8], vec![1.9, 0.2]],
+        ),
+    ] {
+        let mut reader = BlockReader::open(
+            BlockSource::Vcf { vcf: path },
+            BlockReadOptions {
+                matrix_kind: MatrixKind::Genotype,
+                sparse: false,
+                requested_samples: None,
+                variant_filter: None,
+                dosage_source,
+                missing_policy: DenseMissingPolicy::Nan,
+                return_samples: true,
+                return_variants: true,
+            },
+            2,
+        )
+        .expect("persistent sequential text VCF reader should open");
+
+        for (block_index, expected_values) in expected.into_iter().enumerate() {
+            let BlockOutput::Dense(block) = reader
+                .next_block()
+                .expect("text VCF block should decode")
+                .expect("expected text VCF block")
+            else {
+                panic!("sequential dense text VCF should return dense output");
+            };
+            assert_eq!(block.layout, DenseLayout::VariantMajor);
+            assert_eq!(
+                dense_values_sample_major(&block),
+                expected_values,
+                "block {block_index}"
+            );
+        }
+        assert!(reader
+            .next_block()
+            .expect("text VCF reader should reach EOF")
+            .is_none());
+        assert!(reader
+            .next_block()
+            .expect("text VCF EOF should be sticky")
+            .is_none());
+    }
+}
+
+#[test]
+fn pbr_rust_bcf_001_dense_gt_and_ds_blocks_match_whole_reads() {
+    let dir = unique_dir("pbr-bcf-dense-blocks");
+    let path = dir.join("dense.bcf");
+    write_genotype_dosage_fixture(&path);
+
+    for (dosage_source, expected_blocks) in [
+        (
+            DosageSource::Hardcall,
+            vec![vec![0.0, 1.0, 1.0, 2.0], vec![2.0, 0.0]],
+        ),
+        (
+            DosageSource::Dosage,
+            vec![vec![0.1, 0.9, 1.2, 1.8], vec![1.9, 0.2]],
+        ),
+    ] {
+        let mut reader = BlockReader::open(
+            BlockSource::Bcf { bcf: path.clone() },
+            BlockReadOptions {
+                matrix_kind: MatrixKind::Genotype,
+                sparse: false,
+                requested_samples: None,
+                variant_filter: None,
+                dosage_source,
+                missing_policy: DenseMissingPolicy::Nan,
+                return_samples: true,
+                return_variants: true,
+            },
+            2,
+        )
+        .expect("persistent BCF reader should open");
+
+        for expected_values in expected_blocks {
+            let BlockOutput::Dense(block) = reader
+                .next_block()
+                .expect("BCF block should decode")
+                .expect("expected BCF block")
+            else {
+                panic!("BCF dense session should return dense output");
+            };
+            assert_eq!(block.layout, DenseLayout::VariantMajor);
+            assert_eq!(block.values, expected_values);
+        }
+        assert!(reader
+            .next_block()
+            .expect("BCF reader should reach EOF")
+            .is_none());
+        assert!(reader
+            .next_block()
+            .expect("BCF EOF should be sticky")
+            .is_none());
+    }
 }
