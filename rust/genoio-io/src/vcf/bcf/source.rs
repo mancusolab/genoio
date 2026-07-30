@@ -12,9 +12,9 @@ use std::fs::File;
 use std::path::Path;
 
 use genoio_core::{
-    append_sparse_column, reject_sparse_missing, select_samples_source_order, DenseGenotypeMatrix,
-    DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
-    SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
+    append_sparse_column, reject_sparse_missing, select_samples_source_order, DenseDiagnostics,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError,
+    MetadataOutput, SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix, VariantFilter,
     VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
 };
 use noodles_bcf as bcf;
@@ -33,7 +33,10 @@ use super::super::{
 };
 use super::decode::{decode_ds_record, decode_gt_record, BcfDenseDecodeBuffers, BcfStatsMode};
 use super::haplotype::{decode_phased_haplotype_record, BcfHaplotypeDecodeBuffers};
-use super::record::{prepare_bcf_candidate, push_bcf_variant_row, BcfCandidateAction};
+use super::record::{
+    prepare_bcf_candidate, push_bcf_variant_row, BcfCandidateAction, BcfVariantView,
+    PreparedBcfCandidate,
+};
 
 const BCF_METADATA_INITIAL_VARIANT_CAPACITY: usize = 4096;
 
@@ -168,32 +171,30 @@ pub(in crate::vcf) fn read_sparse_windowed(
             BcfCandidateAction::Stop => break,
             BcfCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        decode_gt_record(
+        let (variant, stats) = match process_bcf_candidate(
             path,
             &header,
             &record,
             &source_indices,
-            BcfStatsMode::from_needed(needs_genotype_decision),
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            DenseField::Gt,
+            true,
+            true,
+            "GT",
             &mut decoded,
-        )?;
-        if needs_genotype_decision {
-            match retention.genotype_decision(
-                variant_filter
-                    .is_none_or(|filter| filter.evaluate_view(&variant, decoded.stats.as_ref())),
-                &mut diagnostics,
-            ) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-        }
+        )? {
+            DecodedBcfCandidate::Include { variant, stats } => (variant, stats),
+            DecodedBcfCandidate::Skip => continue,
+            DecodedBcfCandidate::Stop => break,
+        };
 
         reject_sparse_missing(!decoded.missing_indices.is_empty())?;
         let flipped = flip_values_to_minor_allele(decoded.values.as_mut_slice());
         append_sparse_column(&mut indptr, &mut indices, &mut data, &decoded.values)?;
-        push_bcf_variant_row(&mut variants, &variant, decoded.stats, flipped)?;
+        push_bcf_variant_row(&mut variants, &variant, stats, flipped)?;
     }
 
     let n_cols = indptr.len() - 1;
@@ -259,43 +260,25 @@ pub(in crate::vcf) fn read_haplotypes_dense_windowed(
             BcfCandidateAction::Stop => break,
             BcfCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        let filter_result = if needs_genotype_decision {
-            let filter = variant_filter.ok_or_else(|| {
-                GenoioError::internal_contract("genotype decision requires a variant filter")
-            })?;
-            decode_gt_record(
-                path,
-                &header,
-                &record,
-                &source_indices,
-                if return_variants {
-                    BcfStatsMode::Compute
-                } else {
-                    BcfStatsMode::Counts
-                },
-                &mut decoded_gt,
-            )?;
-            Some(evaluate_bcf_gt_filter(
-                &decoded_gt,
-                filter,
-                &variant,
-                return_variants,
-                "haplotype",
-            )?)
-        } else {
-            None
+        let (variant, stats_to_attach) = match process_bcf_candidate(
+            path,
+            &header,
+            &record,
+            &source_indices,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            DenseField::Gt,
+            return_variants,
+            false,
+            "haplotype",
+            &mut decoded_gt,
+        )? {
+            DecodedBcfCandidate::Include { variant, stats } => (variant, stats),
+            DecodedBcfCandidate::Skip => continue,
+            DecodedBcfCandidate::Stop => break,
         };
-        if let Some((retain_variant, _)) = filter_result {
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-        }
-
-        let stats_to_attach = filter_result.and_then(|(_, stats)| stats);
         push_bcf_variant_row(&mut variants, &variant, stats_to_attach, false)?;
 
         decode_phased_haplotype_record(path, &header, &record, &source_indices, &mut decoded)?;
@@ -376,35 +359,25 @@ pub(in crate::vcf) fn read_haplotypes_sparse_windowed(
             BcfCandidateAction::Stop => break,
             BcfCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        let stats = if needs_genotype_decision {
-            decode_gt_record(
-                path,
-                &header,
-                &record,
-                &source_indices,
-                BcfStatsMode::Compute,
-                &mut stats_decoded,
-            )?;
-            Some(
-                stats_decoded
-                    .stats
-                    .ok_or_else(|| GenoioError::internal_contract("bcf GT stats missing"))?,
-            )
-        } else {
-            None
+        let (variant, stats) = match process_bcf_candidate(
+            path,
+            &header,
+            &record,
+            &source_indices,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            DenseField::Gt,
+            true,
+            false,
+            "haplotype",
+            &mut stats_decoded,
+        )? {
+            DecodedBcfCandidate::Include { variant, stats } => (variant, stats),
+            DecodedBcfCandidate::Skip => continue,
+            DecodedBcfCandidate::Stop => break,
         };
-        if needs_genotype_decision {
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-        }
 
         decode_phased_haplotype_record(path, &header, &record, &source_indices, &mut decoded)?;
         reject_sparse_missing(!decoded.missing_indices.is_empty())?;
@@ -428,9 +401,92 @@ pub(in crate::vcf) fn read_haplotypes_sparse_windowed(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DenseField {
+pub(super) enum DenseField {
     Gt,
     Ds,
+}
+
+pub(super) enum DecodedBcfCandidate<'a> {
+    Include {
+        variant: BcfVariantView<'a>,
+        stats: Option<VariantStats>,
+    },
+    Skip,
+    Stop,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared BCF transition receives borrowed record state plus reusable decode buffers"
+)]
+pub(super) fn process_bcf_candidate<'a>(
+    path: &Path,
+    header: &'a noodles::Header,
+    record: &'a bcf::Record,
+    source_indices: &[usize],
+    prepared: PreparedBcfCandidate<'a>,
+    variant_filter: Option<&VariantFilter>,
+    retention: &mut RetainedVariantState,
+    diagnostics: &mut DenseDiagnostics,
+    field: DenseField,
+    require_stats: bool,
+    decode_when_unfiltered: bool,
+    context: &str,
+    decoded: &mut BcfDenseDecodeBuffers,
+) -> Result<DecodedBcfCandidate<'a>> {
+    let variant = prepared.variant;
+    let needs_genotype_decision = prepared.needs_genotype_decision;
+    if !needs_genotype_decision && !decode_when_unfiltered {
+        return Ok(DecodedBcfCandidate::Include {
+            variant,
+            stats: None,
+        });
+    }
+
+    match field {
+        DenseField::Gt => decode_gt_record(
+            path,
+            header,
+            record,
+            source_indices,
+            match (needs_genotype_decision, require_stats) {
+                (true, false) => BcfStatsMode::Counts,
+                (true, true) => BcfStatsMode::Compute,
+                (false, _) => BcfStatsMode::Skip,
+            },
+            decoded,
+        )?,
+        DenseField::Ds => {
+            decode_ds_record(path, header, record, source_indices, false, decoded)?;
+        }
+    }
+
+    let stats = if needs_genotype_decision {
+        let filter = variant_filter.ok_or_else(|| {
+            GenoioError::internal_contract("genotype decision requires a variant filter")
+        })?;
+        let (retain_variant, stats) = match field {
+            DenseField::Gt => {
+                evaluate_bcf_gt_filter(decoded, filter, &variant, require_stats, context)?
+            }
+            DenseField::Ds => evaluate_dosage_filter(
+                &decoded.values,
+                &decoded.missing_indices,
+                filter,
+                &variant,
+                require_stats,
+            )?,
+        };
+        match retention.genotype_decision(retain_variant, diagnostics) {
+            RetentionAction::Include => stats,
+            RetentionAction::Skip => return Ok(DecodedBcfCandidate::Skip),
+            RetentionAction::Stop => return Ok(DecodedBcfCandidate::Stop),
+        }
+    } else {
+        None
+    };
+
+    Ok(DecodedBcfCandidate::Include { variant, stats })
 }
 
 pub(in crate::vcf) fn read_dense_windowed(
@@ -527,59 +583,25 @@ fn read_dense_windowed_with_field(
             BcfCandidateAction::Stop => break,
             BcfCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        match field {
-            DenseField::Gt => decode_gt_record(
-                path,
-                &header,
-                &record,
-                &source_indices,
-                match (needs_genotype_decision, return_variants) {
-                    (true, false) => BcfStatsMode::Counts,
-                    (true, true) => BcfStatsMode::Compute,
-                    (false, _) => BcfStatsMode::Skip,
-                },
-                &mut decoded,
-            )?,
-            DenseField::Ds => {
-                decode_ds_record(path, &header, &record, &source_indices, false, &mut decoded)?
-            }
+        let (variant, stats_to_attach) = match process_bcf_candidate(
+            path,
+            &header,
+            &record,
+            &source_indices,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            field,
+            return_variants,
+            true,
+            "GT",
+            &mut decoded,
+        )? {
+            DecodedBcfCandidate::Include { variant, stats } => (variant, stats),
+            DecodedBcfCandidate::Skip => continue,
+            DecodedBcfCandidate::Stop => break,
         };
-
-        let mut stats_to_attach = None;
-        if needs_genotype_decision {
-            let (retain_variant, stats) = match field {
-                DenseField::Gt => {
-                    let filter = variant_filter.ok_or_else(|| {
-                        GenoioError::internal_contract(
-                            "genotype decision requires a variant filter",
-                        )
-                    })?;
-                    evaluate_bcf_gt_filter(&decoded, filter, &variant, return_variants, "GT")?
-                }
-                DenseField::Ds => {
-                    let filter = variant_filter.ok_or_else(|| {
-                        GenoioError::internal_contract(
-                            "genotype decision requires a variant filter",
-                        )
-                    })?;
-                    evaluate_dosage_filter(
-                        &decoded.values,
-                        &decoded.missing_indices,
-                        filter,
-                        &variant,
-                        return_variants,
-                    )?
-                }
-            };
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-            stats_to_attach = stats;
-        }
         push_bcf_variant_row(&mut variants, &variant, stats_to_attach, false)?;
 
         n_variants += 1;
@@ -1020,6 +1042,65 @@ mod tests {
             ))
             .set_samples(samples)
             .build()
+    }
+
+    #[test]
+    fn pbr_rust_bcf_003_stateless_and_persistent_paths_share_dense_transition() {
+        let file = tempfile::Builder::new()
+            .suffix(".bcf")
+            .tempfile()
+            .expect("temp BCF should be created");
+        write_test_bcf(file.path());
+        let BcfInput {
+            mut reader,
+            header,
+            selection,
+        } = open_bcf_input(file.path(), None).expect("BCF input should open");
+        let mut record = bcf::Record::default();
+        assert_ne!(
+            reader
+                .read_record(&mut record)
+                .expect("first BCF record should decode"),
+            0
+        );
+        let mut retention = RetainedVariantState::new(None);
+        let mut diagnostics = selection.diagnostics.clone();
+        let prepared = match prepare_bcf_candidate(
+            file.path(),
+            &header,
+            &record,
+            None,
+            &mut retention,
+            &mut diagnostics,
+        )
+        .expect("BCF candidate preparation should succeed")
+        {
+            BcfCandidateAction::Decode(prepared) => prepared,
+            BcfCandidateAction::Skip | BcfCandidateAction::Stop => {
+                panic!("unfiltered BCF candidate should decode")
+            }
+        };
+        let mut decoded = BcfDenseDecodeBuffers::with_capacity(2);
+
+        let action = process_bcf_candidate(
+            file.path(),
+            &header,
+            &record,
+            &selection.source_indices,
+            prepared,
+            None,
+            &mut retention,
+            &mut diagnostics,
+            DenseField::Gt,
+            false,
+            true,
+            "GT",
+            &mut decoded,
+        )
+        .expect("shared BCF transition should decode");
+
+        assert!(matches!(action, DecodedBcfCandidate::Include { .. }));
+        assert_eq!(decoded.values, vec![0.0, 1.0]);
     }
 
     #[test]

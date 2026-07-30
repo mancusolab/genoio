@@ -48,16 +48,6 @@ pub(super) enum BcfStatsMode {
     Compute,
 }
 
-impl BcfStatsMode {
-    pub(super) const fn from_needed(needed: bool) -> Self {
-        if needed {
-            Self::Compute
-        } else {
-            Self::Skip
-        }
-    }
-}
-
 pub(super) fn decode_gt_record(
     path: &Path,
     header: &noodles::Header,

@@ -569,6 +569,9 @@ def test_pbr_py_cutover_001_validates_eagerly_without_constructing_reader(
     with pytest.raises(genoio.InvalidOptionError, match="positive integer"):
         dataset.iter_blocks(size=0)
 
+    with pytest.raises(genoio.InvalidOptionError, match="platform"):
+        dataset.iter_blocks(size=1 << 100)
+
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
         dataset.iter_blocks(size=2, sparse=[])
 

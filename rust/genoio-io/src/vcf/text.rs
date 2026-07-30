@@ -13,9 +13,10 @@ use std::io::BufRead;
 use std::path::Path;
 
 use genoio_core::{
-    DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError, MetadataOutput,
-    RegionPredicate, SampleMetadataBuffers, SourceCapabilities, SparseGenotypeMatrix,
-    VariantFilter, VariantMetadataBuffers, VariantMetadataView, VariantStats, VariantWindow,
+    DenseDiagnostics, DenseGenotypeMatrix, DenseMissingPolicy, DenseSampleSelection, GenoioError,
+    MetadataOutput, RegionPredicate, SampleMetadataBuffers, SourceCapabilities,
+    SparseGenotypeMatrix, VariantFilter, VariantMetadataBuffers, VariantMetadataView, VariantStats,
+    VariantWindow,
 };
 use noodles_vcf as noodles;
 
@@ -32,7 +33,8 @@ use self::gt::{
 use self::header::read_sample_records_from_header;
 use self::output::TextDenseOutput;
 use self::record::{
-    append_public_variant_metadata_from_text_record, prepare_text_candidate, TextCandidateAction,
+    append_public_variant_metadata_from_text_record, prepare_text_candidate, PreparedTextCandidate,
+    TextCandidateAction, TextVariantView,
 };
 use self::source::{
     ensure_text_indexed_vcf_supported, ensure_text_vcf_supported, open_compressed_reader,
@@ -1245,44 +1247,27 @@ fn read_dense_records_with_metadata<R: BufRead>(
             TextCandidateAction::Stop => break,
             TextCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        // `record.samples()` borrows noodles' reusable record buffer, so decode
-        // selected GTs completely before the next `read_record` call.
-        let stats_mode = match (needs_genotype_decision, metadata_return.matrix_only()) {
-            (true, true) => GtStatsMode::Counts,
-            (true, false) => GtStatsMode::Compute,
-            (false, _) => GtStatsMode::Skip,
-        };
-        decode_gt_record(
+        // `record.samples()` borrows noodles' reusable record buffer, so the
+        // shared transition decodes selected GTs before the next read.
+        let (variant, stats) = match process_text_gt_candidate(
             path,
             &record,
             &selection.source_indices,
-            stats_mode,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            metadata_return.matrix_only(),
+            true,
+            "GT",
             &mut decoded,
-        )?;
-
-        if needs_genotype_decision {
-            let filter = variant_filter.ok_or_else(|| {
-                GenoioError::internal_contract("genotype decision requires a variant filter")
-            })?;
-            let (retain_variant, stats) = evaluate_text_gt_filter(
-                &decoded,
-                filter,
-                &variant,
-                metadata_return.matrix_only(),
-                "GT",
-            )?;
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-            if let Some(stats) = stats {
-                variants.push_view_with_stats(&variant, stats)?;
-            } else {
-                variants.push_view(&variant)?;
-            }
+        )? {
+            DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+            DecodedTextCandidate::Skip => continue,
+            DecodedTextCandidate::Stop => break,
+        };
+        if let Some(stats) = stats {
+            variants.push_view_with_stats(&variant, stats)?;
         } else {
             variants.push_view(&variant)?;
         }
@@ -1387,31 +1372,23 @@ fn read_dosage_dense_records_with_metadata<R: BufRead>(
             TextCandidateAction::Stop => break,
             TextCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-
-        decode_ds_record(path, &record, &selection.source_indices, &mut decoded)?;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        if needs_genotype_decision {
-            let filter = variant_filter.ok_or_else(|| {
-                GenoioError::internal_contract("genotype decision requires a variant filter")
-            })?;
-            let (retain_variant, stats) = evaluate_dosage_filter(
-                decoded.values(),
-                decoded.missing_indices(),
-                filter,
-                &variant,
-                !metadata_return.matrix_only(),
-            )?;
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-            if let Some(stats) = stats {
-                variants.push_view_with_stats(&variant, stats)?;
-            } else {
-                variants.push_view(&variant)?;
-            }
+        let (variant, stats) = match process_text_ds_candidate(
+            path,
+            &record,
+            &selection.source_indices,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            metadata_return.matrix_only(),
+            &mut decoded,
+        )? {
+            DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+            DecodedTextCandidate::Skip => continue,
+            DecodedTextCandidate::Stop => break,
+        };
+        if let Some(stats) = stats {
+            variants.push_view_with_stats(&variant, stats)?;
         } else {
             variants.push_view(&variant)?;
         }
@@ -1519,44 +1496,28 @@ fn read_haplotype_dense_records_with_metadata<R: std::io::BufRead>(
             TextCandidateAction::Stop => break,
             TextCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        if needs_genotype_decision {
-            // Genotype-stat filters are evaluated on diploid dosage before
-            // enforcing phased output. This lets filters drop unphased records
-            // without surfacing a haplotype decode error.
-            let stats_mode = if metadata_return.matrix_only() {
-                GtStatsMode::Counts
-            } else {
-                GtStatsMode::Compute
-            };
-            decode_gt_record(
-                path,
-                &record,
-                &source_indices,
-                stats_mode,
-                &mut stats_decoded,
-            )?;
-            let filter = variant_filter.ok_or_else(|| {
-                GenoioError::internal_contract("genotype decision requires a variant filter")
-            })?;
-            let (retain_variant, stats) = evaluate_text_gt_filter(
-                &stats_decoded,
-                filter,
-                &variant,
-                metadata_return.matrix_only(),
-                "haplotype",
-            )?;
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-            if let Some(stats) = stats {
-                variants.push_view_with_stats(&variant, stats)?;
-            } else {
-                variants.push_view(&variant)?;
-            }
+        // Genotype-stat filters are evaluated on diploid dosage before
+        // enforcing phased output. Rejected unphased records therefore do not
+        // surface a haplotype decode error.
+        let (variant, stats) = match process_text_gt_candidate(
+            path,
+            &record,
+            &source_indices,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            metadata_return.matrix_only(),
+            false,
+            "haplotype",
+            &mut stats_decoded,
+        )? {
+            DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+            DecodedTextCandidate::Skip => continue,
+            DecodedTextCandidate::Stop => break,
+        };
+        if let Some(stats) = stats {
+            variants.push_view_with_stats(&variant, stats)?;
         } else {
             variants.push_view(&variant)?;
         }
@@ -1622,8 +1583,107 @@ fn evaluate_text_gt_filter<V: VariantMetadataView + ?Sized>(
     Ok((filter.evaluate_view(variant, Some(&stats)), Some(stats)))
 }
 
+enum DecodedTextCandidate<'a> {
+    Include {
+        variant: TextVariantView<'a>,
+        stats: Option<VariantStats>,
+    },
+    Skip,
+    Stop,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared text-VCF transition receives borrowed record state plus reusable decode buffers"
+)]
+fn process_text_gt_candidate<'a>(
+    path: &Path,
+    record: &'a noodles::Record,
+    source_indices: &[usize],
+    prepared: PreparedTextCandidate<'a>,
+    variant_filter: Option<&VariantFilter>,
+    retention: &mut RetainedVariantState,
+    diagnostics: &mut DenseDiagnostics,
+    matrix_only: bool,
+    decode_when_unfiltered: bool,
+    context: &str,
+    decoded: &mut GtDecodeBuffers,
+) -> Result<DecodedTextCandidate<'a>> {
+    let variant = prepared.variant;
+    let needs_genotype_decision = prepared.needs_genotype_decision;
+    if !needs_genotype_decision && !decode_when_unfiltered {
+        return Ok(DecodedTextCandidate::Include {
+            variant,
+            stats: None,
+        });
+    }
+    let stats_mode = match (needs_genotype_decision, matrix_only) {
+        (true, true) => GtStatsMode::Counts,
+        (true, false) => GtStatsMode::Compute,
+        (false, _) => GtStatsMode::Skip,
+    };
+    decode_gt_record(path, record, source_indices, stats_mode, decoded)?;
+
+    let stats = if needs_genotype_decision {
+        let filter = variant_filter.ok_or_else(|| {
+            GenoioError::internal_contract("genotype decision requires a variant filter")
+        })?;
+        let (retain_variant, stats) =
+            evaluate_text_gt_filter(decoded, filter, &variant, matrix_only, context)?;
+        match retention.genotype_decision(retain_variant, diagnostics) {
+            RetentionAction::Include => stats,
+            RetentionAction::Skip => return Ok(DecodedTextCandidate::Skip),
+            RetentionAction::Stop => return Ok(DecodedTextCandidate::Stop),
+        }
+    } else {
+        None
+    };
+    Ok(DecodedTextCandidate::Include { variant, stats })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared text-VCF dosage transition receives borrowed record state plus reusable decode buffers"
+)]
+fn process_text_ds_candidate<'a>(
+    path: &Path,
+    record: &'a noodles::Record,
+    source_indices: &[usize],
+    prepared: PreparedTextCandidate<'a>,
+    variant_filter: Option<&VariantFilter>,
+    retention: &mut RetainedVariantState,
+    diagnostics: &mut DenseDiagnostics,
+    matrix_only: bool,
+    decoded: &mut DsDecodeBuffers,
+) -> Result<DecodedTextCandidate<'a>> {
+    let variant = prepared.variant;
+    decode_ds_record(path, record, source_indices, decoded)?;
+
+    let stats = if prepared.needs_genotype_decision {
+        let filter = variant_filter.ok_or_else(|| {
+            GenoioError::internal_contract("genotype decision requires a variant filter")
+        })?;
+        let (retain_variant, stats) = evaluate_dosage_filter(
+            decoded.values(),
+            decoded.missing_indices(),
+            filter,
+            &variant,
+            !matrix_only,
+        )?;
+        match retention.genotype_decision(retain_variant, diagnostics) {
+            RetentionAction::Include => stats,
+            RetentionAction::Skip => return Ok(DecodedTextCandidate::Skip),
+            RetentionAction::Stop => return Ok(DecodedTextCandidate::Stop),
+        }
+    } else {
+        None
+    };
+    Ok(DecodedTextCandidate::Include { variant, stats })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::path::Path;
 
     use super::*;
@@ -1631,5 +1691,52 @@ mod tests {
     #[test]
     fn dense_text_backend_accepts_metadata_reads() {
         assert!(ensure_text_vcf_supported(Path::new("example.vcf.gz"), None).is_ok());
+    }
+
+    #[test]
+    fn pbr_rust_textvcf_003_stateless_and_persistent_paths_share_gt_transition() {
+        let path = Path::new("fixture.vcf");
+        let mut reader =
+            noodles::io::Reader::new(Cursor::new(b"1\t42\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1\n"));
+        let mut record = noodles::Record::default();
+        reader
+            .read_record(&mut record)
+            .expect("text VCF record should parse");
+        let mut retention = RetainedVariantState::new(None);
+        let mut diagnostics = genoio_core::DenseDiagnostics::default();
+        let prepared = match prepare_text_candidate(
+            path,
+            &record,
+            None,
+            None,
+            &mut retention,
+            &mut diagnostics,
+        )
+        .expect("candidate preparation should succeed")
+        {
+            TextCandidateAction::Decode(prepared) => prepared,
+            TextCandidateAction::Skip | TextCandidateAction::Stop => {
+                panic!("unfiltered candidate should decode")
+            }
+        };
+        let mut decoded = GtDecodeBuffers::with_capacity(1);
+
+        let action = process_text_gt_candidate(
+            path,
+            &record,
+            &[0],
+            prepared,
+            None,
+            &mut retention,
+            &mut diagnostics,
+            false,
+            true,
+            "GT",
+            &mut decoded,
+        )
+        .expect("shared GT transition should decode");
+
+        assert!(matches!(action, DecodedTextCandidate::Include { .. }));
+        assert_eq!(decoded.values(), &[1.0]);
     }
 }

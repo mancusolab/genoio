@@ -8,8 +8,7 @@
 use std::path::Path;
 
 use genoio_core::{
-    attach_variant_stats, DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy,
-    DenseSampleSelection, GenoioError, GenotypeFilterPlan, PartialFilterDecision,
+    DenseGenotypeMatrix, DenseLayout, DenseMissingPolicy, DenseSampleSelection, GenoioError,
     SampleMetadataBuffers, VariantFilter, VariantMetadataBuffers, VariantRecord, VariantWindow,
 };
 
@@ -19,18 +18,17 @@ use crate::hardcall::{
     HardcallBatch as PackedVariantBatch,
 };
 use crate::matrix::shrink_sample_major_width;
-use crate::retention::{MetadataRetentionAction, RetainedVariantState, RetentionAction};
+use crate::retention::{RetainedVariantState, RetentionAction};
 
-use super::metadata::{parse_pvar_source_window, PvarRecordReader};
+use super::metadata::parse_pvar_source_window;
 use super::pgen::{
     open_pgen_payload, read_fixed_width_variant_packed_sequential, read_plink2_variant_packed,
     read_supported_pgen_header_prefix, seek_fixed_width_variant_record, PgenDecoderState,
     PgenHeader, PgenLayout,
 };
-use super::require_genotype_decision_filter;
 use super::source::{
-    empty_dense_output_for_samples, matrix_only_source_window_diagnostics, require_pvar,
-    select_samples_for_header, variant_output_capacity, Plink2ReadContext,
+    matrix_only_source_window_diagnostics, require_pvar, select_samples_for_header,
+    Plink2ReadContext,
 };
 
 /// Source-window row that may omit metadata for matrix-only reads.
@@ -112,153 +110,28 @@ pub fn read_plink2_dense_windowed(
         );
     }
 
-    let Plink2ReadContext {
-        header,
-        selection,
-        all_samples_selected,
-    } = Plink2ReadContext::new(pgen, psam, requested_samples)?;
-    let mut diagnostics = selection.diagnostics.clone();
-    if variant_filter.is_some_and(VariantFilter::is_always_false) {
-        require_pvar(pvar)?;
-        return empty_dense_output_for_samples(
-            selection.samples,
-            diagnostics,
+    let output = super::session::read_windowed(
+        pgen,
+        pvar,
+        psam,
+        crate::blocks::BlockReadOptions {
+            matrix_kind: crate::blocks::MatrixKind::Genotype,
+            sparse: false,
+            requested_samples: requested_samples.map(<[String]>::to_vec),
+            variant_filter: variant_filter.cloned(),
+            dosage_source: crate::blocks::DosageSource::Hardcall,
+            missing_policy,
             return_samples,
             return_variants,
-        );
-    }
-    let mut pvar_reader = PvarRecordReader::new(pvar)?;
-    let mut file = open_pgen_payload(pgen)?;
-    let mut decoder_state = PgenDecoderState::new(header.sample_ct, selection.samples.len());
-
-    let output_variant_capacity = variant_output_capacity(&header, variant_window);
-    let mut variants =
-        return_variants.then(|| VariantMetadataBuffers::with_capacity(output_variant_capacity));
-    let n_samples = selection.samples.len();
-    let mut values = vec![0.0; n_samples * output_variant_capacity];
-    let mut packed_batch = PackedVariantBatch::new(header.sample_ct);
-    let mut batch_start = 0_usize;
-    let mut variant_values = Vec::with_capacity(n_samples);
-    let mut missing_indices = Vec::new();
-    let mut retention = RetainedVariantState::new(variant_window);
-    let mut stopped_after_window = false;
-    let mut output_variant_count = 0_usize;
-    let genotype_filter_plan = variant_filter.map_or(
-        GenotypeFilterPlan::Generic,
-        VariantFilter::genotype_filter_plan,
-    );
-    let requires_sequential_decode = matches!(header.layout, PgenLayout::VariableWidth);
-    while let Some((variant_index, mut variant)) = pvar_reader.next_record()? {
-        let mut decoded_packed = false;
-        if requires_sequential_decode {
-            read_plink2_variant_packed(
-                pgen,
-                &mut file,
-                &header,
-                variant_index,
-                &mut decoder_state,
-            )?;
-            decoded_packed = true;
-        }
-        let partial_decision = variant_filter.map_or(PartialFilterDecision::Accept, |filter| {
-            filter.partial_decision(&variant)
-        });
-        match retention.metadata_decision(partial_decision, &mut diagnostics) {
-            MetadataRetentionAction::Include | MetadataRetentionAction::DecodeGenotypes => {}
-            MetadataRetentionAction::Skip => continue,
-            MetadataRetentionAction::Stop => {
-                stopped_after_window = true;
-                break;
-            }
-        }
-
-        let needs_genotype_decision =
-            matches!(partial_decision, PartialFilterDecision::NeedGenotypes);
-
-        if !decoded_packed {
-            read_plink2_variant_packed(
-                pgen,
-                &mut file,
-                &header,
-                variant_index,
-                &mut decoder_state,
-            )?;
-        }
-        let mut stats = None;
-        if needs_genotype_decision {
-            let filter = require_genotype_decision_filter(variant_filter)?;
-            let (retain_variant, computed_stats) = evaluate_packed_hardcall_filter(
-                &decoder_state.packed,
-                &selection.source_indices,
-                all_samples_selected,
-                filter,
-                genotype_filter_plan,
-                Some(&variant),
-                return_variants,
-            )?;
-            stats = computed_stats;
-            match retention.genotype_decision(retain_variant, &mut diagnostics) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => {
-                    stopped_after_window = true;
-                    break;
-                }
-            }
-        }
-        if let Some(stats) = stats {
-            attach_variant_stats(&mut variant, stats);
-        }
-        if let Some(variants) = variants.as_mut() {
-            variants.push_record(&variant)?;
-        }
-        packed_batch.push(&decoder_state.packed);
-        output_variant_count += 1;
-        if packed_batch.is_full() {
-            flush_hardcall_batch_into_sample_major(
-                &mut packed_batch,
-                &selection.source_indices,
-                &mut batch_start,
-                output_variant_capacity,
-                &mut values,
-                missing_policy,
-                &mut variant_values,
-                &mut missing_indices,
-            )?;
-        }
-        if retention.window_is_satisfied() {
-            stopped_after_window = true;
-            break;
-        }
-    }
-    if !stopped_after_window {
-        pvar_reader.validate_count(header.variant_ct)?;
-    }
-    flush_hardcall_batch_into_sample_major(
-        &mut packed_batch,
-        &selection.source_indices,
-        &mut batch_start,
-        output_variant_capacity,
-        &mut values,
-        missing_policy,
-        &mut variant_values,
-        &mut missing_indices,
+        },
+        variant_window,
     )?;
-
-    let n_variants = output_variant_count;
-    shrink_sample_major_width(&mut values, n_samples, output_variant_capacity, n_variants);
-    diagnostics.retained_variants = n_variants;
-    let samples =
-        SampleMetadataBuffers::optional_from_records(&selection.samples, return_samples, false)?;
-    DenseGenotypeMatrix::new_with_layout(
-        n_samples,
-        n_variants,
-        values,
-        DenseLayout::SampleMajor,
-        samples,
-        variants,
-        diagnostics,
-    )
+    let crate::blocks::BlockOutput::Dense(output) = output else {
+        return Err(GenoioError::internal_contract(
+            "PLINK2 dense hardcall session returned sparse output",
+        ));
+    };
+    Ok(output)
 }
 
 fn read_plink2_dense_matrix_only_source_window(

@@ -7,7 +7,7 @@
 //! advance one shared LD decoder state across block boundaries.
 
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use genoio_core::{
     append_sparse_column, attach_variant_stats, flip_values_to_minor_allele, reject_sparse_missing,
@@ -41,8 +41,41 @@ use super::pgen::{
     read_supported_pgen_header_from_file, validate_plink2_sample_count, PgenDecoderState,
     PgenHaplotypeDecodeState, PgenHeader, PgenLayout,
 };
-use super::source::expand_selected_samples_to_haplotypes;
+use super::source::{
+    empty_dense_output_for_samples, empty_sparse_output_for_samples,
+    expand_selected_samples_to_haplotypes,
+};
 use super::{evaluate_dosage_filter, require_genotype_decision_filter};
+
+pub(super) fn read_windowed(
+    pgen: &Path,
+    pvar: &Path,
+    psam: &Path,
+    options: BlockReadOptions,
+    variant_window: Option<VariantWindow>,
+) -> Result<BlockOutput> {
+    let retained_skip = variant_window.map_or(0, |window| {
+        if window.len == 0 {
+            window.start.max(1)
+        } else {
+            window.start
+        }
+    });
+    let mut session = Plink2BlockSession::open_windowed(
+        pgen.to_path_buf(),
+        pvar.to_path_buf(),
+        psam.to_path_buf(),
+        options,
+        retained_skip,
+    )?;
+    let block_size = variant_window.map_or(session.header.variant_ct, |window| {
+        window.len.min(session.header.variant_ct)
+    });
+    match session.next_block(block_size)? {
+        Some(output) => Ok(output),
+        None => session.empty_output(),
+    }
+}
 
 /// Persistent PLINK2 hard-call state over one PGEN/PVAR/PSAM source set.
 pub(crate) struct Plink2BlockSession {
@@ -53,6 +86,7 @@ pub(crate) struct Plink2BlockSession {
     header: PgenHeader,
     selection: DenseSampleSelection,
     source_position: usize,
+    retained_skip: usize,
     diagnostics: DenseDiagnostics,
     variant_filter: Option<VariantFilter>,
     genotype_filter_plan: GenotypeFilterPlan,
@@ -83,11 +117,28 @@ impl Plink2BlockSession {
     ) -> Result<Self> {
         #[cfg(test)]
         {
-            Self::open_impl(pgen, pvar, psam, options, None)
+            Self::open_impl(pgen, pvar, psam, options, 0, None)
         }
         #[cfg(not(test))]
         {
-            Self::open_impl(pgen, pvar, psam, options)
+            Self::open_impl(pgen, pvar, psam, options, 0)
+        }
+    }
+
+    fn open_windowed(
+        pgen: PathBuf,
+        pvar: PathBuf,
+        psam: PathBuf,
+        options: BlockReadOptions,
+        retained_skip: usize,
+    ) -> Result<Self> {
+        #[cfg(test)]
+        {
+            Self::open_impl(pgen, pvar, psam, options, retained_skip, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::open_impl(pgen, pvar, psam, options, retained_skip)
         }
     }
 
@@ -96,6 +147,7 @@ impl Plink2BlockSession {
         pvar: PathBuf,
         psam: PathBuf,
         options: BlockReadOptions,
+        retained_skip: usize,
         #[cfg(test)] probe: Option<Plink2WorkProbe>,
     ) -> Result<Self> {
         validate_plink2_options(&options)?;
@@ -154,6 +206,7 @@ impl Plink2BlockSession {
             header,
             selection,
             source_position: 0,
+            retained_skip,
             diagnostics,
             variant_filter: options.variant_filter,
             genotype_filter_plan,
@@ -184,7 +237,7 @@ impl Plink2BlockSession {
         options: BlockReadOptions,
         probe: Plink2WorkProbe,
     ) -> Result<Self> {
-        Self::open_impl(pgen, pvar, psam, options, Some(probe))
+        Self::open_impl(pgen, pvar, psam, options, 0, Some(probe))
     }
 
     pub(crate) fn next_block(&mut self, block_size: usize) -> Result<Option<BlockOutput>> {
@@ -221,7 +274,7 @@ impl Plink2BlockSession {
     }
 
     fn next_dense_block(&mut self, block_size: usize) -> Result<Option<DenseGenotypeMatrix>> {
-        if self.eof || block_size == 0 {
+        if self.eof {
             return Ok(None);
         }
 
@@ -235,7 +288,7 @@ impl Plink2BlockSession {
         self.batch.clear();
         let mut batch_start = 0_usize;
         let mut retention = RetainedVariantState::new(Some(VariantWindow {
-            start: 0,
+            start: std::mem::take(&mut self.retained_skip),
             len: block_size,
         }));
         let mut output_variant_count = 0_usize;
@@ -336,7 +389,7 @@ impl Plink2BlockSession {
     }
 
     fn next_sparse_block(&mut self, block_size: usize) -> Result<Option<SparseGenotypeMatrix>> {
-        if self.eof || block_size == 0 {
+        if self.eof {
             return Ok(None);
         }
 
@@ -350,7 +403,7 @@ impl Plink2BlockSession {
             .return_variants
             .then(|| VariantMetadataBuffers::with_capacity(block_size));
         let mut retention = RetainedVariantState::new(Some(VariantWindow {
-            start: 0,
+            start: std::mem::take(&mut self.retained_skip),
             len: block_size,
         }));
         let mut output_variant_count = 0_usize;
@@ -444,7 +497,7 @@ impl Plink2BlockSession {
         &mut self,
         block_size: usize,
     ) -> Result<Option<DenseGenotypeMatrix>> {
-        if self.eof || block_size == 0 {
+        if self.eof {
             return Ok(None);
         }
 
@@ -459,7 +512,7 @@ impl Plink2BlockSession {
             .return_variants
             .then(|| VariantMetadataBuffers::with_capacity(block_size));
         let mut retention = RetainedVariantState::new(Some(VariantWindow {
-            start: 0,
+            start: std::mem::take(&mut self.retained_skip),
             len: block_size,
         }));
         let mut output_variant_count = 0_usize;
@@ -559,7 +612,7 @@ impl Plink2BlockSession {
         &mut self,
         block_size: usize,
     ) -> Result<Option<SparseGenotypeMatrix>> {
-        if self.eof || block_size == 0 {
+        if self.eof {
             return Ok(None);
         }
 
@@ -577,7 +630,7 @@ impl Plink2BlockSession {
             .return_variants
             .then(|| VariantMetadataBuffers::with_capacity(block_size));
         let mut retention = RetainedVariantState::new(Some(VariantWindow {
-            start: 0,
+            start: std::mem::take(&mut self.retained_skip),
             len: block_size,
         }));
         let mut output_variant_count = 0_usize;
@@ -717,7 +770,7 @@ impl Plink2BlockSession {
         block_size: usize,
         haplotype: bool,
     ) -> Result<Option<DenseGenotypeMatrix>> {
-        if self.eof || block_size == 0 {
+        if self.eof {
             return Ok(None);
         }
 
@@ -735,7 +788,7 @@ impl Plink2BlockSession {
             .return_variants
             .then(|| VariantMetadataBuffers::with_capacity(block_size));
         let mut retention = RetainedVariantState::new(Some(VariantWindow {
-            start: 0,
+            start: std::mem::take(&mut self.retained_skip),
             len: block_size,
         }));
         let mut output_variant_count = 0_usize;
@@ -906,6 +959,30 @@ impl Plink2BlockSession {
             diagnostics,
         )
         .map(Some)
+    }
+
+    fn empty_output(&self) -> Result<BlockOutput> {
+        let samples = if self.matrix_kind == MatrixKind::Haplotype {
+            expand_selected_samples_to_haplotypes(&self.selection)
+        } else {
+            self.selection.samples.clone()
+        };
+        if self.sparse {
+            return empty_sparse_output_for_samples(
+                samples,
+                self.diagnostics.clone(),
+                self.return_samples,
+                self.return_variants,
+            )
+            .map(BlockOutput::Sparse);
+        }
+        empty_dense_output_for_samples(
+            samples,
+            self.diagnostics.clone(),
+            self.return_samples,
+            self.return_variants,
+        )
+        .map(BlockOutput::Dense)
     }
 
     fn next_source_variant(&mut self) -> Result<Option<(usize, VariantRecord)>> {
@@ -1115,12 +1192,12 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::path::{Path, PathBuf};
 
-    use genoio_core::{DenseMissingPolicy, VariantFilter};
+    use genoio_core::{DenseMissingPolicy, VariantFilter, VariantWindow};
     use serde_json::json;
 
     use crate::blocks::{BlockReadOptions, DosageSource, MatrixKind};
 
-    use super::{Plink2BlockSession, Plink2WorkProbe};
+    use super::{read_windowed, Plink2BlockSession, Plink2WorkProbe};
 
     fn write_text(path: &Path, contents: &str) {
         fs::write(path, contents).expect("test fixture should be written");
@@ -1214,6 +1291,127 @@ mod tests {
             "params": {"value": chrom}
         }))
         .expect("chromosome filter should parse")
+    }
+
+    #[test]
+    fn pbr_rust_plink2_005_stateless_window_uses_shared_session_transition_loop() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_fixed_fixture(dir.path(), &[0x04, 0x08, 0x00]);
+
+        let output = read_windowed(
+            &pgen,
+            &pvar,
+            &psam,
+            options(None),
+            Some(VariantWindow { start: 1, len: 1 }),
+        )
+        .expect("shared stateless PLINK2 window should decode");
+
+        let crate::blocks::BlockOutput::Dense(output) = output else {
+            panic!("hardcall genotype window should be dense");
+        };
+        assert_eq!(output.n_variants, 1);
+        assert_eq!(
+            output
+                .variants
+                .expect("variant metadata should be returned")
+                .positions,
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn pbr_rust_plink2_006_stateless_window_caps_allocation_to_source_variant_count() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_fixed_fixture(dir.path(), &[0x04, 0x08, 0x00]);
+
+        let output = read_windowed(
+            &pgen,
+            &pvar,
+            &psam,
+            options(None),
+            Some(VariantWindow {
+                start: 0,
+                len: usize::MAX,
+            }),
+        )
+        .expect("oversized stateless window should be bounded by the PGEN variant count");
+
+        let crate::blocks::BlockOutput::Dense(output) = output else {
+            panic!("hardcall genotype window should be dense");
+        };
+        assert_eq!(output.n_variants, 3);
+        assert_eq!(output.values.len(), 6);
+        assert_eq!(output.values.capacity(), 6);
+    }
+
+    #[test]
+    fn pbr_rust_plink2_006_zero_length_window_validates_malformed_retained_prefix() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_variable_fixture(
+            dir.path(),
+            &[0, 4, 2],
+            &[&[0x04], &[1], &[0]],
+            "#CHROM POS ID REF ALT\n1 1 rs1 A G\n1 2 bad A G\n1 3 rs3 A G\n",
+        );
+
+        let error = read_windowed(
+            &pgen,
+            &pvar,
+            &psam,
+            options(Some(chrom_filter("1"))),
+            Some(VariantWindow { start: 2, len: 0 }),
+        )
+        .expect_err("zero-length stateless window should validate its retained prefix");
+
+        assert!(matches!(
+            error,
+            genoio_core::GenoioError::UnsupportedRepresentation { .. }
+                | genoio_core::GenoioError::InvalidSource { .. }
+        ));
+    }
+
+    #[test]
+    fn pbr_rust_plink2_006_zero_length_window_validates_first_source_record() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_variable_fixture(
+            dir.path(),
+            &[4],
+            &[&[1]],
+            "#CHROM POS ID REF ALT\n1 1 bad A G\n",
+        );
+
+        let error = read_windowed(
+            &pgen,
+            &pvar,
+            &psam,
+            options(Some(chrom_filter("1"))),
+            Some(VariantWindow { start: 0, len: 0 }),
+        )
+        .expect_err("zero-length stateless window should validate its first source record");
+
+        assert!(matches!(
+            error,
+            genoio_core::GenoioError::UnsupportedRepresentation { .. }
+                | genoio_core::GenoioError::InvalidSource { .. }
+        ));
+    }
+
+    #[test]
+    fn pbr_rust_plink2_006_zero_variant_pgen_rejects_excess_pvar_rows() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let (pgen, pvar, psam) = write_fixed_fixture(dir.path(), &[]);
+        write_text(&pvar, "#CHROM POS ID REF ALT\n1 1 extra A G\n");
+
+        let error = read_windowed(&pgen, &pvar, &psam, options(None), None)
+            .expect_err("zero-variant PGEN should reject excess PVAR metadata");
+
+        assert!(
+            error
+                .to_string()
+                .contains("pvar variant count exceeds pgen variant count"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

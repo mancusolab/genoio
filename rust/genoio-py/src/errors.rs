@@ -63,9 +63,14 @@ fn panic_message(payload: &(dyn PanicPayload + Send)) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use genoio_core::GenoioError;
     use pyo3::Python;
 
-    use super::{catch_internal_panic, RustInternalError};
+    use super::{catch_internal_panic, run_without_gil, RustInternalError};
 
     #[test]
     fn pbr_rust_panic_001_catch_internal_panic_maps_to_rust_internal_error() {
@@ -76,5 +81,34 @@ mod tests {
             assert!(error.is_instance_of::<RustInternalError>(py));
             assert!(error.to_string().contains("intentional boundary panic"));
         });
+    }
+
+    #[test]
+    fn pbr_gil_001_run_without_gil_allows_another_python_thread_to_attach() {
+        let (result, worker) = Python::attach(|py| {
+            let (attached_tx, attached_rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                Python::attach(|_| {
+                    let _ = attached_tx.send(());
+                });
+            });
+
+            let result = run_without_gil(py, move || {
+                attached_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|_| {
+                        GenoioError::internal_contract(
+                            "another Python thread could not attach while Rust was waiting",
+                        )
+                    })?;
+                Ok(())
+            });
+            (result, worker)
+        });
+
+        worker
+            .join()
+            .expect("Python attachment worker should not panic");
+        result.expect("run_without_gil should release the GIL while Rust is waiting");
     }
 }

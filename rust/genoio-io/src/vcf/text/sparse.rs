@@ -19,16 +19,16 @@ use genoio_core::{
 use noodles_vcf as noodles;
 
 use crate::error::Result;
-use crate::retention::{RetainedVariantState, RetentionAction};
+use crate::retention::RetainedVariantState;
 
 use super::super::haplotype_sample_records;
 use super::gt::{
-    decode_gt_record, decode_phased_gt_sparse_record, GtDecodeBuffers, GtStatsMode,
-    HaplotypeSparseDecodeBuffers,
+    decode_phased_gt_sparse_record, GtDecodeBuffers, GtStatsMode, HaplotypeSparseDecodeBuffers,
 };
 use super::record::{prepare_text_candidate, TextCandidateAction};
 use super::{
-    dense_output_variant_capacity, VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn,
+    dense_output_variant_capacity, process_text_gt_candidate, DecodedTextCandidate,
+    VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn,
 };
 
 #[expect(
@@ -84,32 +84,26 @@ pub(super) fn read_sparse_records_with_metadata<R: BufRead>(
             TextCandidateAction::Stop => break,
             TextCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
         // Decode into reusable dense scratch first. CSC output still needs the
         // dense column briefly for missing-value rejection and minor-allele
         // flipping to preserve the public sparse contract.
-        decode_gt_record(
+        let (variant, stats_to_attach) = match process_text_gt_candidate(
             path,
             &record,
             &source_indices,
-            GtStatsMode::from_needed(needs_genotype_decision),
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            false,
+            true,
+            "GT",
             &mut decoded,
-        )?;
-
-        let mut stats_to_attach = None;
-        if needs_genotype_decision {
-            let stats = decoded.stats();
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-            stats_to_attach = stats;
-        }
+        )? {
+            DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+            DecodedTextCandidate::Skip => continue,
+            DecodedTextCandidate::Stop => break,
+        };
 
         reject_sparse_missing(!decoded.missing_indices().is_empty())?;
         // Genotype sparse columns store minor-allele dosage by convention.
@@ -198,30 +192,25 @@ pub(super) fn read_haplotype_sparse_records_with_metadata<R: BufRead>(
             TextCandidateAction::Stop => break,
             TextCandidateAction::Decode(prepared) => prepared,
         };
-        let variant = prepared.variant;
-        let needs_genotype_decision = prepared.needs_genotype_decision;
-        let mut stats_to_attach = None;
-        if needs_genotype_decision {
-            // Apply genotype-stat filters before phased decoding so rejected
-            // unphased records do not fail a haplotype sparse read.
-            decode_gt_record(
-                path,
-                &record,
-                &source_indices,
-                GtStatsMode::Compute,
-                &mut stats_decoded,
-            )?;
-            let stats = stats_decoded.stats();
-            match retention.genotype_decision(
-                variant_filter.is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref())),
-                &mut diagnostics,
-            ) {
-                RetentionAction::Include => {}
-                RetentionAction::Skip => continue,
-                RetentionAction::Stop => break,
-            }
-            stats_to_attach = stats;
-        }
+        // Apply genotype-stat filters before phased decoding so rejected
+        // unphased records do not fail a haplotype sparse read.
+        let (variant, stats_to_attach) = match process_text_gt_candidate(
+            path,
+            &record,
+            &source_indices,
+            prepared,
+            variant_filter,
+            &mut retention,
+            &mut diagnostics,
+            false,
+            false,
+            "haplotype",
+            &mut stats_decoded,
+        )? {
+            DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+            DecodedTextCandidate::Skip => continue,
+            DecodedTextCandidate::Stop => break,
+        };
 
         decode_phased_gt_sparse_record(
             path,

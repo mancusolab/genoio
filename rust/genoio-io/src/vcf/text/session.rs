@@ -16,14 +16,13 @@ use crate::blocks::{
     block_diagnostics_snapshot, checked_dense_block_len, checked_sparse_indptr_len, BlockOutput,
     BlockReadOptions, DosageSource, MatrixKind,
 };
-use crate::dosage_filter::evaluate_dosage_filter;
 use crate::error::Result;
-use crate::retention::{RetainedVariantState, RetentionAction};
+use crate::retention::RetainedVariantState;
 
-use super::ds::{decode_ds_record, DsDecodeBuffers};
+use super::ds::DsDecodeBuffers;
 use super::gt::{
-    decode_gt_record, decode_phased_gt_dense_record, decode_phased_gt_sparse_record,
-    GtDecodeBuffers, GtStatsMode, HaplotypeDenseDecodeBuffers, HaplotypeSparseDecodeBuffers,
+    decode_phased_gt_dense_record, decode_phased_gt_sparse_record, GtDecodeBuffers, GtStatsMode,
+    HaplotypeDenseDecodeBuffers, HaplotypeSparseDecodeBuffers,
 };
 use super::record::{prepare_text_candidate, TextCandidateAction};
 #[cfg(not(test))]
@@ -36,8 +35,9 @@ use super::source::{
 use super::source::{IndexChunk, TextVcfInput, TextVcfSource};
 use super::sparse::{append_haplotype_minor_sparse_column, flip_values_to_minor_allele};
 use super::{
-    evaluate_text_gt_filter, haplotype_sample_records, write_dense_text_variant, TextDenseOutput,
-    VariantMetadataSink, VariantMetadataSinkKind, VcfMetadataReturn,
+    haplotype_sample_records, process_text_ds_candidate, process_text_gt_candidate,
+    write_dense_text_variant, DecodedTextCandidate, TextDenseOutput, VariantMetadataSink,
+    VariantMetadataSinkKind, VcfMetadataReturn,
 };
 use crate::vcf::is_compressed_vcf;
 use crate::vcf::policy::{has_vcf_index, reject_unindexed_compressed_region};
@@ -420,43 +420,27 @@ impl<R: BufRead> SequentialTextVcfSession<R> {
                 TextCandidateAction::Stop => break,
                 TextCandidateAction::Decode(prepared) => prepared,
             };
-            let variant = prepared.variant;
-            let needs_genotype_decision = prepared.needs_genotype_decision;
-            let stats_mode = match (needs_genotype_decision, metadata_return.matrix_only()) {
-                (true, true) => GtStatsMode::Counts,
-                (true, false) => GtStatsMode::Compute,
-                (false, _) => GtStatsMode::Skip,
-            };
-            decode_gt_record(
+            let action = process_text_gt_candidate(
                 &self.path,
                 &self.record,
                 &self.selection.source_indices,
-                stats_mode,
+                prepared,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+                metadata_return.matrix_only(),
+                true,
+                "GT",
                 &mut self.gt_decoded,
             )?;
             self.record_gt_decode();
-
-            if needs_genotype_decision {
-                let filter = self.variant_filter.as_ref().ok_or_else(|| {
-                    GenoioError::internal_contract("genotype decision requires a variant filter")
-                })?;
-                let (retain_variant, stats) = evaluate_text_gt_filter(
-                    &self.gt_decoded,
-                    filter,
-                    &variant,
-                    metadata_return.matrix_only(),
-                    "GT",
-                )?;
-                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => continue,
-                    RetentionAction::Stop => break,
-                }
-                if let Some(stats) = stats {
-                    variants.push_view_with_stats(&variant, stats)?;
-                } else {
-                    variants.push_view(&variant)?;
-                }
+            let (variant, stats) = match action {
+                DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+                DecodedTextCandidate::Skip => continue,
+                DecodedTextCandidate::Stop => break,
+            };
+            if let Some(stats) = stats {
+                variants.push_view_with_stats(&variant, stats)?;
             } else {
                 variants.push_view(&variant)?;
             }
@@ -507,37 +491,25 @@ impl<R: BufRead> SequentialTextVcfSession<R> {
                 TextCandidateAction::Stop => break,
                 TextCandidateAction::Decode(prepared) => prepared,
             };
-            let variant = prepared.variant;
-
-            decode_ds_record(
+            let action = process_text_ds_candidate(
                 &self.path,
                 &self.record,
                 &self.selection.source_indices,
+                prepared,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+                metadata_return.matrix_only(),
                 &mut self.ds_decoded,
             )?;
             self.record_ds_decode();
-            let needs_genotype_decision = prepared.needs_genotype_decision;
-            if needs_genotype_decision {
-                let filter = self.variant_filter.as_ref().ok_or_else(|| {
-                    GenoioError::internal_contract("genotype decision requires a variant filter")
-                })?;
-                let (retain_variant, stats) = evaluate_dosage_filter(
-                    self.ds_decoded.values(),
-                    self.ds_decoded.missing_indices(),
-                    filter,
-                    &variant,
-                    !metadata_return.matrix_only(),
-                )?;
-                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => continue,
-                    RetentionAction::Stop => break,
-                }
-                if let Some(stats) = stats {
-                    variants.push_view_with_stats(&variant, stats)?;
-                } else {
-                    variants.push_view(&variant)?;
-                }
+            let (variant, stats) = match action {
+                DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+                DecodedTextCandidate::Skip => continue,
+                DecodedTextCandidate::Stop => break,
+            };
+            if let Some(stats) = stats {
+                variants.push_view_with_stats(&variant, stats)?;
             } else {
                 variants.push_view(&variant)?;
             }
@@ -590,30 +562,25 @@ impl<R: BufRead> SequentialTextVcfSession<R> {
                 TextCandidateAction::Stop => break,
                 TextCandidateAction::Decode(prepared) => prepared,
             };
-            let variant = prepared.variant;
-            let needs_genotype_decision = prepared.needs_genotype_decision;
-            decode_gt_record(
+            let action = process_text_gt_candidate(
                 &self.path,
                 &self.record,
                 &self.selection.source_indices,
-                GtStatsMode::from_needed(needs_genotype_decision),
+                prepared,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+                false,
+                true,
+                "GT",
                 &mut self.gt_decoded,
             )?;
             self.record_gt_decode();
-            let mut stats_to_attach = None;
-            if needs_genotype_decision {
-                let stats = self.gt_decoded.stats();
-                let retain_variant = self
-                    .variant_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref()));
-                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => continue,
-                    RetentionAction::Stop => break,
-                }
-                stats_to_attach = stats;
-            }
+            let (variant, stats_to_attach) = match action {
+                DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+                DecodedTextCandidate::Skip => continue,
+                DecodedTextCandidate::Stop => break,
+            };
 
             reject_sparse_missing(!self.gt_decoded.missing_indices().is_empty())?;
             let flipped = flip_values_to_minor_allele(self.gt_decoded.values_mut());
@@ -669,42 +636,30 @@ impl<R: BufRead> SequentialTextVcfSession<R> {
                 TextCandidateAction::Stop => break,
                 TextCandidateAction::Decode(prepared) => prepared,
             };
-            let variant = prepared.variant;
             let needs_genotype_decision = prepared.needs_genotype_decision;
+            let action = process_text_gt_candidate(
+                &self.path,
+                &self.record,
+                &self.selection.source_indices,
+                prepared,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+                metadata_return.matrix_only(),
+                false,
+                "haplotype",
+                &mut self.gt_decoded,
+            )?;
             if needs_genotype_decision {
-                let stats_mode = if metadata_return.matrix_only() {
-                    GtStatsMode::Counts
-                } else {
-                    GtStatsMode::Compute
-                };
-                decode_gt_record(
-                    &self.path,
-                    &self.record,
-                    &self.selection.source_indices,
-                    stats_mode,
-                    &mut self.gt_decoded,
-                )?;
                 self.record_gt_decode();
-                let filter = self.variant_filter.as_ref().ok_or_else(|| {
-                    GenoioError::internal_contract("genotype decision requires a variant filter")
-                })?;
-                let (retain_variant, stats) = evaluate_text_gt_filter(
-                    &self.gt_decoded,
-                    filter,
-                    &variant,
-                    metadata_return.matrix_only(),
-                    "haplotype",
-                )?;
-                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => continue,
-                    RetentionAction::Stop => break,
-                }
-                if let Some(stats) = stats {
-                    variants.push_view_with_stats(&variant, stats)?;
-                } else {
-                    variants.push_view(&variant)?;
-                }
+            }
+            let (variant, stats) = match action {
+                DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+                DecodedTextCandidate::Skip => continue,
+                DecodedTextCandidate::Stop => break,
+            };
+            if let Some(stats) = stats {
+                variants.push_view_with_stats(&variant, stats)?;
             } else {
                 variants.push_view(&variant)?;
             }
@@ -765,30 +720,28 @@ impl<R: BufRead> SequentialTextVcfSession<R> {
                 TextCandidateAction::Stop => break,
                 TextCandidateAction::Decode(prepared) => prepared,
             };
-            let variant = prepared.variant;
             let needs_genotype_decision = prepared.needs_genotype_decision;
-            let mut stats_to_attach = None;
+            let action = process_text_gt_candidate(
+                &self.path,
+                &self.record,
+                &self.selection.source_indices,
+                prepared,
+                self.variant_filter.as_ref(),
+                &mut retention,
+                &mut self.diagnostics,
+                false,
+                false,
+                "haplotype",
+                &mut self.gt_decoded,
+            )?;
             if needs_genotype_decision {
-                decode_gt_record(
-                    &self.path,
-                    &self.record,
-                    &self.selection.source_indices,
-                    GtStatsMode::Compute,
-                    &mut self.gt_decoded,
-                )?;
                 self.record_gt_decode();
-                let stats = self.gt_decoded.stats();
-                let retain_variant = self
-                    .variant_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter.evaluate_view(&variant, stats.as_ref()));
-                match retention.genotype_decision(retain_variant, &mut self.diagnostics) {
-                    RetentionAction::Include => {}
-                    RetentionAction::Skip => continue,
-                    RetentionAction::Stop => break,
-                }
-                stats_to_attach = stats;
             }
+            let (variant, stats_to_attach) = match action {
+                DecodedTextCandidate::Include { variant, stats } => (variant, stats),
+                DecodedTextCandidate::Skip => continue,
+                DecodedTextCandidate::Stop => break,
+            };
 
             decode_phased_gt_sparse_record(
                 &self.path,

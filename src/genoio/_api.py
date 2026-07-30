@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping
+import sys
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast, overload
@@ -376,7 +377,7 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Iterator[SparseMatrixResult]: ...
+    ) -> Generator[SparseMatrixResult, None, None]: ...
 
     @overload
     def iter_blocks(
@@ -387,7 +388,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]]: ...
+    ) -> Generator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame], None, None]: ...
 
     @overload
     def iter_blocks(
@@ -398,7 +399,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
+    ) -> Generator[tuple[SparseMatrixResult, pl.DataFrame], None, None]: ...
 
     @overload
     def iter_blocks(
@@ -409,7 +410,7 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
+    ) -> Generator[tuple[SparseMatrixResult, pl.DataFrame], None, None]: ...
 
     @overload
     def iter_blocks(
@@ -419,7 +420,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame]]: ...
+    ) -> Generator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame], None, None]: ...
 
     @overload
     def iter_blocks(
@@ -429,7 +430,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Iterator[tuple[np.ndarray, pl.DataFrame]]: ...
+    ) -> Generator[tuple[np.ndarray, pl.DataFrame], None, None]: ...
 
     @overload
     def iter_blocks(
@@ -439,12 +440,20 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Iterator[tuple[np.ndarray, pl.DataFrame]]: ...
+    ) -> Generator[tuple[np.ndarray, pl.DataFrame], None, None]: ...
 
     @overload
-    def iter_blocks(self, size: int, **read_options: object) -> Iterator[np.ndarray]: ...
+    def iter_blocks(
+        self,
+        size: int,
+        **read_options: object,
+    ) -> Generator[np.ndarray, None, None]: ...
 
-    def iter_blocks(self, size: int, **read_options: object) -> Iterator[ReadResult]:
+    def iter_blocks(
+        self,
+        size: int,
+        **read_options: object,
+    ) -> Generator[ReadResult, None, None]:
         r"""Yield consecutive variant blocks from this dataset.
 
         Each yielded block has at most `size` variants and follows the same
@@ -454,6 +463,19 @@ class Dataset:
         same-path `.bgen.bgi` index when present. Haplotype blocks follow the
         same source-encoded representation rules as [`genoio.Dataset.read`][].
 
+        Source opening and record decoding are lazy: source and record errors
+        can be raised when the generator is first advanced or between yielded
+        blocks. Exhaustion, read failure, and `generator.close()` close the
+        native reader deterministically. When stopping before exhaustion, use
+        `contextlib.closing` or call `close()` explicitly:
+
+        ```python
+        from contextlib import closing
+
+        with closing(dataset.iter_blocks(10_000)) as blocks:
+            first_block = next(blocks)
+        ```
+
         **Arguments:**
 
         - `size`: maximum number of variants per yielded block.
@@ -461,7 +483,14 @@ class Dataset:
 
         **Returns:**
 
-        Iterator yielding matrices or matrix/metadata tuples.
+        Closeable generator yielding matrices or matrix/metadata tuples.
+
+        **Raises:**
+
+        - `genoio.InvalidOptionError`: if `size` or a read option is invalid.
+        - `genoio.InvalidSourceError`: if lazy source opening or decoding fails.
+        - `genoio.MissingDataError`: if a yielded block violates the requested
+          missing-data policy.
         """
         _validate_block_size(size)
         normalized_options = _read_options_with_defaults(read_options)
@@ -609,7 +638,7 @@ class Dataset:
         validated_options: _ValidatedReadOptions,
         members: dict[str, str],
         options: dict[str, Any],
-    ) -> Iterator[ReadResult]:
+    ) -> Generator[ReadResult, None, None]:
         native = _call_native(
             _rust._BlockReader,
             self.source.format.value,
@@ -887,3 +916,5 @@ def _public_read_error(error: ValueError) -> Exception:
 def _validate_block_size(size: int) -> None:
     if not isinstance(size, int) or isinstance(size, bool) or size < 1:
         raise InvalidOptionError("block size must be a positive integer")
+    if size > sys.maxsize:
+        raise InvalidOptionError(f"block size exceeds this platform's limit of {sys.maxsize}")

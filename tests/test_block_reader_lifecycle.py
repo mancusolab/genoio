@@ -410,7 +410,7 @@ def test_pbr_py_error_001_explicit_close_failure_maps_and_propagates(
     next(iterator)
 
     with pytest.raises(genoio.InvalidSourceError, match="close failed"):
-        cast(Any, iterator).close()
+        iterator.close()
 
     assert reader.close_calls == 1
 
@@ -482,7 +482,7 @@ def test_pbr_py_lifecycle_001_public_iterator_closes_reader_once(
         assert list(iterator) == []
     elif exit_path == "explicit-close":
         next(iterator)
-        cast(Any, iterator).close()
+        iterator.close()
     elif exit_path == "read-error":
         with pytest.raises(genoio.MissingDataError, match="read failed"):
             next(iterator)
