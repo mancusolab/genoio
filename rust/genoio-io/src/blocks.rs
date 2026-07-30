@@ -308,17 +308,6 @@ impl BlockOutput {
             Self::Sparse(matrix) => matrix.n_cols,
         }
     }
-
-    #[expect(
-        dead_code,
-        reason = "used by concrete block sessions introduced in later phases"
-    )]
-    pub(crate) fn diagnostics_mut(&mut self) -> &mut DenseDiagnostics {
-        match self {
-            Self::Dense(matrix) => &mut matrix.diagnostics,
-            Self::Sparse(matrix) => &mut matrix.diagnostics,
-        }
-    }
 }
 
 fn validate_block_output(output: Option<&BlockOutput>, block_size: usize) -> Result<()> {
