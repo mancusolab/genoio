@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast, overload
@@ -42,6 +42,7 @@ from ._read_options import (
 from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile, resolve_vcf
 
 _Region = TypeVar("_Region")
+_NativeResult = TypeVar("_NativeResult")
 _RUST_ERROR_MAP = (
     (_rust.RustInternalError, InternalError),
     (_rust.RustSampleFilterError, SampleFilterError),
@@ -470,7 +471,18 @@ class Dataset:
             normalized_options.dosage,
             validated_options.sparse_format,
         )
-        return self._block_iterator(size, normalized_options, validated_options)
+        members, options = self._native_read_arguments(
+            read_options=normalized_options,
+            validated_options=validated_options,
+            variant_window=None,
+        )
+        return self._block_iterator(
+            size,
+            normalized_options,
+            validated_options,
+            members,
+            options,
+        )
 
     @overload
     def iter_regions(
@@ -595,24 +607,37 @@ class Dataset:
         size: int,
         read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
+        members: dict[str, str],
+        options: dict[str, Any],
     ) -> Iterator[ReadResult]:
-        start = 0
-        while True:
-            # Variant windows are expressed in retained-variant coordinates.
-            # Rust applies metadata/genotype filters before deciding whether a
-            # retained variant belongs to this block.
-            payload = self._read_payload(
-                read_options=read_options,
-                validated_options=validated_options,
-                variant_window={"start": start, "len": size},
-            )
-            variant_count = payload.matrix.shape[1]
-            if variant_count == 0:
-                break
-            yield payload.to_result(read_options)
-            if variant_count < size:
-                break
-            start += size
+        native = _call_native(
+            _rust._BlockReader,
+            self.source.format.value,
+            members,
+            read_options.kind,
+            validated_options.sparse_format is not None,
+            options,
+            size,
+        )
+        try:
+            while (rust_result := _call_native(native.next_block)) is not None:
+                payload = self._assemble_read_payload(
+                    rust_result,
+                    read_options=read_options,
+                    validated_options=validated_options,
+                )
+                yield payload.to_result(read_options)
+        except GeneratorExit:
+            _call_native(native.close)
+            raise
+        except BaseException as primary:
+            try:
+                _call_native(native.close)
+            except BaseException as close_error:
+                primary.add_note(f"native block reader close failed: {type(close_error).__name__}: {close_error}")
+            raise
+        else:
+            _call_native(native.close)
 
     def _read_validated(
         self,
@@ -621,22 +646,21 @@ class Dataset:
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
     ) -> ReadResult:
-        # Whole reads expose the public return contract immediately. Block
-        # reads use _read_payload first so pagination can inspect matrix shape
-        # without unpacking the public tuple form.
+        # Whole reads expose the public return contract after assembling the
+        # stateless native payload.
         return self._read_payload(
             read_options=read_options,
             validated_options=validated_options,
             variant_window=variant_window,
         ).to_result(read_options)
 
-    def _read_payload(
+    def _native_read_arguments(
         self,
         *,
         read_options: _ReadOptions,
         validated_options: _ValidatedReadOptions,
         variant_window: dict[str, int] | None,
-    ) -> _ReadPayload:
+    ) -> tuple[dict[str, str], dict[str, Any]]:
         members = {key: str(path) for key, path in self.source.members.items()}
         options = {
             "samples": None if read_options.samples is None else list(read_options.samples),
@@ -648,8 +672,16 @@ class Dataset:
             "return_variants": read_options.return_variants,
             "matrix_only": not read_options.return_samples and not read_options.return_variants,
         }
+        return members, options
+
+    def _assemble_read_payload(
+        self,
+        rust_result: dict[str, Any],
+        *,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+    ) -> _ReadPayload:
         if validated_options.sparse_format is None:
-            rust_result = self._read_from_rust(read_options.kind, False, members, options)
             genotype_matrix = dense_array_from_rust(
                 values=rust_result["values"],
                 shape=tuple(rust_result["shape"]),
@@ -657,7 +689,6 @@ class Dataset:
                 values_layout=str(rust_result.get("values_layout", "sample_major")),
             )
         else:
-            rust_result = self._read_from_rust(read_options.kind, True, members, options)
             genotype_matrix = sparse_matrix_from_rust(
                 indptr=rust_result["indptr"],
                 indices=rust_result["indices"],
@@ -666,8 +697,6 @@ class Dataset:
                 dtype=validated_options.dtype,
                 sparse_format=validated_options.sparse_format,
             )
-        # Metadata frames are assembled only when requested. Large PLINK2
-        # block reads can otherwise avoid parsing full variant metadata.
         sample_metadata = (
             samples_frame(
                 rust_result["samples"],
@@ -678,6 +707,30 @@ class Dataset:
         )
         variant_metadata = variants_frame(rust_result["variants"]) if read_options.return_variants else None
         return _ReadPayload(genotype_matrix, sample_metadata, variant_metadata)
+
+    def _read_payload(
+        self,
+        *,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+        variant_window: dict[str, int] | None,
+    ) -> _ReadPayload:
+        members, options = self._native_read_arguments(
+            read_options=read_options,
+            validated_options=validated_options,
+            variant_window=variant_window,
+        )
+        rust_result = self._read_from_rust(
+            read_options.kind,
+            validated_options.sparse_format is not None,
+            members,
+            options,
+        )
+        return self._assemble_read_payload(
+            rust_result,
+            read_options=read_options,
+            validated_options=validated_options,
+        )
 
     def _read_from_rust(
         self,
@@ -690,12 +743,7 @@ class Dataset:
             read = _rust.read_haplotypes_sparse if sparse else _rust.read_haplotypes_dense
         else:
             read = _rust.read_sparse if sparse else _rust.read_dense
-        try:
-            return read(self.source.format.value, members, options)
-        except _RUST_PUBLIC_ERROR_TYPES as error:
-            raise _public_rust_error(error) from error
-        except ValueError as error:
-            raise _public_read_error(error) from error
+        return _call_native(read, self.source.format.value, members, options)
 
     def _metadata(self) -> dict[str, Any]:
         if self._metadata_cache is None:
@@ -809,6 +857,20 @@ def _reject_options(options: Mapping[str, object]) -> None:
 def _validate_variant_stats(stats: object) -> None:
     if stats is not None:
         raise InvalidOptionError("variant stats are not implemented until a later phase")
+
+
+def _call_native(
+    native_call: Callable[..., _NativeResult],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> _NativeResult:
+    try:
+        return native_call(*args, **kwargs)
+    except _RUST_PUBLIC_ERROR_TYPES as error:
+        raise _public_rust_error(error) from error
+    except ValueError as error:
+        raise _public_read_error(error) from error
 
 
 def _public_rust_error(error: Exception) -> Exception:

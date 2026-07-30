@@ -1,6 +1,7 @@
 # pattern: Imperative Shell
 
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -60,31 +61,6 @@ def write_blocks_vcf(tmp_path: Path) -> Path:
     return path
 
 
-def empty_dense_rust_result() -> dict:
-    return {
-        "values": [],
-        "shape": (1, 0),
-        "samples": {
-            "fid": [],
-            "iid": [],
-            "father": [],
-            "mother": [],
-            "sex": [],
-            "phenotype": [],
-            "source_sample_index": [],
-            "haplotype_index": [],
-        },
-        "variants": {
-            "chrom": [],
-            "pos": [],
-            "id": [],
-            "a0": [],
-            "a1": [],
-        },
-        "diagnostics": {},
-    }
-
-
 def test_iter_blocks_replaces_blocks_in_public_api(tmp_path):
     import genoio
 
@@ -127,7 +103,7 @@ def test_iter_regions_rejects_variants_read_option(tmp_path):
         list(dataset.iter_regions([genoio.region("1:1-25")], variants=genoio.chrom("1")))
 
 
-def test_blocks_variant_metadata_aligns_with_each_block(tmp_path):
+def test_pbr_py_meta_001_variant_metadata_aligns_with_each_block(tmp_path):
     import genoio
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
@@ -139,7 +115,7 @@ def test_blocks_variant_metadata_aligns_with_each_block(tmp_path):
         assert G_block.shape[1] == len(variants)
 
 
-def test_blocks_return_samples_keeps_sample_order_constant(tmp_path):
+def test_pbr_py_meta_001_sample_metadata_is_present_on_every_block(tmp_path):
     import genoio
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
@@ -275,17 +251,27 @@ def test_plink2_blocks_return_samples_keeps_source_order_for_each_block(tmp_path
 )
 def test_plink2_blocks_set_matrix_only_by_metadata_needs(tmp_path, monkeypatch, read_options, expected_matrix_only):
     import genoio
+    from genoio import _rust
 
     dataset = genoio.pfile(write_fixed_width_plink2(tmp_path))
     calls = []
 
-    def fake_read_from_rust(self, kind, sparse, members, options):
-        assert kind == "geno"
-        assert sparse is False
-        calls.append(dict(options))
-        return empty_dense_rust_result()
+    class RecordingReader:
+        def __init__(self, format, members, kind, sparse, options, block_size):
+            assert format == "plink2"
+            assert members
+            assert kind == "geno"
+            assert sparse is False
+            assert block_size == 2
+            calls.append(dict(options))
 
-    monkeypatch.setattr(genoio.Dataset, "_read_from_rust", fake_read_from_rust)
+        def next_block(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(_rust, "_BlockReader", RecordingReader)
 
     list(dataset.iter_blocks(size=2, **read_options))
 
@@ -390,36 +376,125 @@ def test_plink2_blocks_reject_bad_variable_width_block_offset(tmp_path, read_opt
         next(dataset.iter_blocks(size=1, **read_options))
 
 
-def test_blocks_validate_size(tmp_path):
+def test_pbr_py_cutover_001_validates_eagerly_without_constructing_reader(
+    tmp_path,
+    monkeypatch,
+):
     import genoio
+    from genoio import _rust
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
 
+    def fail_if_constructed(*args, **kwargs):
+        raise AssertionError("_BlockReader must not be constructed during eager validation")
+
+    monkeypatch.setattr(_rust, "_BlockReader", fail_if_constructed)
     with pytest.raises(genoio.InvalidOptionError, match="positive integer"):
-        list(dataset.iter_blocks(size=0))
+        dataset.iter_blocks(size=0)
 
     with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
-        list(dataset.iter_blocks(size=2, sparse=[]))
+        dataset.iter_blocks(size=2, sparse=[])
+
+    with pytest.raises(genoio.UnsupportedRepresentation):
+        dataset.iter_blocks(size=2, dosage="dosage", sparse=True)
 
 
-def test_blocks_request_bounded_variant_windows_at_rust_boundary(tmp_path, monkeypatch):
+def test_pbr_py_cutover_001_constructs_one_lazy_session_and_avoids_stateless_reads(
+    tmp_path,
+    monkeypatch,
+):
     import genoio
+    from genoio import _rust
 
     dataset = genoio.vcf(write_blocks_vcf(tmp_path))
-    calls = []
-    original = genoio.Dataset._read_payload
+    constructed = []
 
-    def recording_read_payload(self, *, variant_window, **kwargs):
-        calls.append(dict(variant_window))
-        return original(self, variant_window=variant_window, **kwargs)
+    class RecordingReader:
+        def __init__(self, format, members, kind, sparse, options, block_size):
+            constructed.append(self)
+            self._reader = _rust_reader(format, members, kind, sparse, options, block_size)
+            self.next_calls = 0
+            self.close_calls = 0
 
-    monkeypatch.setattr(genoio.Dataset, "_read_payload", recording_read_payload)
+        def next_block(self):
+            self.next_calls += 1
+            return self._reader.next_block()
 
-    list(dataset.iter_blocks(size=2))
+        def close(self):
+            self.close_calls += 1
+            return self._reader.close()
 
-    assert calls
-    assert all(call["len"] <= 2 for call in calls)
-    assert [call["start"] for call in calls] == [0, 2, 4]
+    _rust_reader = _rust._BlockReader
+
+    def fail_stateless(*args, **kwargs):
+        raise AssertionError("iter_blocks must not call a stateless read path")
+
+    monkeypatch.setattr(_rust, "_BlockReader", RecordingReader)
+    monkeypatch.setattr(genoio.Dataset, "_read_payload", fail_stateless)
+    monkeypatch.setattr(_rust, "read_dense", fail_stateless)
+    monkeypatch.setattr(_rust, "read_sparse", fail_stateless)
+    monkeypatch.setattr(_rust, "read_haplotypes_dense", fail_stateless)
+    monkeypatch.setattr(_rust, "read_haplotypes_sparse", fail_stateless)
+
+    iterator = dataset.iter_blocks(size=2)
+    assert constructed == []
+
+    first = next(iterator)
+    assert first.shape == (3, 2)
+    assert len(constructed) == 1
+
+    remaining = list(iterator)
+
+    assert [block.shape for block in remaining] == [(3, 2), (3, 1)]
+    assert len(constructed) == 1
+    assert constructed[0].next_calls == 4
+    assert constructed[0].close_calls == 1
+
+
+def test_pbr_py_iterator_001_interleaved_iterators_own_independent_sessions(
+    tmp_path,
+    monkeypatch,
+):
+    import genoio
+    from genoio import _rust
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+    native_reader = _rust._BlockReader
+    readers = []
+
+    def recording_reader(*args, **kwargs):
+        reader = native_reader(*args, **kwargs)
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(_rust, "_BlockReader", recording_reader)
+    left = dataset.iter_blocks(size=2)
+    right = dataset.iter_blocks(size=2)
+
+    left_first = next(left)
+    right_first = next(right)
+    left_second = next(left)
+    cast(Any, left).close()
+    right_second = next(right)
+    right_tail = list(right)
+
+    assert len(readers) == 2
+    assert readers[0] is not readers[1]
+    np.testing.assert_array_equal(left_first, right_first)
+    np.testing.assert_array_equal(left_second, right_second)
+    assert [block.shape for block in right_tail] == [(3, 1)]
+
+
+def test_pbr_py_cutover_001_source_open_is_deferred_until_first_next(tmp_path):
+    import genoio
+
+    path = write_blocks_vcf(tmp_path)
+    dataset = genoio.vcf(path)
+    iterator = dataset.iter_blocks(size=2)
+    path.unlink()
+
+    with pytest.raises(genoio.InvalidSourceError):
+        next(iterator)
 
 
 def test_blocks_do_not_call_public_read_internally(tmp_path, monkeypatch):

@@ -1,6 +1,8 @@
 # pattern: Imperative Shell
 
+import gc
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -13,6 +15,7 @@ from fixture_writers import (
     write_phased_hardcall_plink2,
 )
 
+import genoio
 from genoio import _rust
 
 
@@ -67,6 +70,44 @@ def _reader(
         _options(dosage=dosage, missing=missing),
         block_size,
     )
+
+
+def _dense_native_block() -> dict[str, object]:
+    return {
+        "values": [0.0],
+        "shape": (1, 1),
+        "samples": {},
+        "variants": {},
+        "diagnostics": {},
+    }
+
+
+class _ControlledReader:
+    def __init__(
+        self,
+        blocks: list[dict[str, object]] | None = None,
+        *,
+        next_error: BaseException | None = None,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self.blocks = [] if blocks is None else list(blocks)
+        self.next_error = next_error
+        self.close_error = close_error
+        self.next_calls = 0
+        self.close_calls = 0
+
+    def next_block(self) -> dict[str, object] | None:
+        self.next_calls += 1
+        if self.next_error is not None:
+            raise self.next_error
+        if self.blocks:
+            return self.blocks.pop(0)
+        return None
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 @pytest.mark.parametrize(
@@ -218,3 +259,153 @@ def test_pbr_py_error_001_missing_data_error_is_raised_by_affected_block(tmp_pat
         reader.next_block()
 
     assert reader.next_block() is None
+
+
+def test_pbr_py_error_001_constructor_error_maps_to_public_exception(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+
+    def fail_constructor(*args, **kwargs):
+        raise _rust.RustInvalidSourceError("constructor failed")
+
+    monkeypatch.setattr(_rust, "_BlockReader", fail_constructor)
+    iterator = dataset.iter_blocks(size=1)
+
+    with pytest.raises(genoio.InvalidSourceError, match="constructor failed"):
+        next(iterator)
+
+
+def test_pbr_py_error_001_advance_error_maps_and_closes_reader(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(
+        next_error=_rust.RustMissingDataError("advance failed"),
+    )
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+    iterator = dataset.iter_blocks(size=1)
+
+    with pytest.raises(genoio.MissingDataError, match="advance failed"):
+        next(iterator)
+
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_error_001_already_public_error_passes_through_unchanged(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    public_error = genoio.InvalidSourceError("public failure")
+    reader = _ControlledReader(next_error=public_error)
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+
+    with pytest.raises(genoio.InvalidSourceError, match="public failure") as raised:
+        next(dataset.iter_blocks(size=1))
+
+    assert raised.value is public_error
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_error_001_explicit_close_failure_maps_and_propagates(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(
+        [_dense_native_block()],
+        close_error=_rust.RustInvalidSourceError("close failed"),
+    )
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+    iterator = dataset.iter_blocks(size=1)
+    next(iterator)
+
+    with pytest.raises(genoio.InvalidSourceError, match="close failed"):
+        cast(Any, iterator).close()
+
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_error_001_primary_error_is_preserved_with_close_failure_note(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(
+        next_error=_rust.RustMissingDataError("primary failed"),
+        close_error=_rust.RustInvalidSourceError("close also failed"),
+    )
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+
+    with pytest.raises(genoio.MissingDataError, match="primary failed") as raised:
+        next(dataset.iter_blocks(size=1))
+
+    assert reader.close_calls == 1
+    assert any("close also failed" in note for note in raised.value.__notes__)
+
+
+def test_pbr_py_error_001_normal_exhaustion_exposes_close_failure(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(
+        close_error=_rust.RustInvalidSourceError("exhaustion close failed"),
+    )
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+
+    with pytest.raises(genoio.InvalidSourceError, match="exhaustion close failed"):
+        next(dataset.iter_blocks(size=1))
+
+    assert reader.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "exit_path",
+    [
+        pytest.param("exhaustion", id="exhaustion"),
+        pytest.param("explicit-close", id="explicit-close"),
+        pytest.param("read-error", id="read-error"),
+        pytest.param("conversion-error", id="conversion-error"),
+        pytest.param("finalization", id="finalization"),
+    ],
+)
+def test_pbr_py_lifecycle_001_public_iterator_closes_reader_once(
+    tmp_path,
+    monkeypatch,
+    exit_path,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    if exit_path == "exhaustion":
+        reader = _ControlledReader()
+    elif exit_path == "read-error":
+        reader = _ControlledReader(
+            next_error=_rust.RustMissingDataError("read failed"),
+        )
+    elif exit_path == "conversion-error":
+        reader = _ControlledReader([{"shape": (1, 1)}])
+    else:
+        reader = _ControlledReader([_dense_native_block()])
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+    iterator = dataset.iter_blocks(size=1)
+
+    if exit_path == "exhaustion":
+        assert list(iterator) == []
+    elif exit_path == "explicit-close":
+        next(iterator)
+        cast(Any, iterator).close()
+    elif exit_path == "read-error":
+        with pytest.raises(genoio.MissingDataError, match="read failed"):
+            next(iterator)
+    elif exit_path == "conversion-error":
+        with pytest.raises(KeyError, match="values"):
+            next(iterator)
+    else:
+        next(iterator)
+        del iterator
+        gc.collect()
+
+    assert reader.close_calls == 1
