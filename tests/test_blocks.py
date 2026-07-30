@@ -1,5 +1,6 @@
 # pattern: Imperative Shell
 
+import sqlite3
 from pathlib import Path
 from typing import Any, cast
 
@@ -59,6 +60,43 @@ def write_blocks_vcf(tmp_path: Path) -> Path:
 """
     )
     return path
+
+
+def write_bgen_index(path: Path) -> None:
+    contents = path.read_bytes()
+    starts = [
+        contents.index(len(variant_id).to_bytes(2, "little") + variant_id.encode()) for variant_id in ("var1", "var2")
+    ]
+    sizes = [starts[1] - starts[0], len(contents) - starts[1]]
+    rows = [
+        ("1", 10, "rs1", "A", "G", starts[0], sizes[0]),
+        ("2", 20, "rs2", "C", "T", starts[1], sizes[1]),
+    ]
+    with sqlite3.connect(f"{path}.bgi") as connection:
+        connection.execute(
+            """\
+CREATE TABLE Variant (
+    chromosome TEXT NOT NULL,
+    position INT NOT NULL,
+    rsid TEXT NOT NULL,
+    number_of_alleles INT NOT NULL,
+    allele1 TEXT NOT NULL,
+    allele2 TEXT NULL,
+    file_start_position INT NOT NULL,
+    size_in_bytes INT NOT NULL,
+    PRIMARY KEY (
+        chromosome, position, rsid, allele1, allele2, file_start_position
+    )
+)"""
+        )
+        connection.executemany(
+            """\
+INSERT INTO Variant (
+    chromosome, position, rsid, number_of_alleles, allele1, allele2,
+    file_start_position, size_in_bytes
+) VALUES (?, ?, ?, 2, ?, ?, ?, ?)""",
+            rows,
+        )
 
 
 def test_iter_blocks_replaces_blocks_in_public_api(tmp_path):
@@ -199,6 +237,55 @@ def test_bgen_dosage_blocks_yield_no_blocks_for_nonmatching_metadata_filter(tmp_
     blocks = list(dataset.iter_blocks(size=1, dosage="dosage", variants=genoio.chrom("9")))
 
     assert blocks == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "phased"),
+    [
+        pytest.param("geno", False, id="genotype-dosage"),
+        pytest.param("haplo", True, id="haplotype-dosage"),
+    ],
+)
+@pytest.mark.parametrize("indexed", [False, True], ids=["sequential", "indexed"])
+def test_pbr_py_matrix_001_pbr_py_meta_001_bgen_dosage_blocks_match_sequential_oracle(
+    tmp_path,
+    kind,
+    phased,
+    indexed,
+):
+    import genoio
+
+    path = write_bgen_dosage(tmp_path, phased=phased)
+    read_options = {
+        "kind": kind,
+        "dosage": "dosage",
+        "variants": genoio.region("1:1-15"),
+        "dtype": "float64",
+    }
+    oracle, oracle_samples, oracle_variants = cast(Any, genoio.bgen(path).read)(
+        **read_options,
+        return_samples=True,
+        return_variants=True,
+    )
+    if indexed:
+        write_bgen_index(path)
+    blocks = list(
+        genoio.bgen(path).iter_blocks(
+            size=1,
+            **read_options,
+            return_samples=True,
+            return_variants=True,
+        )
+    )
+
+    assert len(blocks) == 1
+    block, samples, variants = blocks[0]
+    np.testing.assert_array_equal(block, oracle)
+    assert block.dtype == np.dtype("float64")
+    assert samples.schema == oracle_samples.schema
+    assert samples.equals(oracle_samples)
+    assert variants.schema == oracle_variants.schema
+    assert variants.equals(oracle_variants)
 
 
 def test_plink2_blocks_honor_size_and_concatenate_to_full_dense_read(tmp_path):

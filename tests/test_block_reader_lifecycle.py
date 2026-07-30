@@ -12,6 +12,7 @@ from fixture_writers import (
     write_fixed_width_phased_dosage_plink2,
     write_fixed_width_plink2,
     write_fixed_width_plink2_dosage,
+    write_phased_dosage_plink2,
     write_phased_hardcall_plink2,
 )
 
@@ -20,7 +21,7 @@ from genoio import _rust
 
 
 def _write_block_vcf(tmp_path: Path, *, missing: bool = False) -> Path:
-    second_call = "./." if missing else "1|1"
+    second_call = ".|." if missing else "1|1"
     path = tmp_path / ("missing.vcf" if missing else "blocks.vcf")
     path.write_text(
         f"""\
@@ -261,6 +262,90 @@ def test_pbr_py_error_001_missing_data_error_is_raised_by_affected_block(tmp_pat
     assert reader.next_block() is None
 
 
+def test_pbr_py_error_001_public_header_error_is_deferred_to_first_next(tmp_path):
+    path = tmp_path / "invalid_header.vcf"
+    path.write_text("not a VCF header\n")
+    dataset = genoio.vcf(path)
+
+    iterator = dataset.iter_blocks(size=1)
+
+    with pytest.raises(genoio.InvalidSourceError, match="header|VCF"):
+        next(iterator)
+
+
+@pytest.mark.parametrize(
+    ("kind", "sparse"),
+    [
+        pytest.param("geno", False, id="dense-genotype"),
+        pytest.param("geno", "csc", id="sparse-genotype"),
+        pytest.param("haplo", False, id="dense-haplotype"),
+        pytest.param("haplo", "csr", id="sparse-haplotype"),
+    ],
+)
+def test_pbr_py_error_001_missing_error_matches_full_read_on_affected_block(
+    tmp_path,
+    kind,
+    sparse,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path, missing=True))
+    read_options = {
+        "kind": kind,
+        "sparse": sparse,
+        "missing": "raise",
+    }
+
+    with pytest.raises(genoio.MissingDataError, match="missing"):
+        cast(Any, dataset.read)(**read_options)
+    iterator = dataset.iter_blocks(size=1, **read_options)
+    assert next(iterator).shape[1] == 1
+
+    with pytest.raises(genoio.MissingDataError, match="missing"):
+        next(iterator)
+
+
+@pytest.mark.parametrize(
+    ("dataset_factory", "read_options", "match"),
+    [
+        pytest.param(
+            lambda tmp_path: genoio.vcf(_write_block_vcf(tmp_path)),
+            {"dosage": "dosage", "sparse": True},
+            "sparse dosage",
+            id="vcf-sparse-dosage",
+        ),
+        pytest.param(
+            lambda tmp_path: genoio.bgen(write_bgen_dosage(tmp_path)),
+            {"dosage": "dosage", "sparse": True},
+            "sparse genotype",
+            id="bgen-sparse-dosage",
+        ),
+        pytest.param(
+            lambda tmp_path: genoio.bfile(write_canonical_plink1(tmp_path)),
+            {"kind": "haplo"},
+            "haplo",
+            id="plink1-haplotype",
+        ),
+        pytest.param(
+            lambda tmp_path: genoio.pfile(write_phased_dosage_plink2(tmp_path)),
+            {"kind": "haplo", "dosage": "dosage", "sparse": True},
+            "sparse haplotype",
+            id="plink2-sparse-haplotype-dosage",
+        ),
+    ],
+)
+def test_pbr_py_error_001_unsupported_error_matches_full_read(
+    tmp_path,
+    dataset_factory,
+    read_options,
+    match,
+):
+    dataset = dataset_factory(tmp_path)
+
+    with pytest.raises(genoio.UnsupportedRepresentation, match=match):
+        cast(Any, dataset.read)(**read_options)
+    with pytest.raises(genoio.UnsupportedRepresentation, match=match):
+        dataset.iter_blocks(size=1, **read_options)
+
+
 def test_pbr_py_error_001_constructor_error_maps_to_public_exception(
     tmp_path,
     monkeypatch,
@@ -409,3 +494,25 @@ def test_pbr_py_lifecycle_001_public_iterator_closes_reader_once(
         gc.collect()
 
     assert reader.close_calls == 1
+
+
+def test_pbr_py_iterator_001_pbr_py_lifecycle_001_failed_iterator_does_not_affect_peer(
+    tmp_path,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path, missing=True))
+    strict = dataset.iter_blocks(size=1, missing="raise")
+    permissive = dataset.iter_blocks(size=1, missing="nan")
+
+    strict_first = next(strict)
+    permissive_first = next(permissive)
+    with pytest.raises(genoio.MissingDataError, match="missing"):
+        next(strict)
+    permissive_second = next(permissive)
+
+    np.testing.assert_array_equal(strict_first, permissive_first)
+    np.testing.assert_array_equal(
+        permissive_second,
+        np.array([[1.0], [np.nan]], dtype=np.float32),
+    )
+    with pytest.raises(StopIteration):
+        next(permissive)
