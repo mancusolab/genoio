@@ -94,6 +94,7 @@ def test_import_exposes_public_names_without_reference_packages():
 
     expected_names = {
         "__version__",
+        "BlockIterator",
         "vcf",
         "bfile",
         "bgen",

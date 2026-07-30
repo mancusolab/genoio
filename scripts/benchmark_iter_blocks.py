@@ -16,7 +16,6 @@ import json
 import platform
 import statistics
 import time
-from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -199,7 +198,7 @@ def consume_blocks(
     variant_count = 0
     row_count: int | None = None
 
-    with closing(dataset.iter_blocks(block_size, **read_options)) as blocks:
+    with dataset.iter_blocks(block_size, **read_options) as blocks:
         for yielded in blocks:
             if return_variants:
                 matrix, variants = yielded

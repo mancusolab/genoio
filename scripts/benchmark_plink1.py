@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-from bench_common import benchmark, compare_summaries, positive_int
+from bench_common import benchmark, compare_summaries, positive_int, read_first_block
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,12 +26,11 @@ def parse_args() -> argparse.Namespace:
 def read_genoio(args: argparse.Namespace) -> np.ndarray:
     import genoio
 
-    return next(
-        genoio.bfile(args.prefix).iter_blocks(
-            args.max_variants,
-            missing="nan",
-            dtype=np.float32,
-        )
+    return read_first_block(
+        genoio.bfile(args.prefix),
+        args.max_variants,
+        missing="nan",
+        dtype=np.float32,
     )
 
 

@@ -112,6 +112,122 @@ class _ControlledReader:
             raise self.close_error
 
 
+def test_pbr_py_lifecycle_001_context_exit_after_early_break_closes_reader(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader([_dense_native_block(), _dense_native_block()])
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+    iterator = dataset.iter_blocks(size=1)
+
+    assert isinstance(iterator, genoio.BlockIterator)
+    with iterator as blocks:
+        assert blocks is iterator
+        for _ in blocks:
+            break
+
+    assert reader.close_calls == 1
+    with pytest.raises(StopIteration):
+        next(iterator)
+    iterator.close()
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_lifecycle_001_unadvanced_context_does_not_open_reader(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    constructor_calls = 0
+
+    def construct_reader(*args, **kwargs):
+        nonlocal constructor_calls
+        constructor_calls += 1
+        return _ControlledReader()
+
+    monkeypatch.setattr(_rust, "_BlockReader", construct_reader)
+    iterator = dataset.iter_blocks(size=1)
+
+    with iterator:
+        pass
+
+    assert constructor_calls == 0
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+def test_pbr_py_lifecycle_001_exhausted_context_closes_reader_once(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader([_dense_native_block()])
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+
+    with dataset.iter_blocks(size=1) as iterator:
+        assert len(list(iterator)) == 1
+
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_error_001_context_preserves_body_error_when_close_fails(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(
+        [_dense_native_block()],
+        close_error=_rust.RustInvalidSourceError("close also failed"),
+    )
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+    body_error = RuntimeError("consumer failed")
+
+    with pytest.raises(RuntimeError, match="consumer failed") as raised:
+        with dataset.iter_blocks(size=1) as iterator:
+            next(iterator)
+            raise body_error
+
+    assert raised.value is body_error
+    assert any("close also failed" in note for note in raised.value.__notes__)
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_error_001_context_exit_surfaces_close_failure(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(
+        [_dense_native_block()],
+        close_error=_rust.RustInvalidSourceError("context close failed"),
+    )
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+
+    with pytest.raises(genoio.InvalidSourceError, match="context close failed"):
+        with dataset.iter_blocks(size=1) as iterator:
+            next(iterator)
+
+    assert reader.close_calls == 1
+
+
+def test_pbr_py_lifecycle_001_internal_stop_iteration_closes_reader(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = genoio.vcf(_write_block_vcf(tmp_path))
+    reader = _ControlledReader(next_error=StopIteration())
+    monkeypatch.setattr(_rust, "_BlockReader", lambda *args, **kwargs: reader)
+    iterator = dataset.iter_blocks(size=1)
+
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+    assert reader.close_calls == 1
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
 @pytest.mark.parametrize(
     ("kind", "sparse", "expected_shape"),
     [
@@ -413,6 +529,10 @@ def test_pbr_py_error_001_explicit_close_failure_maps_and_propagates(
         iterator.close()
 
     assert reader.close_calls == 1
+    iterator.close()
+    assert reader.close_calls == 1
+    with pytest.raises(StopIteration):
+        next(iterator)
 
 
 def test_pbr_py_error_001_primary_error_is_preserved_with_close_failure_note(

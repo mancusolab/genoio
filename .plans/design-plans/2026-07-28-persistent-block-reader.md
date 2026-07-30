@@ -1,15 +1,19 @@
 # Persistent Block Reader Sessions Design
 
 ## Status
-Approved for Implementation
+Implemented in Working Tree
 
 ## Handoff Decision
-- Current decision: approved
-- Ready for implementation: yes
+- Current decision: implementation verified; pending commit
+- Ready for implementation: implemented
 - Blocking items: None.
+- Verification: 482 Python tests passed with one unrelated fixture skip; Ruff,
+  formatting, ty, strict documentation, Rust formatting, and the focused
+  lifecycle/API review passed.
 
 ## Metadata
 - Date: 2026-07-28
+- Last amended: 2026-07-30
 - Slug: persistent-block-reader
 - Artifact Directory: `.plans/design-plans/artifacts/2026-07-28-persistent-block-reader`
 
@@ -21,11 +25,12 @@ parsed header, sample and filter state, source cursor, decoder state,
 diagnostics, and reusable buffers, allowing successive blocks to continue from
 the prior position.
 
-A private PyO3 class exposes the reader to `Dataset._block_iterator()`.
-Construction remains inside the Python generator to preserve lazy source
-opening; Rust performs opening and decoding without holding the GIL, then
-existing adapters create the public Python results. Rust ownership also ties
-file cleanup to generator exhaustion, closure, failure, or garbage collection.
+A private PyO3 class exposes the native reader to a public Python
+`BlockIterator`. `Dataset.iter_blocks()` validates options eagerly and returns
+an unopened iterator. The first `next()` constructs the native reader, so
+source opening remains lazy. The iterator is also a context manager, making
+early-exit cleanup deterministic while preserving plain iteration and automatic
+cleanup on exhaustion.
 
 ## Problem Statement
 `Dataset.iter_blocks()` currently produces bounded retained-variant chunks by
@@ -34,16 +39,25 @@ source and companion files, reparses headers and sample selection, and—on
 sequential or stateful formats—rescans or redecodes an increasingly long
 prefix. Memory remains bounded, but total work can grow quadratically with the
 number of variants. The implementation needs persistent per-iterator native
-state without changing the public Python read contract.
+state without changing the public Python result contract.
+
+The persistent session also makes the iterator a resource owner. A raw
+generator closes deterministically on exhaustion, failure, or explicit
+`close()`, but `break` does not notify a still-referenced generator. Requiring
+callers to wrap it in `contextlib.closing` obscures that ownership. The return
+object needs to support `with dataset.iter_blocks(...) as blocks` directly.
 
 ## Definition of Done
 - All existing `iter_blocks()` formats and modes use one persistent native
   session per iterator, eliminating repeated source reopening and prefix
   decoding.
+- `iter_blocks()` returns a context-manageable `BlockIterator`; context exit
+  closes an opened native session exactly once, including after an early
+  `break`, while source opening remains deferred until first advancement.
 - Outputs, filtering, metadata, lazy error timing, independent-iterator
   behavior, indexed pushdown, and bounded memory remain compatible.
-- Tests verify read equivalence, resource cleanup, open-once behavior, and
-  at-most-once candidate decoding.
+- Tests verify read equivalence, deterministic context-managed cleanup,
+  idempotent closure, open-once behavior, and at-most-once candidate decoding.
 - `read()` and `iter_regions()` remain unchanged. The latter's scaling and
   inaccurate BCF-index documentation become separate follow-up work.
 
@@ -53,20 +67,22 @@ state without changing the public Python read contract.
   reader session per iterator.
 - Reduce total source traversal from repeated-prefix work to one pass over
   candidate records.
-- Preserve the current Python API, block contents, filtering, metadata,
-  diagnostics, lazy failures, and bounded-memory behavior.
+- Make the returned iterator's resource ownership explicit through native
+  context-manager support and an idempotent `close()`.
+- Preserve the method parameters, block contents, filtering, metadata,
+  diagnostics, lazy failures, plain iteration, and bounded-memory behavior.
 - Prove persistence with deterministic open and decode counters.
 
 ### Non-Goals
 - Changing `Dataset.read()` or its stateless Rust entry points.
 - Improving `Dataset.iter_regions()` scaling or adding BCF index pushdown.
-- Adding a public session API, background prefetch, or concurrent block
-  decoding.
+- Adding a generic `Dataset.reader()` session API, background prefetch, or
+  concurrent block decoding.
 - Changing genotype decoding, filter definitions, missing-value semantics, or
   output types.
 
 ## Existing Patterns
-- `src/genoio/_api.py` owns public option validation, lazy Python generators,
+- `src/genoio/_api.py` owns public option validation, iterator orchestration,
   and conversion of native buffers to NumPy, SciPy, and Polars objects.
 - `rust/genoio-py/src/reads.rs` parses Python arguments into Rust-owned values,
   releases the GIL around I/O, and delegates output conversion to
@@ -84,10 +100,15 @@ state without changing the public Python read contract.
 This design adds `rust/genoio-io/src/blocks.rs` because the cross-format
 stateful reader is a stable shared contract and lifecycle boundary. It adds
 `rust/genoio-py/src/blocks.rs` because a mutable native iterator is distinct
-from the stateless functions in `reads.rs`. No new Python module is justified;
-`Dataset.iter_blocks()` remains in `src/genoio/_api.py`. Format sessions stay
-inside the existing VCF, BGEN, and PLINK module trees; their exact file split is
-decided by cohesion and file size during implementation.
+from the stateless functions in `reads.rs`.
+
+No new Python module is justified. `BlockIterator` is tightly coupled to
+`Dataset`'s existing option and result-assembly logic and has no independent
+consumer. Keeping both in `src/genoio/_api.py` avoids a private callback or
+circular-import seam created only to isolate one class. `src/genoio/__init__.py`
+exports the named return type for annotations. Format sessions stay inside the
+existing VCF, BGEN, and PLINK module trees; their exact file split is decided
+by cohesion and file size during implementation.
 
 ## Architecture
 
@@ -112,12 +133,39 @@ synchronized mutable access. Construction and `next_block()` release the GIL.
 Conversion into Python-owned arrays and Arrow-backed metadata uses the existing
 output adapters under the GIL.
 
-`Dataset._block_iterator()` constructs the native reader inside the Python
-generator body. Source opening therefore remains lazy until the first
-`next()`. The generator repeatedly requests native blocks and applies the
-existing public result conversion. EOF, `generator.close()`, exceptions, and
-garbage collection drop the native reader and close its files through Rust
-ownership. Separate Python iterators create independent sessions.
+`Dataset.iter_blocks()` returns a `BlockIterator[T]` with this public behavioral
+contract:
+
+```python
+class BlockIterator(Iterator[T]):
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]: ...
+    def close(self) -> None: ...
+```
+
+The iterator has three lifecycle states: unopened, open, and closed.
+`Dataset.iter_blocks()` validates options before constructing it, but
+`__enter__()` does not open the source. The first `__next__()` creates the
+private native reader and begins decoding. EOF closes the session and makes
+future calls return `StopIteration`. `close()` is idempotent and terminal; when
+called before first advancement, it transitions directly from unopened to
+closed without opening the source.
+
+`__exit__()` calls `close()` and never suppresses an exception from the
+consumer. If consumer code or the read path fails and cleanup also fails, the
+primary exception remains active and receives a note describing the cleanup
+failure. A cleanup failure without an active primary exception is raised
+normally. The iterator becomes closed after the first cleanup attempt even if
+that attempt raises, so later `close()` calls do not retry native cleanup. A
+best-effort finalizer remains a fallback for abandoned iterators and suppresses
+cleanup errors, but deterministic early-exit cleanup relies on the
+context-manager contract. Separate `BlockIterator` objects create independent
+native sessions.
+
+The change intentionally drops generator-specific `send()` and `throw()`
+methods. They were neither documented nor meaningful for block reads.
+Iteration, `next()`, `list()`, and explicit `close()` remain supported. This
+pre-1.0 API adjustment ships with the planned minor release.
 
 ## Model Acquisition Path
 - Path: `provided-model`
@@ -159,6 +207,8 @@ Not applicable; no external implementation is being ported.
 | INV-6 | Indexed text VCF | The CSI query borrows its BGZF reader, so the current query cannot be stored directly in an owned session. | `rust/genoio-io/src/vcf/text/source.rs:201` | confirmed |
 | INV-7 | PLINK2 | Variable-width PGEN decoding advances `PgenDecoderState` sequentially before metadata rejection. | `rust/genoio-io/src/plink/plink2/dense.rs:150` | confirmed |
 | INV-8 | BCF documentation | The Python docstring claims BCF index pushdown, but BCF bypasses the indexed text-VCF route. | `src/genoio/_api.py:565`, `rust/genoio-io/src/vcf.rs:71` | discrepancy |
+| INV-9 | Python block lifecycle | The current generator owns the native session across yields. Exhaustion, failure, and `close()` release it, but an early `break` cannot close a still-referenced generator. | `src/genoio/_api.py:452`, `src/genoio/_api.py:634` | addition |
+| INV-10 | Python region lifecycle | `iter_regions()` holds no native reader across yields; each iteration delegates to a complete `read()` call. | `src/genoio/_api.py:597`, `src/genoio/_api.py:625` | confirmed |
 
 ## External Research Findings (When Triggered)
 Not triggered. The design depends on local ownership and behavior contracts, not
@@ -194,9 +244,11 @@ Detailed artifact:
 
 ## Layer Contracts
 ### Ingress
-- Contract: `Dataset.iter_blocks(size, **read_options)` keeps its current public
-  signatures and return types. Python validates block size, read options, and
-  representation support before returning the generator.
+- Contract: `Dataset.iter_blocks(size, **read_options)` keeps its parameters
+  and typed result variants but returns `BlockIterator[T]`. Python validates
+  block size, read options, and representation support before returning the
+  unopened iterator. `BlockIterator` implements `Iterator[T]`, the context
+  manager protocol, and idempotent `close()`.
 - Rejection rules: Invalid options fail eagerly. Source opening, header errors,
   and record errors remain lazy and occur on the `next()` call that reaches
   them.
@@ -267,8 +319,10 @@ No format allocates a full-dataset genotype matrix.
   Preserve current companion counts, requested-sample selection, and
   source-order alignment checks.
 - Failure semantics: Do not prefetch or validate past the current block. A
-  native or conversion error terminates the Python generator and drops the
-  session. EOF is sticky and performs no further I/O.
+  native or conversion error terminates the Python iterator and closes the
+  session. Context exit, explicit close, and EOF are terminal. Closing an
+  unopened iterator performs no I/O. EOF is sticky and performs no further
+  I/O.
 
 ## Testing and Verification Strategy
 - TDD scope: Add failing Rust contract tests before each backend session and
@@ -276,8 +330,11 @@ No format allocates a full-dataset genotype matrix.
 - Regression strategy: Concatenate session blocks and compare them with a
   whole read for every supported representation. Include empty, exact-width,
   partial-final, filtered, indexed, metadata, missing-value, and delayed-error
-  cases. Use test-only counters for source opens and candidate decodes instead
-  of timing thresholds.
+  cases. Lifecycle tests cover early `break` inside `with`, context exit before
+  first advancement, normal exhaustion inside and outside `with`, idempotent
+  explicit close, terminal use after close, finalization fallback, independent
+  iterators, and primary-versus-close exception precedence. Use test-only
+  counters for source opens and candidate decodes instead of timing thresholds.
 - Verification commands:
   - `cargo test --workspace`
   - `.venv/bin/pytest -p no:capture`
@@ -302,7 +359,7 @@ changing Python behavior.
 **Done when:** The shared contract compiles, its lifecycle tests pass, and no
 public Python path uses it yet. Covers
 `persistent-block-reader.AC2.2`, `persistent-block-reader.AC2.6`,
-`persistent-block-reader.AC3.5`, and `persistent-block-reader.AC4.1`.
+`persistent-block-reader.AC3.9`, and `persistent-block-reader.AC4.1`.
 <!-- END_PHASE_1 -->
 
 <!-- START_PHASE_2 -->
@@ -378,25 +435,33 @@ and BCF.
 <!-- START_PHASE_5 -->
 ### Phase 5: PyO3 adapter and Python cutover
 **Goal:** Route `Dataset.iter_blocks()` through the complete native session
-matrix without changing its public contract.
+matrix and expose deterministic context-managed ownership without changing
+block results.
 
 **Components:**
 - `rust/genoio-py/src/blocks.rs` — owns the synchronized private native class,
   GIL release, panic/error boundary, and existing output conversion calls.
 - PyO3 module registration and `src/genoio/_rust.pyi` — expose the private class
   consistently to runtime and typing checks.
-- `src/genoio/_api.py` — lazily constructs the native reader inside
-  `_block_iterator()` and removes repeated retained-window calls.
+- `src/genoio/_api.py` and `src/genoio/__init__.py` — expose the typed
+  `BlockIterator`, preserve eager option validation and lazy source opening,
+  and remove repeated retained-window calls.
 - Python integration tests — cover every supported format/mode, output parity,
   eager option validation, lazy source and record failures, independent
-  iterators, close/error cleanup, and no stateless fallback.
+  iterators, context-managed early exit, idempotent close/error cleanup,
+  exception precedence, and no stateless fallback.
+- API and usage documentation — make `with dataset.iter_blocks(...) as blocks`
+  the early-exit pattern, retain bare loops for full consumption, remove the
+  `contextlib.closing` workaround, and explain why `iter_regions()` does not
+  require a context manager.
 
 **Dependencies:** Phases 2, 3, and 4.
 
 **Done when:** The complete Python suite passes with `pytest -p no:capture`,
 Rust and stub-parity checks pass, deterministic counters prove the traversal
-contract, and `read()` plus `iter_regions()` remain on their existing paths.
-Covers all acceptance criteria.
+contract, documentation and the supplemental human test plan reflect the new
+ownership contract, and `read()` plus `iter_regions()` remain on their existing
+paths. Covers all acceptance criteria.
 <!-- END_PHASE_5 -->
 
 ## Simulation And Inference-Consistency Validation
@@ -414,6 +479,8 @@ Covers all acceptance criteria.
 | R5 | A session allocates metadata or genotype storage proportional to the full dataset. | Medium | Assert block capacities and monitor allocation shape in Rust contract tests. Existing index-record lists are the only allowed variant-count-sized state. | Implementer |
 | R6 | Persistent diagnostics change private native results. | Medium | Keep cumulative counters in the session and compare each block's diagnostics with the equivalent retained-window read. | Implementer |
 | R7 | BCF indexed-pushdown documentation remains inaccurate. | Low | Track as a separate follow-up; do not expand this refactor. | Maintainer |
+| R8 | Code depends on undocumented generator-only `send()` or `throw()` methods. | Low | Document the named iterator return type and include the change in the planned pre-1.0 minor release notes. Preserve iteration, `next()`, `list()`, and `close()`. | Maintainer |
+| R9 | A cleanup error masks a consumer, read, or conversion error. | Medium | Keep the primary exception active and attach the cleanup failure as an exception note; test both single- and dual-failure paths. | Implementer |
 
 ## Additional Considerations
 **Error timing:** Option validation stays eager. Source opening occurs on the
@@ -423,9 +490,26 @@ malformed later record fails only when its block is requested.
 **Threading:** The native object serializes mutable access and releases the GIL
 during open and decode. It does not start a worker thread or prefetch blocks.
 
-**Follow-up scope:** `iter_regions()` also repeats read setup and can rescan
-unindexed sources once per region. Efficient arbitrary-region iteration needs
-separate indexing and memory-policy decisions, so it is not part of this plan.
+**Early exit:** Callers that may stop before exhaustion use the iterator as a
+context manager:
+
+```python
+with dataset.iter_blocks(10_000, return_variants=True) as blocks:
+    for matrix, variants in blocks:
+        if finished(matrix, variants):
+            break
+```
+
+Bare iteration remains appropriate when the iterator is consumed to
+exhaustion. A bare early `break` with a retained iterator reference does not
+provide deterministic cleanup; finalization remains a fallback rather than the
+ownership contract.
+
+**`iter_regions()` scope:** `iter_regions()` calls `read()` independently for
+each requested region and owns no session across yields. It therefore remains a
+normal iterator and does not gain a context-manager requirement. Its repeated
+setup, unindexed rescans, and BCF-index documentation discrepancy remain
+separate follow-up work.
 
 ## Acceptance Criteria
 ### persistent-block-reader.AC1: Persistent traversal replaces stateless pagination
@@ -467,10 +551,26 @@ separate indexing and memory-policy decisions, so it is not part of this plan.
   block is requested.
 - **persistent-block-reader.AC3.3 Failure:** Structured Rust errors retain
   their Python exception mapping; panics become `RustInternalError`.
-- **persistent-block-reader.AC3.4 Edge:** Exhaustion, `generator.close()`, read
-  errors, and garbage collection release session resources without affecting
-  independent iterators.
-- **persistent-block-reader.AC3.5 Edge:** Once EOF is observed, subsequent
+- **persistent-block-reader.AC3.4 Success:** `iter_blocks()` returns a
+  `BlockIterator` usable directly as a context manager. Exiting the context
+  after an early `break` closes the native reader exactly once even while the
+  Python iterator remains referenced.
+- **persistent-block-reader.AC3.5 Edge:** Normal exhaustion closes the native
+  reader exactly once both inside and outside a context manager. Repeated
+  `close()` calls are no-ops, and `next()` after close raises `StopIteration`.
+- **persistent-block-reader.AC3.6 Edge:** Entering and exiting the context
+  without advancing the iterator does not construct a native reader or open a
+  source.
+- **persistent-block-reader.AC3.7 Failure:** A cleanup failure is raised when
+  no primary exception is active. When consumer code, native advancement, or
+  Python conversion also fails, that primary exception remains active and
+  receives a note describing the cleanup failure. The iterator remains
+  terminal after a failed cleanup attempt.
+- **persistent-block-reader.AC3.8 Edge:** Read errors, conversion errors, and
+  garbage collection release session resources without affecting independent
+  iterators. Finalizer cleanup is best-effort and does not replace the
+  context-manager contract.
+- **persistent-block-reader.AC3.9 Edge:** Once EOF is observed, subsequent
   native calls return `None` without further I/O.
 
 ### persistent-block-reader.AC4: Memory and scaling are bounded
@@ -500,10 +600,16 @@ separate indexing and memory-policy decisions, so it is not part of this plan.
   probabilities or dosages.
 - **BGZF:** Blocked gzip compression that supports virtual offsets and random
   access within compressed genomic files.
+- **`BlockIterator`:** The public Python iterator returned by `iter_blocks()`.
+  It owns at most one native block-reader session and supports `with` and
+  idempotent `close()`.
 - **`BlockReader`:** The proposed backend-neutral, stateful Rust facade that
   owns one format session and advances it block by block.
 - **Candidate record:** A source record visited and evaluated by the reader; it
   may later be rejected by filters.
+- **Context manager:** A Python object with `__enter__()` and `__exit__()`
+  methods that performs cleanup when a `with` block exits, including by
+  `break` or exception.
 - **CSI:** Coordinate-Sorted Index, an index format that maps genomic regions to
   chunks in a coordinate-sorted source.
 - **Dosage:** The expected alternate-allele count for a sample, often
@@ -545,3 +651,5 @@ separate indexing and memory-policy decisions, so it is not part of this plan.
 | 2026-07-28 | N/A | Draft | Plan created | |
 | 2026-07-28 | Draft | In Review | Architecture and acceptance criteria approved by the user. | Codex |
 | 2026-07-28 | In Review | Approved for Implementation | Automated readiness validation passed. | Codex |
+| 2026-07-30 | Approved for Implementation | Approved for Implementation | Added the user-approved context-managed `BlockIterator` ownership amendment; implementation remains pending. | Codex |
+| 2026-07-30 | Approved for Implementation | Implemented in Working Tree | Implemented and verified the context-managed `BlockIterator` amendment; pending commit. | Codex |

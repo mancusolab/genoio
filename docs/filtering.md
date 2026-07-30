@@ -14,12 +14,13 @@ ds = genoio.vcf("data/chr22_hg38.vcf.gz")
 samples = ds.samples()
 y = load_phenotype_vector(samples["iid"])
 
-for X, variants in ds.iter_blocks(
+with ds.iter_blocks(
     5_000,
     variants=rare_high_quality,
     return_variants=True,
-):
-    association_scan(X, y, variants=variants)
+) as blocks:
+    for X, variants in blocks:
+        association_scan(X, y, variants=variants)
 ```
 
 Filters compose with Python operators:
@@ -73,13 +74,14 @@ region = genoio.region("22:20000000-21000000")
 bgen_ds = genoio.bgen("cohort.bgen")
 region = genoio.region("22:20000000-21000000")
 
-for X, variants in bgen_ds.iter_blocks(
+with bgen_ds.iter_blocks(
     1_000,
     dosage="dosage",
     variants=region,
     return_variants=True,
-):
-    analyze_region(X, variants)
+) as blocks:
+    for X, variants in blocks:
+        analyze_region(X, variants)
 ```
 
 ---

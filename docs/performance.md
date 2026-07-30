@@ -35,10 +35,10 @@ storage, filters, metadata requests, and Python environment all affect runtime.
 
 The sweep below measures common first-block patterns: matrix-only reads,
 returning variant metadata, sample filtering, and genotype-stat filtering.
-These scenarios call `next(dataset.iter_blocks(...))`; they don't measure
-sustained iteration. VCF rows use 1,000 variants because the compressed VCF
-scenarios are more expensive than the packed binary formats. PLINK rows use
-10,000 variants.
+These scenarios read one block inside the iterator's context manager; they
+don't measure sustained iteration. VCF rows use 1,000 variants because the
+compressed VCF scenarios are more expensive than the packed binary formats.
+PLINK rows use 10,000 variants.
 
 | Source | Scenario | Variants | Median | Notes |
 |---|---|---:|---:|---|

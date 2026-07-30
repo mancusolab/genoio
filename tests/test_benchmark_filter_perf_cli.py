@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -11,6 +12,24 @@ import polars as pl
 from script_loader import load_benchmark_script
 
 benchmark_filter_perf = cast(Any, load_benchmark_script("benchmark_filter_perf"))
+
+
+class _ContextBlocks:
+    def __init__(self, blocks: Iterable[Any]) -> None:
+        self._blocks = iter(blocks)
+        self.closed = False
+
+    def __iter__(self) -> _ContextBlocks:
+        return self
+
+    def __next__(self) -> Any:
+        return next(self._blocks)
+
+    def __enter__(self) -> _ContextBlocks:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.closed = True
 
 
 def test_parse_args_accepts_polymorphic_predicate(monkeypatch) -> None:
@@ -143,11 +162,12 @@ def test_numpy_retained_window_reads_until_enough_passing_variants(monkeypatch) 
         np.array([[0.0, 1.0, 1.0], [0.0, 1.0, 1.0]], dtype=np.float32),
         np.array([[2.0, 1.0], [2.0, 1.0]], dtype=np.float32),
     ]
+    blocks = _ContextBlocks(chunks)
 
     class Dataset:
-        def iter_blocks(self, size: int, **options: object):
+        def iter_blocks(self, size: int, **options: object) -> _ContextBlocks:
             assert size == 2
-            yield from chunks
+            return blocks
 
     args = SimpleNamespace(
         max_variants=2,
@@ -166,15 +186,18 @@ def test_numpy_retained_window_reads_until_enough_passing_variants(monkeypatch) 
     matrix = benchmark_filter_perf.read_numpy_retained_postfiltered(args)
 
     np.testing.assert_array_equal(matrix, np.array([[0.0, 2.0], [0.0, 2.0]], dtype=np.float32))
+    assert blocks.closed is True
 
 
 def test_source_window_variant_ids_come_from_first_base_block(monkeypatch) -> None:
+    variants = pl.DataFrame({"id": ["rs1", "rs2", "rs3"]})
+    blocks = _ContextBlocks([(np.zeros((2, 3), dtype=np.float32), variants)])
+
     class Dataset:
-        def iter_blocks(self, size: int, **options: object):
+        def iter_blocks(self, size: int, **options: object) -> _ContextBlocks:
             assert size == 3
             assert options["return_variants"] is True
-            variants = pl.DataFrame({"id": ["rs1", "rs2", "rs3"]})
-            yield np.zeros((2, 3), dtype=np.float32), variants
+            return blocks
 
     args = SimpleNamespace(max_variants=3)
     monkeypatch.setattr(benchmark_filter_perf, "dataset_for_args", lambda args: Dataset())
@@ -182,6 +205,7 @@ def test_source_window_variant_ids_come_from_first_base_block(monkeypatch) -> No
     monkeypatch.setattr(benchmark_filter_perf, "read_options", lambda args: {})
 
     assert benchmark_filter_perf.source_window_variant_ids(args) == ["rs1", "rs2", "rs3"]
+    assert blocks.closed is True
 
 
 def test_source_window_filter_rejects_duplicate_variant_ids() -> None:

@@ -4,7 +4,7 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
-from ._api import Dataset, bfile, bgen, pfile, vcf
+from ._api import BlockIterator, Dataset, bfile, bgen, pfile, vcf
 from ._errors import (
     GenoioError,
     InternalError,
@@ -38,6 +38,7 @@ except PackageNotFoundError:
 
 __all__ = [
     "__version__",
+    "BlockIterator",
     "Dataset",
     "vcf",
     "bfile",

@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast, overload
+from types import TracebackType
+from typing import Any, Literal, Self, TypeVar, cast, overload
 
 import numpy as np
 import polars as pl
@@ -44,6 +45,7 @@ from ._source import ResolvedSource, resolve_bfile, resolve_bgen, resolve_pfile,
 
 _Region = TypeVar("_Region")
 _NativeResult = TypeVar("_NativeResult")
+_BlockResult = TypeVar("_BlockResult", covariant=True)
 _RUST_ERROR_MAP = (
     (_rust.RustInternalError, InternalError),
     (_rust.RustSampleFilterError, SampleFilterError),
@@ -73,6 +75,119 @@ class _ReadPayload:
             return_samples=options.return_samples,
             return_variants=options.return_variants,
         )
+
+
+class BlockIterator(Iterator[_BlockResult]):
+    r"""Iterate over blocks while owning one persistent native reader.
+
+    `Dataset.iter_blocks()` constructs this object. Plain iteration closes the
+    reader on exhaustion. Use it as a context manager when control flow may
+    stop early so the native reader closes when the `with` block exits.
+
+    `close()` is idempotent. A closed iterator remains exhausted.
+    """
+
+    __slots__ = (
+        "_dataset",
+        "_size",
+        "_read_options",
+        "_validated_options",
+        "_members",
+        "_options",
+        "_native",
+        "_closed",
+        "__weakref__",
+    )
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        size: int,
+        read_options: _ReadOptions,
+        validated_options: _ValidatedReadOptions,
+        members: dict[str, str],
+        options: dict[str, Any],
+    ) -> None:
+        self._dataset = dataset
+        self._size = size
+        self._read_options = read_options
+        self._validated_options = validated_options
+        self._members = members
+        self._options = options
+        self._native: _rust._BlockReader | None = None
+        self._closed = False
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> _BlockResult:
+        if self._closed:
+            raise StopIteration
+        try:
+            native = self._native
+            if native is None:
+                native = _call_native(
+                    _rust._BlockReader,
+                    self._dataset.source.format.value,
+                    self._members,
+                    self._read_options.kind,
+                    self._validated_options.sparse_format is not None,
+                    self._options,
+                    self._size,
+                )
+                self._native = native
+            rust_result = _call_native(native.next_block)
+            if rust_result is None:
+                self.close()
+                raise StopIteration
+            payload = self._dataset._assemble_read_payload(
+                rust_result,
+                read_options=self._read_options,
+                validated_options=self._validated_options,
+            )
+            return cast(_BlockResult, payload.to_result(self._read_options))
+        except BaseException as primary:
+            self._close_after_failure(primary)
+            raise
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, traceback
+        try:
+            self.close()
+        except BaseException as close_error:
+            if exc_value is None:
+                raise
+            exc_value.add_note(_close_failure_note(close_error))
+        return False
+
+    def close(self) -> None:
+        """Close the native reader without opening an unadvanced iterator."""
+        if self._closed:
+            return
+        self._closed = True
+        native, self._native = self._native, None
+        if native is not None:
+            _call_native(native.close)
+
+    def _close_after_failure(self, primary: BaseException) -> None:
+        try:
+            self.close()
+        except BaseException as close_error:
+            primary.add_note(_close_failure_note(close_error))
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +492,7 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Generator[SparseMatrixResult, None, None]: ...
+    ) -> BlockIterator[SparseMatrixResult]: ...
 
     @overload
     def iter_blocks(
@@ -388,7 +503,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Generator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame], None, None]: ...
+    ) -> BlockIterator[tuple[SparseMatrixResult, pl.DataFrame, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -399,7 +514,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Generator[tuple[SparseMatrixResult, pl.DataFrame], None, None]: ...
+    ) -> BlockIterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -410,7 +525,7 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Generator[tuple[SparseMatrixResult, pl.DataFrame], None, None]: ...
+    ) -> BlockIterator[tuple[SparseMatrixResult, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -420,7 +535,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Generator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame], None, None]: ...
+    ) -> BlockIterator[tuple[np.ndarray, pl.DataFrame, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -430,7 +545,7 @@ class Dataset:
         return_samples: Literal[True],
         return_variants: Literal[False] = False,
         **read_options: object,
-    ) -> Generator[tuple[np.ndarray, pl.DataFrame], None, None]: ...
+    ) -> BlockIterator[tuple[np.ndarray, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
@@ -440,20 +555,20 @@ class Dataset:
         return_samples: Literal[False] = False,
         return_variants: Literal[True],
         **read_options: object,
-    ) -> Generator[tuple[np.ndarray, pl.DataFrame], None, None]: ...
+    ) -> BlockIterator[tuple[np.ndarray, pl.DataFrame]]: ...
 
     @overload
     def iter_blocks(
         self,
         size: int,
         **read_options: object,
-    ) -> Generator[np.ndarray, None, None]: ...
+    ) -> BlockIterator[np.ndarray]: ...
 
     def iter_blocks(
         self,
         size: int,
         **read_options: object,
-    ) -> Generator[ReadResult, None, None]:
+    ) -> BlockIterator[ReadResult]:
         r"""Yield consecutive variant blocks from this dataset.
 
         Each yielded block has at most `size` variants and follows the same
@@ -464,16 +579,16 @@ class Dataset:
         same source-encoded representation rules as [`genoio.Dataset.read`][].
 
         Source opening and record decoding are lazy: source and record errors
-        can be raised when the generator is first advanced or between yielded
-        blocks. Exhaustion, read failure, and `generator.close()` close the
-        native reader deterministically. When stopping before exhaustion, use
-        `contextlib.closing` or call `close()` explicitly:
+        can be raised when the iterator is first advanced or between yielded
+        blocks. Exhaustion and read failure close the native reader. When a loop
+        may stop before exhaustion, use the returned iterator as a context
+        manager:
 
         ```python
-        from contextlib import closing
-
-        with closing(dataset.iter_blocks(10_000)) as blocks:
-            first_block = next(blocks)
+        with dataset.iter_blocks(10_000, return_variants=True) as blocks:
+            for matrix, variants in blocks:
+                if analysis_is_complete(matrix, variants):
+                    break
         ```
 
         **Arguments:**
@@ -483,7 +598,7 @@ class Dataset:
 
         **Returns:**
 
-        Closeable generator yielding matrices or matrix/metadata tuples.
+        [`genoio.BlockIterator`][] yielding matrices or matrix/metadata tuples.
 
         **Raises:**
 
@@ -505,7 +620,8 @@ class Dataset:
             validated_options=validated_options,
             variant_window=None,
         )
-        return self._block_iterator(
+        return BlockIterator(
+            self,
             size,
             normalized_options,
             validated_options,
@@ -630,43 +746,6 @@ class Dataset:
         read = cast(Any, self.read)
         for region in regions:
             yield region, cast(ReadResult, read(variants=region, **read_options))
-
-    def _block_iterator(
-        self,
-        size: int,
-        read_options: _ReadOptions,
-        validated_options: _ValidatedReadOptions,
-        members: dict[str, str],
-        options: dict[str, Any],
-    ) -> Generator[ReadResult, None, None]:
-        native = _call_native(
-            _rust._BlockReader,
-            self.source.format.value,
-            members,
-            read_options.kind,
-            validated_options.sparse_format is not None,
-            options,
-            size,
-        )
-        try:
-            while (rust_result := _call_native(native.next_block)) is not None:
-                payload = self._assemble_read_payload(
-                    rust_result,
-                    read_options=read_options,
-                    validated_options=validated_options,
-                )
-                yield payload.to_result(read_options)
-        except GeneratorExit:
-            _call_native(native.close)
-            raise
-        except BaseException as primary:
-            try:
-                _call_native(native.close)
-            except BaseException as close_error:
-                primary.add_note(f"native block reader close failed: {type(close_error).__name__}: {close_error}")
-            raise
-        else:
-            _call_native(native.close)
 
     def _read_validated(
         self,
@@ -900,6 +979,10 @@ def _call_native(
         raise _public_rust_error(error) from error
     except ValueError as error:
         raise _public_read_error(error) from error
+
+
+def _close_failure_note(error: BaseException) -> str:
+    return f"native block reader close failed: {type(error).__name__}: {error}"
 
 
 def _public_rust_error(error: Exception) -> Exception:

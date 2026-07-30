@@ -11,7 +11,7 @@ The important `genoio` pattern is the block iterator.
 [`iter_blocks(...)`](../api/reading.md#genoio.Dataset.iter_blocks) reads at
 most `size` retained variants per iteration. The variant filter is not a Python
 callback. It's a small expression object that Rust evaluates while reading the
-source.
+source. The context manager closes the reader if the scan stops early or raises.
 
 ```python
 import polars as pl
@@ -39,10 +39,15 @@ C = design.select("age", "sex", "PC1", "PC2").to_numpy()
 # This keeps the returned matrices limited to common biallelic SNPs.
 variant_filter = genoio.maf(max=0.05) & genoio.snp() & genoio.biallelic()
 
-for X, variants in ds.iter_blocks(10_000, variants=variant_filter, return_variants=True):
-    # X has shape (samples, variants_in_this_block).
-    # variants describes the columns in X for this block only.
-    association_scan(X, y, C, variants=variants)
+with ds.iter_blocks(
+    10_000,
+    variants=variant_filter,
+    return_variants=True,
+) as blocks:
+    for X, variants in blocks:
+        # X has shape (samples, variants_in_this_block).
+        # variants describes the columns in X for this block only.
+        association_scan(X, y, C, variants=variants)
 ```
 
 Use [`iter_blocks(...)`](../api/reading.md#genoio.Dataset.iter_blocks) when your

@@ -1,18 +1,22 @@
 # Persistent block reader human test plan
 
-**Reviewed implementation:** `0b64e5be1109447c1563ac5756305c33ca565737`
+**Reviewed implementation:** uncommitted working tree based on
+`4e9638aa60767196f39e514983985e9e2b9e0d4b`
 
-**Status:** Supplemental environmental validation. Automated tests cover every
-acceptance criterion; these scenarios exercise production-scale files and
-operating-system behavior that small deterministic fixtures don't represent.
+**Status:** Automated coverage is complete for the persistent reader and the
+2026-07-30 context-managed `BlockIterator` amendment. The scenarios below
+remain supplemental environmental validation on production files.
 
 ## Automated coverage summary
 
-- All 20 leaf acceptance criteria have passing automated evidence.
+- All 24 current leaf acceptance criteria have passing automated evidence.
 - All 27 normalized requirement IDs are present in test names.
-- The final verification run passed 442 Rust tests and 450 Python tests.
-- Two Python tests skipped because optional local metadata fixtures were absent.
-  Neither skip covers persistent block reading.
+- The final verification run passed 450 Rust tests and 482 Python tests.
+- One Python test skipped because an optional local metadata fixture was
+  absent. The skip does not cover persistent block reading.
+- The focused lifecycle suite covers lazy opening, normal exhaustion, early
+  context exit, idempotent terminal closure, cleanup-error precedence, failure
+  cleanup, finalization, and sticky EOF.
 
 ## Preconditions
 
@@ -67,7 +71,7 @@ Expected results:
 
 Related criteria: AC1.2, AC1.3, AC4.1, AC4.2.
 
-## 2. Inspect handle release after early close
+## 2. Inspect context-managed handle release after an early break
 
 Start the reader in terminal 1:
 
@@ -78,11 +82,20 @@ import os
 import genoio
 
 iterator = genoio.vcf(os.environ["PBR_LARGE_VCF"]).iter_blocks(1024)
-next(iterator)
-print("PID", os.getpid(), flush=True)
-input("Inspect open handles, then press Enter to close: ")
-iterator.close()
-input("Inspect handles again, then press Enter to exit: ")
+with iterator as blocks:
+    for _ in blocks:
+        print("PID", os.getpid(), flush=True)
+        input("Inspect open handles, then press Enter to break: ")
+        break
+
+try:
+    next(iterator)
+except StopIteration:
+    pass
+else:
+    raise AssertionError("closed iterator must remain terminal")
+
+input("Context exited; inspect handles again, then press Enter to exit: ")
 PY
 ```
 
@@ -94,11 +107,12 @@ lsof -p PID | rg 'cohort\.vcf\.gz|\.tbi|\.csi'
 
 Expected results:
 
-- Before `close()`, the source and resolved index each appear at most once.
-- After `close()`, those handles are absent.
-- The iterator releases its handles without being exhausted.
+- Before context exit, the source and resolved index each appear at most once.
+- After context exit, those handles are absent even though `iterator` remains
+  referenced.
+- The iterator is terminal after context exit and does not reopen the source.
 
-Related criterion: AC3.4.
+Related criteria: AC3.4, AC3.5.
 
 ## 3. Compare real indexed VCF and BGEN reads
 
@@ -213,6 +227,6 @@ Related criteria: AC2.1, AC2.4, AC2.7.
 | Scenario | Input/corpus | Result | Notes |
 |---|---|---|---|
 | Large-file memory |  |  |  |
-| Early-close handles |  |  |  |
+| Context-exit handles |  |  |  |
 | Indexed VCF/BGEN |  |  |  |
 | PLINK2 storage modes |  |  |  |

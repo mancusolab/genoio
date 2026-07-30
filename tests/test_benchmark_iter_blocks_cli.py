@@ -8,6 +8,7 @@ import io
 import json
 import platform
 import sys
+from collections.abc import Iterable
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, cast
@@ -22,6 +23,47 @@ import genoio
 
 def _benchmark_iter_blocks() -> Any:
     return cast(Any, load_benchmark_script("benchmark_iter_blocks"))
+
+
+class _ContextBlocks:
+    def __init__(self, blocks: Iterable[Any]) -> None:
+        self._blocks = iter(blocks)
+        self.entered = False
+        self.closed = False
+
+    def __iter__(self) -> _ContextBlocks:
+        return self
+
+    def __next__(self) -> Any:
+        return next(self._blocks)
+
+    def __enter__(self) -> _ContextBlocks:
+        self.entered = True
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_read_first_block_uses_iterator_context_manager() -> None:
+    bench_common = cast(Any, load_benchmark_script("bench_common"))
+    expected = np.zeros((3, 2), dtype=np.float32)
+    blocks = _ContextBlocks([expected])
+
+    class Dataset:
+        def iter_blocks(self, size: int, **options: object) -> _ContextBlocks:
+            assert size == 2
+            assert options == {"missing": "nan"}
+            return blocks
+
+    observed = bench_common.read_first_block(Dataset(), 2, missing="nan")
+
+    assert observed is expected
+    assert blocks.entered is True
+    assert blocks.closed is True
 
 
 def test_parse_args_accepts_streaming_workload_options(monkeypatch) -> None:
@@ -154,31 +196,16 @@ def test_sparse_case_uses_supported_missing_value_policy() -> None:
 
 def test_consume_blocks_counts_exact_prefix_and_closes_early() -> None:
     benchmark_iter_blocks = _benchmark_iter_blocks()
-
-    class CloseableBlocks:
-        def __init__(self) -> None:
-            self._blocks = iter(
-                [
-                    np.zeros((3, 2), dtype=np.float32),
-                    np.ones((3, 2), dtype=np.float32),
-                    np.full((3, 2), 2.0, dtype=np.float32),
-                ]
-            )
-            self.closed = False
-
-        def __iter__(self) -> CloseableBlocks:
-            return self
-
-        def __next__(self) -> np.ndarray:
-            return next(self._blocks)
-
-        def close(self) -> None:
-            self.closed = True
-
-    blocks = CloseableBlocks()
+    blocks = _ContextBlocks(
+        [
+            np.zeros((3, 2), dtype=np.float32),
+            np.ones((3, 2), dtype=np.float32),
+            np.full((3, 2), 2.0, dtype=np.float32),
+        ]
+    )
 
     class Dataset:
-        def iter_blocks(self, size: int, **options: object) -> CloseableBlocks:
+        def iter_blocks(self, size: int, **options: object) -> _ContextBlocks:
             assert size == 2
             assert options == {"missing": "nan", "dtype": np.float32}
             return blocks
@@ -191,6 +218,7 @@ def test_consume_blocks_counts_exact_prefix_and_closes_early() -> None:
     )
 
     assert summary == benchmark_iter_blocks.ScanSummary(blocks=2, variants=4, rows=3)
+    assert blocks.entered is True
     assert blocks.closed is True
 
 
@@ -198,12 +226,16 @@ def test_consume_blocks_validates_variant_metadata_alignment() -> None:
     benchmark_iter_blocks = _benchmark_iter_blocks()
 
     class Dataset:
-        def iter_blocks(self, size: int, **options: object):
+        def iter_blocks(self, size: int, **options: object) -> _ContextBlocks:
             assert size == 2
             assert options["return_variants"] is True
-            yield (
-                np.zeros((3, 2), dtype=np.float32),
-                pl.DataFrame({"id": ["rs1"]}),
+            return _ContextBlocks(
+                [
+                    (
+                        np.zeros((3, 2), dtype=np.float32),
+                        pl.DataFrame({"id": ["rs1"]}),
+                    )
+                ]
             )
 
     with pytest.raises(RuntimeError, match="metadata rows"):
@@ -219,8 +251,8 @@ def test_consume_blocks_reports_short_source_as_workload_error() -> None:
     benchmark_iter_blocks = _benchmark_iter_blocks()
 
     class Dataset:
-        def iter_blocks(self, size: int, **options: object):
-            yield np.zeros((3, 1), dtype=np.float32)
+        def iter_blocks(self, size: int, **options: object) -> _ContextBlocks:
+            return _ContextBlocks([np.zeros((3, 1), dtype=np.float32)])
 
     with pytest.raises(ValueError, match="source ended after 1 retained variants"):
         benchmark_iter_blocks.consume_blocks(

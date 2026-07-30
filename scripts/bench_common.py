@@ -1,3 +1,6 @@
+# pattern: Mixed (unavoidable)
+# Reason: Benchmark timing, output validation, and iterator cleanup share one support boundary.
+
 from __future__ import annotations
 
 import argparse
@@ -8,6 +11,12 @@ from typing import Any
 
 import numpy as np
 from scipy import sparse as scipy_sparse
+
+
+def read_first_block(dataset: Any, size: int, **read_options: object) -> Any:
+    """Return one block and close its persistent reader before returning."""
+    with dataset.iter_blocks(size, **read_options) as blocks:
+        return next(blocks)
 
 
 def positive_int(value: str) -> int:
