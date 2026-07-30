@@ -1032,6 +1032,16 @@ mod tests {
         }
     }
 
+    fn assert_f32_values(actual: &[f32], expected: &[f32], context: &str) {
+        assert_eq!(actual.len(), expected.len(), "{context}: value length");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual.is_nan() && expected.is_nan()) || actual == expected,
+                "{context}: value {index} differs: actual={actual:?}, expected={expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn pbr_rust_bcf_001_concrete_session_is_send() {
         fn assert_send<T: Send>() {}
@@ -1177,11 +1187,64 @@ mod tests {
                 else {
                     panic!("dense missing-policy route should return dense output");
                 };
-                if missing_policy == DenseMissingPolicy::Nan {
-                    assert!(matrix.values.iter().any(|value| value.is_nan()));
+                let missing_value = if missing_policy == DenseMissingPolicy::Nan {
+                    f32::NAN
                 } else {
-                    assert!(matrix.values.iter().all(|value| value.is_finite()));
-                }
+                    1.0
+                };
+                let expected = if dosage_source == DosageSource::Hardcall {
+                    vec![0.0, 1.0, missing_value, 1.0, 2.0, 0.0]
+                } else {
+                    vec![0.1, 0.9, missing_value, 1.0, 1.9, 0.2]
+                };
+                let context = format!("{dosage_source:?}/{missing_policy:?}");
+                assert_f32_values(&matrix.values, &expected, &context);
+                assert_eq!(
+                    matrix
+                        .values
+                        .iter()
+                        .map(|value| value.is_nan())
+                        .collect::<Vec<_>>(),
+                    if missing_policy == DenseMissingPolicy::Nan {
+                        vec![false, false, true, false, false, false]
+                    } else {
+                        vec![false; 6]
+                    },
+                    "{context}: missing mask"
+                );
+                assert_eq!(
+                    matrix
+                        .samples
+                        .as_ref()
+                        .expect("missing-policy BCF output should include samples")
+                        .iter()
+                        .map(|sample| sample.iid.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["s1", "s2"],
+                    "{context}: sample metadata"
+                );
+                assert_eq!(
+                    matrix
+                        .variants
+                        .as_ref()
+                        .expect("missing-policy BCF output should include variants")
+                        .positions,
+                    vec![10, 20, 30],
+                    "{context}: variant metadata"
+                );
+                assert_eq!(
+                    matrix.diagnostics,
+                    DenseDiagnostics {
+                        requested_samples: 2,
+                        retained_samples: 2,
+                        missing_samples: 0,
+                        candidate_variants: 3,
+                        retained_variants: 3,
+                        dropped_metadata_variants: 0,
+                        dropped_genotype_variants: 0,
+                    },
+                    "{context}: diagnostics"
+                );
             }
         }
 

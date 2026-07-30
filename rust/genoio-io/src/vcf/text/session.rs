@@ -1229,6 +1229,12 @@ mod tests {
 1\t60\tafter\tC\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|0:0.1
 ";
 
+    const MISSING_POLICY_RECORDS: &str = "\
+1\t10\tvalid\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.25\t1|1:1.75
+1\t20\tmissing\tC\tT\t.\tPASS\t.\tGT:DS\t.|.:.\t0|1:1.25
+1\t30\ttail\tG\tA\t.\tPASS\t.\tGT:DS\t1|0:0.75\t0|0:0.0
+";
+
     fn write_bgzf_fixture(path: &Path, records: &str, build_index: bool) {
         let file = fs::File::create(path).expect("BGZF parity fixture should be created");
         let mut writer = noodles_bgzf::io::Writer::new(file);
@@ -1574,6 +1580,98 @@ mod tests {
                 );
             }
             _ => panic!("{context}: persistent and stateless output kinds differ"),
+        }
+    }
+
+    fn assert_dense_values(
+        output: BlockOutput,
+        expected: &[f32],
+        expected_positions: &[i64],
+        matrix_kind: MatrixKind,
+        context: &str,
+    ) {
+        let BlockOutput::Dense(matrix) = output else {
+            panic!("{context}: expected dense output");
+        };
+        assert_eq!(
+            matrix.layout,
+            DenseLayout::VariantMajor,
+            "{context}: layout"
+        );
+        assert_f32_slices_match(&matrix.values, expected, context);
+        assert_eq!(
+            matrix
+                .samples
+                .as_ref()
+                .expect("missing-policy block should include samples")
+                .iter()
+                .map(|sample| sample.iid.as_str())
+                .collect::<Vec<_>>(),
+            if matrix_kind == MatrixKind::Haplotype {
+                vec!["S1", "S1", "S2", "S2"]
+            } else {
+                vec!["S1", "S2"]
+            },
+            "{context}: requested samples must remain in source order"
+        );
+        assert_eq!(
+            matrix
+                .variants
+                .as_ref()
+                .expect("missing-policy block should include variants")
+                .positions,
+            expected_positions,
+            "{context}: variant positions"
+        );
+    }
+
+    fn assert_matrix_only_first_two(
+        output: BlockOutput,
+        matrix_kind: MatrixKind,
+        sparse: bool,
+        dosage_source: DosageSource,
+        context: &str,
+    ) {
+        match output {
+            BlockOutput::Dense(matrix) => {
+                assert!(!sparse, "{context}: dense output for sparse request");
+                assert!(matrix.samples.is_none(), "{context}: sample metadata");
+                assert!(matrix.variants.is_none(), "{context}: variant metadata");
+                assert_eq!(
+                    matrix.layout,
+                    DenseLayout::VariantMajor,
+                    "{context}: layout"
+                );
+                let expected = match (matrix_kind, dosage_source) {
+                    (MatrixKind::Genotype, DosageSource::Hardcall) => {
+                        vec![0.0, 1.0, 1.0, 2.0]
+                    }
+                    (MatrixKind::Genotype, DosageSource::Dosage) => {
+                        vec![0.1, 0.9, 1.2, 1.8]
+                    }
+                    (MatrixKind::Haplotype, DosageSource::Hardcall) => {
+                        vec![0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0]
+                    }
+                    (MatrixKind::Haplotype, DosageSource::Dosage) => unreachable!(),
+                };
+                assert_eq!(matrix.values, expected, "{context}: dense values");
+            }
+            BlockOutput::Sparse(matrix) => {
+                assert!(sparse, "{context}: sparse output for dense request");
+                assert!(matrix.samples.is_none(), "{context}: sample metadata");
+                assert!(matrix.variants.is_none(), "{context}: variant metadata");
+                assert_eq!(matrix.indptr, vec![0, 1, 2], "{context}: indptr");
+                assert_eq!(
+                    matrix.indices,
+                    if matrix_kind == MatrixKind::Haplotype {
+                        vec![3, 0]
+                    } else {
+                        vec![1, 0]
+                    },
+                    "{context}: indices"
+                );
+                assert_eq!(matrix.data, vec![1.0, 1.0], "{context}: data");
+            }
         }
     }
 
@@ -2229,6 +2327,317 @@ mod tests {
                 );
                 assert_eq!(counts.max_sparse_indptr_len, if sparse { 4 } else { 0 });
                 assert_eq!(counts.drops, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn pbr_rust_textvcf_001_002_dense_missing_policies_have_exact_values_across_routes() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let plain = dir.path().join("missing.vcf");
+        write_fixture(&plain, MISSING_POLICY_RECORDS);
+        let compressed = dir.path().join("missing.vcf.gz");
+        write_bgzf_fixture(&compressed, MISSING_POLICY_RECORDS, false);
+        let indexed = dir.path().join("missing-indexed.vcf.gz");
+        write_bgzf_fixture(&indexed, MISSING_POLICY_RECORDS, true);
+
+        let cases = [
+            (
+                "plain GT",
+                plain,
+                None,
+                MatrixKind::Genotype,
+                DosageSource::Hardcall,
+                vec![0.0, 2.0],
+                vec![f32::NAN, 1.0],
+                vec![1.0, 1.0],
+            ),
+            (
+                "compressed DS",
+                compressed,
+                None,
+                MatrixKind::Genotype,
+                DosageSource::Dosage,
+                vec![0.25, 1.75],
+                vec![f32::NAN, 1.25],
+                vec![1.25, 1.25],
+            ),
+            (
+                "indexed haplotype GT",
+                indexed,
+                Some(region_filter("1:10-30")),
+                MatrixKind::Haplotype,
+                DosageSource::Hardcall,
+                vec![0.0, 0.0, 1.0, 1.0],
+                vec![f32::NAN, f32::NAN, 0.0, 1.0],
+                vec![0.5, 0.5, 0.0, 1.0],
+            ),
+        ];
+
+        for (
+            route,
+            path,
+            filter,
+            matrix_kind,
+            dosage_source,
+            valid_values,
+            nan_values,
+            imputed_values,
+        ) in cases
+        {
+            for (policy, expected_missing) in [
+                (DenseMissingPolicy::Nan, nan_values),
+                (DenseMissingPolicy::Impute, imputed_values),
+            ] {
+                let mut mode_options = options(filter.clone());
+                mode_options.matrix_kind = matrix_kind;
+                mode_options.dosage_source = dosage_source;
+                mode_options.missing_policy = policy;
+                mode_options.requested_samples = Some(vec!["S2".to_owned(), "S1".to_owned()]);
+                let mut session = TextVcfBlockSession::open(path.clone(), mode_options)
+                    .expect("missing-policy text session should open");
+
+                assert_dense_values(
+                    session
+                        .next_block(1)
+                        .expect("valid block should decode")
+                        .expect("valid block should exist"),
+                    &valid_values,
+                    &[10],
+                    matrix_kind,
+                    &format!("{route}/{policy:?}/valid"),
+                );
+                let missing = session
+                    .next_block(1)
+                    .expect("missing block should follow its policy")
+                    .expect("missing block should exist");
+                let diagnostics = match &missing {
+                    BlockOutput::Dense(matrix) => matrix.diagnostics.clone(),
+                    BlockOutput::Sparse(_) => unreachable!(),
+                };
+                assert_dense_values(
+                    missing,
+                    &expected_missing,
+                    &[20],
+                    matrix_kind,
+                    &format!("{route}/{policy:?}/missing"),
+                );
+                assert_eq!(diagnostics.candidate_variants, 2);
+                assert_eq!(diagnostics.retained_variants, 1);
+                assert_eq!(diagnostics.dropped_metadata_variants, 0);
+                assert_eq!(diagnostics.dropped_genotype_variants, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn pbr_rust_textvcf_001_002_raise_is_delayed_terminal_and_does_not_read_tail() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let plain = dir.path().join("raise.vcf");
+        write_fixture(&plain, MISSING_POLICY_RECORDS);
+        let compressed = dir.path().join("raise.vcf.gz");
+        write_bgzf_fixture(&compressed, MISSING_POLICY_RECORDS, false);
+        let indexed = dir.path().join("raise-indexed.vcf.gz");
+        write_bgzf_fixture(&indexed, MISSING_POLICY_RECORDS, true);
+
+        for (route, path, filter, matrix_kind, dosage_source) in [
+            (
+                "plain GT",
+                plain,
+                None,
+                MatrixKind::Genotype,
+                DosageSource::Hardcall,
+            ),
+            (
+                "compressed DS",
+                compressed,
+                None,
+                MatrixKind::Genotype,
+                DosageSource::Dosage,
+            ),
+            (
+                "indexed haplotype GT",
+                indexed,
+                Some(region_filter("1:10-30")),
+                MatrixKind::Haplotype,
+                DosageSource::Hardcall,
+            ),
+        ] {
+            let probe = TextVcfWorkProbe::default();
+            let mut mode_options = options(filter);
+            mode_options.matrix_kind = matrix_kind;
+            mode_options.dosage_source = dosage_source;
+            mode_options.missing_policy = DenseMissingPolicy::Raise;
+            let mut session =
+                TextVcfBlockSession::open_with_probe(path, mode_options, probe.clone())
+                    .expect("raise-policy text session should open");
+
+            assert!(session
+                .next_block(1)
+                .expect("valid first block should decode")
+                .is_some());
+            let error = session
+                .next_block(1)
+                .expect_err("retained missing second block should fail");
+            assert!(error.to_string().contains("missing"), "{route}: {error}");
+            let after_error = probe.snapshot();
+            assert!(session
+                .next_block(1)
+                .expect("failed session should be terminal")
+                .is_none());
+            assert_eq!(probe.snapshot(), after_error, "{route}: sticky error state");
+            assert_eq!(after_error.candidate_visits, 2, "{route}: no tail visit");
+            assert_eq!(
+                after_error.gt_decodes,
+                usize::from(dosage_source == DosageSource::Hardcall)
+                    * if matrix_kind == MatrixKind::Haplotype {
+                        0
+                    } else {
+                        2
+                    },
+                "{route}: GT decodes"
+            );
+            assert_eq!(
+                after_error.ds_decodes,
+                usize::from(dosage_source == DosageSource::Dosage) * 2,
+                "{route}: DS decodes"
+            );
+            assert_eq!(
+                after_error.phase_decodes,
+                usize::from(matrix_kind == MatrixKind::Haplotype) * 2,
+                "{route}: phase decodes"
+            );
+        }
+    }
+
+    #[test]
+    fn pbr_rust_textvcf_001_002_genotype_stat_rejected_missing_records_skip_output_policy() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let path = dir.path().join("filtered-missing.vcf");
+        write_fixture(&path, MISSING_POLICY_RECORDS);
+        let modes = [
+            (MatrixKind::Genotype, false, DosageSource::Hardcall),
+            (MatrixKind::Genotype, false, DosageSource::Dosage),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall),
+        ];
+
+        for (matrix_kind, sparse, dosage_source) in modes {
+            let probe = TextVcfWorkProbe::default();
+            let mut mode_options = options(Some(sequential_parity_filter(0.0)));
+            mode_options.matrix_kind = matrix_kind;
+            mode_options.sparse = sparse;
+            mode_options.dosage_source = dosage_source;
+            mode_options.missing_policy = DenseMissingPolicy::Raise;
+            let mut session =
+                TextVcfBlockSession::open_with_probe(path.clone(), mode_options, probe.clone())
+                    .expect("filtered-missing text session should open");
+
+            let output = session
+                .next_block(2)
+                .expect("genotype-stat rejected missing record should not fail")
+                .expect("valid records should be retained");
+            assert_eq!(output_positions(&output), vec![10, 30]);
+            assert!(session
+                .next_block(2)
+                .expect("filtered-missing session should reach EOF")
+                .is_none());
+            let counts = probe.snapshot();
+            assert_eq!(counts.candidate_visits, 3);
+            assert_eq!(
+                counts.gt_decodes,
+                if dosage_source == DosageSource::Hardcall {
+                    3
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                counts.ds_decodes,
+                usize::from(dosage_source == DosageSource::Dosage) * 3
+            );
+            assert_eq!(
+                counts.phase_decodes,
+                usize::from(matrix_kind == MatrixKind::Haplotype) * 2,
+                "the missing record must be rejected before phase decode"
+            );
+        }
+    }
+
+    #[test]
+    fn pbr_rust_textvcf_001_002_matrix_only_and_all_filtered_cover_all_modes_and_routes() {
+        let dir = tempfile::tempdir().expect("test directory should be created");
+        let records = "\
+1\t10\trs10\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|1:0.9
+1\t20\trs20\tC\tT\t.\tPASS\t.\tGT:DS\t0|1:1.2\t1|1:1.8
+1\t30\trs30\tG\tA\t.\tPASS\t.\tGT:DS\t1|1:1.9\t0|0:0.2
+";
+        let plain = dir.path().join("matrix-only.vcf");
+        write_fixture(&plain, records);
+        let indexed = dir.path().join("matrix-only.vcf.gz");
+        write_bgzf_fixture(&indexed, records, true);
+        let modes = [
+            (MatrixKind::Genotype, false, DosageSource::Hardcall),
+            (MatrixKind::Genotype, false, DosageSource::Dosage),
+            (MatrixKind::Genotype, true, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, false, DosageSource::Hardcall),
+            (MatrixKind::Haplotype, true, DosageSource::Hardcall),
+        ];
+
+        for (route, path, route_filter, all_filtered_filter, expected_candidates) in [
+            ("plain", plain, None, chrom_filter("absent"), 3_usize),
+            (
+                "indexed",
+                indexed,
+                Some(region_filter("1:10-30")),
+                region_filter("absent:1-100"),
+                0_usize,
+            ),
+        ] {
+            for (matrix_kind, sparse, dosage_source) in modes {
+                let mut matrix_only = options(route_filter.clone());
+                matrix_only.matrix_kind = matrix_kind;
+                matrix_only.sparse = sparse;
+                matrix_only.dosage_source = dosage_source;
+                matrix_only.missing_policy = DenseMissingPolicy::Raise;
+                matrix_only.return_samples = false;
+                matrix_only.return_variants = false;
+                let mut session = TextVcfBlockSession::open(path.clone(), matrix_only)
+                    .expect("matrix-only text session should open");
+                assert_matrix_only_first_two(
+                    session
+                        .next_block(2)
+                        .expect("matrix-only block should decode")
+                        .expect("matrix-only block should exist"),
+                    matrix_kind,
+                    sparse,
+                    dosage_source,
+                    &format!("{route}/{matrix_kind:?}/{sparse}/{dosage_source:?}"),
+                );
+
+                let probe = TextVcfWorkProbe::default();
+                let mut all_filtered = options(Some(all_filtered_filter.clone()));
+                all_filtered.matrix_kind = matrix_kind;
+                all_filtered.sparse = sparse;
+                all_filtered.dosage_source = dosage_source;
+                let mut filtered =
+                    TextVcfBlockSession::open_with_probe(path.clone(), all_filtered, probe.clone())
+                        .expect("all-filtered text session should open");
+                assert!(filtered
+                    .next_block(2)
+                    .expect("all-filtered session should return EOF")
+                    .is_none());
+                let at_eof = probe.snapshot();
+                assert!(filtered
+                    .next_block(2)
+                    .expect("all-filtered EOF should be sticky")
+                    .is_none());
+                assert_eq!(probe.snapshot(), at_eof);
+                assert_eq!(at_eof.candidate_visits, expected_candidates);
+                assert_eq!(at_eof.gt_decodes, 0);
+                assert_eq!(at_eof.ds_decodes, 0);
+                assert_eq!(at_eof.phase_decodes, 0);
             }
         }
     }
