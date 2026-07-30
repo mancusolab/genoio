@@ -147,6 +147,19 @@ def test_native_stub_matches_runtime_exports():
     assert stub_exports == runtime_exports
 
 
+def test_pbr_py_private_001_native_block_reader_is_typed_but_not_public():
+    import genoio
+    from genoio import _rust
+
+    stub_module = ast.parse(Path("src/genoio/_rust.pyi").read_text())
+    stub_classes = {node.name for node in stub_module.body if isinstance(node, ast.ClassDef)}
+
+    assert "_BlockReader" in stub_classes
+    assert hasattr(_rust, "_BlockReader")
+    assert "_BlockReader" not in genoio.__all__
+    assert not hasattr(genoio, "_BlockReader")
+
+
 def test_package_metadata_includes_release_urls_and_license():
     package_metadata = metadata("genoio")
     project_urls = package_metadata.get_all("Project-URL") or []

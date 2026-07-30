@@ -16,6 +16,15 @@ pub(crate) struct ReadOptions {
     pub(crate) return_variants: bool,
 }
 
+pub(crate) struct BlockOptions {
+    pub(crate) requested_samples: Option<Vec<String>>,
+    pub(crate) variant_filter: Option<VariantFilter>,
+    pub(crate) dosage: DosageSource,
+    pub(crate) missing: DenseMissingPolicy,
+    pub(crate) return_samples: bool,
+    pub(crate) return_variants: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DosageSource {
     Hardcall,
@@ -34,11 +43,32 @@ impl DosageSource {
     }
 }
 
+impl From<DosageSource> for genoio_io::DosageSource {
+    fn from(value: DosageSource) -> Self {
+        match value {
+            DosageSource::Hardcall => Self::Hardcall,
+            DosageSource::Dosage => Self::Dosage,
+        }
+    }
+}
+
 pub(crate) fn read_options(options: &Bound<'_, PyDict>) -> PyResult<ReadOptions> {
+    let block = block_options(options)?;
     Ok(ReadOptions {
+        requested_samples: block.requested_samples,
+        variant_filter: block.variant_filter,
+        variant_window: variant_window_option(options)?,
+        dosage: block.dosage,
+        missing: block.missing,
+        return_samples: block.return_samples,
+        return_variants: block.return_variants,
+    })
+}
+
+pub(crate) fn block_options(options: &Bound<'_, PyDict>) -> PyResult<BlockOptions> {
+    Ok(BlockOptions {
         requested_samples: samples_option(options)?,
         variant_filter: variants_option(options)?,
-        variant_window: variant_window_option(options)?,
         dosage: dosage_option(options)?,
         missing: missing_policy_option(options)?,
         return_samples: bool_option(options, "return_samples")?,

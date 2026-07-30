@@ -6,12 +6,7 @@ use genoio_core::{DenseGenotypeMatrix, GenoioError, MetadataOutput, SparseGenoty
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::options::{DosageSource, ReadOptions};
-
-const SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED: &str =
-    "sparse dosage-backed genotype reads are intentionally unsupported";
-const PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED: &str =
-    "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; use dense haplotype reads with sparse=False";
+use crate::options::{BlockOptions, DosageSource, ReadOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MatrixKind {
@@ -27,6 +22,15 @@ impl MatrixKind {
             other => Err(GenoioError::unsupported(format!(
                 "unsupported genotype kind: {other}"
             ))),
+        }
+    }
+}
+
+impl From<MatrixKind> for genoio_io::MatrixKind {
+    fn from(value: MatrixKind) -> Self {
+        match value {
+            MatrixKind::Genotype => Self::Genotype,
+            MatrixKind::Haplotype => Self::Haplotype,
         }
     }
 }
@@ -51,6 +55,18 @@ impl SourceFormat {
             other => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unsupported source format: {other}"
             ))),
+        }
+    }
+}
+
+impl From<SourceFormat> for genoio_io::BlockFormat {
+    fn from(value: SourceFormat) -> Self {
+        match value {
+            SourceFormat::Vcf => Self::Vcf,
+            SourceFormat::Bcf => Self::Bcf,
+            SourceFormat::Plink1 => Self::Plink1,
+            SourceFormat::Plink2 => Self::Plink2,
+            SourceFormat::Bgen => Self::Bgen,
         }
     }
 }
@@ -88,6 +104,18 @@ impl SourceMembers {
             Self::Bgen { .. } => SourceFormat::Bgen,
         }
     }
+
+    pub(crate) fn into_block_source(self) -> genoio_io::BlockSource {
+        match self {
+            Self::Vcf { path } => genoio_io::BlockSource::Vcf { vcf: path },
+            Self::Bcf { path } => genoio_io::BlockSource::Bcf { bcf: path },
+            Self::Plink1 { bed, bim, fam } => genoio_io::BlockSource::Plink1 { bed, bim, fam },
+            Self::Plink2 { pgen, pvar, psam } => {
+                genoio_io::BlockSource::Plink2 { pgen, pvar, psam }
+            }
+            Self::Bgen { bgen, sample } => genoio_io::BlockSource::Bgen { bgen, sample },
+        }
+    }
 }
 
 pub(crate) fn source_members(format: &str, members: &Bound<'_, PyDict>) -> PyResult<SourceMembers> {
@@ -122,123 +150,23 @@ pub(crate) fn validate_read_support_impl(
     dosage: DosageSource,
     sparse: bool,
 ) -> Result<(), GenoioError> {
-    match (format, kind, dosage, sparse) {
-        (
-            SourceFormat::Vcf | SourceFormat::Bcf,
-            MatrixKind::Genotype,
-            DosageSource::Hardcall,
-            _,
-        )
-        | (
-            SourceFormat::Vcf | SourceFormat::Bcf,
-            MatrixKind::Haplotype,
-            DosageSource::Hardcall,
-            _,
-        )
-        | (
-            SourceFormat::Vcf | SourceFormat::Bcf,
-            MatrixKind::Genotype,
-            DosageSource::Dosage,
-            false,
-        )
-        | (
-            SourceFormat::Plink1,
-            MatrixKind::Genotype,
-            DosageSource::Hardcall,
-            _,
-        )
-        | (
-            SourceFormat::Plink2,
-            MatrixKind::Genotype,
-            DosageSource::Hardcall,
-            _,
-        )
-        | (
-            SourceFormat::Plink2,
-            MatrixKind::Haplotype,
-            DosageSource::Hardcall,
-            _,
-        )
-        | (
-            SourceFormat::Plink2,
-            MatrixKind::Genotype,
-            DosageSource::Dosage,
-            false,
-        )
-        | (
-            SourceFormat::Plink2,
-            MatrixKind::Haplotype,
-            DosageSource::Dosage,
-            false,
-        )
-        | (
-            SourceFormat::Bgen,
-            MatrixKind::Genotype,
-            DosageSource::Dosage,
-            false,
-        )
-        | (
-            SourceFormat::Bgen,
-            MatrixKind::Haplotype,
-            DosageSource::Dosage,
-            false,
-        ) => Ok(()),
-        (
-            SourceFormat::Vcf | SourceFormat::Bcf,
-            MatrixKind::Haplotype,
-            DosageSource::Dosage,
-            false,
-        ) => Err(GenoioError::unsupported(
-            "VCF haplotype dosage reads are unsupported because VCF haplotype support is hardcall GT-based",
-        )),
-        (
-            SourceFormat::Vcf | SourceFormat::Bcf | SourceFormat::Plink1 | SourceFormat::Plink2,
-            MatrixKind::Genotype,
-            DosageSource::Dosage,
-            true,
-        ) => Err(GenoioError::unsupported(
-            SPARSE_DOSAGE_BACKED_GENOTYPE_UNSUPPORTED,
-        )),
-        (
-            SourceFormat::Vcf | SourceFormat::Bcf,
-            MatrixKind::Haplotype,
-            DosageSource::Dosage,
-            true,
-        ) => Err(GenoioError::unsupported(
-            "sparse haplotype reads are intentionally unsupported for dosage-backed sources; use dense haplotype reads with sparse=False",
-        )),
-        (
-            SourceFormat::Plink2,
-            MatrixKind::Haplotype,
-            DosageSource::Dosage,
-            true,
-        ) => Err(GenoioError::unsupported(
-            PLINK2_SPARSE_DOSAGE_BACKED_HAPLOTYPE_UNSUPPORTED,
-        )),
-        (SourceFormat::Plink1, MatrixKind::Genotype, DosageSource::Dosage, false) => {
-            Err(GenoioError::unsupported(
-                "plink1 does not support dosage-backed genotype reads",
-            ))
-        }
-        (SourceFormat::Plink1, MatrixKind::Haplotype, _, _) => Err(GenoioError::unsupported(
-            "unsupported haplotype format: plink1",
-        )),
-        (SourceFormat::Bgen, MatrixKind::Genotype, _, true) => Err(GenoioError::unsupported(
-            "bgen sparse genotype reads are not implemented",
-        )),
-        (SourceFormat::Bgen, MatrixKind::Haplotype, _, true) => Err(GenoioError::unsupported(
-            "bgen sparse haplotype reads are not implemented; use dense haplotype reads with sparse=False",
-        )),
-        (SourceFormat::Bgen, MatrixKind::Genotype, DosageSource::Hardcall, false) => {
-            Err(GenoioError::unsupported(
-                "bgen hardcall genotype reads are not implemented; use dosage=\"dosage\"",
-            ))
-        }
-        (SourceFormat::Bgen, MatrixKind::Haplotype, DosageSource::Hardcall, false) => {
-            Err(GenoioError::unsupported(
-                "bgen hardcall haplotype reads are not implemented; use dosage=\"dosage\" for source-encoded phased haplotype dosage",
-            ))
-        }
+    genoio_io::validate_block_support(format.into(), kind.into(), dosage.into(), sparse)
+}
+
+pub(crate) fn block_read_options(
+    kind: MatrixKind,
+    sparse: bool,
+    options: BlockOptions,
+) -> genoio_io::BlockReadOptions {
+    genoio_io::BlockReadOptions {
+        matrix_kind: kind.into(),
+        sparse,
+        requested_samples: options.requested_samples,
+        variant_filter: options.variant_filter,
+        dosage_source: options.dosage.into(),
+        missing_policy: options.missing,
+        return_samples: options.return_samples,
+        return_variants: options.return_variants,
     }
 }
 

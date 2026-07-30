@@ -157,6 +157,22 @@ pub(crate) fn sparse_matrix_to_py(
     Ok(dict.unbind())
 }
 
+pub(crate) fn block_output_to_py(
+    py: Python<'_>,
+    output: genoio_io::BlockOutput,
+    return_samples: bool,
+    return_variants: bool,
+) -> PyResult<Py<PyDict>> {
+    match output {
+        genoio_io::BlockOutput::Dense(matrix) => {
+            dense_matrix_to_py(py, matrix, return_samples, return_variants)
+        }
+        genoio_io::BlockOutput::Sparse(matrix) => {
+            sparse_matrix_to_py(py, matrix, return_samples, return_variants)
+        }
+    }
+}
+
 fn source_capabilities_to_py(
     py: Python<'_>,
     source_capabilities: genoio_core::SourceCapabilities,

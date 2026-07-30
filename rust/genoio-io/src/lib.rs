@@ -37,7 +37,8 @@ pub use bgen::{
     read_bgen_dosage_dense_windowed, read_bgen_haplotypes_dosage_dense_windowed, read_bgen_metadata,
 };
 pub use blocks::{
-    BlockOutput, BlockReadOptions, BlockReader, BlockSource, DosageSource, MatrixKind,
+    validate_block_support, BlockFormat, BlockOutput, BlockReadOptions, BlockReader, BlockSource,
+    DosageSource, MatrixKind,
 };
 pub use error::Result;
 pub use plink::{

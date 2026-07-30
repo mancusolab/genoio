@@ -11,6 +11,7 @@
 //! reader entry points, error translation, and output conversion are private
 //! modules so the extension boundary remains explicit.
 
+mod blocks;
 mod errors;
 mod options;
 mod output;
@@ -19,6 +20,7 @@ mod source;
 
 use pyo3::prelude::*;
 
+use blocks::PyBlockReader;
 use errors::{
     RustInternalError, RustInvalidOptionError, RustInvalidSourceError, RustMissingDataError,
     RustSampleFilterError, RustUnsupportedRepresentationError,
@@ -63,6 +65,7 @@ fn _rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(read_sparse, module)?)?;
     module.add_function(wrap_pyfunction!(read_haplotypes_dense, module)?)?;
     module.add_function(wrap_pyfunction!(read_haplotypes_sparse, module)?)?;
+    module.add_class::<PyBlockReader>()?;
     module.add_class::<ArrowMetadataFrame>()?;
     Ok(())
 }

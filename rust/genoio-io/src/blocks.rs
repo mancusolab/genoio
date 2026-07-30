@@ -39,6 +39,16 @@ pub enum BlockSource {
     },
 }
 
+/// File-format family used for pure block-representation validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockFormat {
+    Vcf,
+    Bcf,
+    Plink1,
+    Plink2,
+    Bgen,
+}
+
 /// Biological row representation requested from a block reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatrixKind {
@@ -116,6 +126,12 @@ impl BlockReader {
     /// Open one persistent source session.
     pub fn open(source: BlockSource, options: BlockReadOptions, block_size: usize) -> Result<Self> {
         let lifecycle = BlockLifecycle::new(block_size)?;
+        validate_block_support(
+            source.format(),
+            options.matrix_kind,
+            options.dosage_source,
+            options.sparse,
+        )?;
         let backend = match source {
             BlockSource::Bgen { bgen, sample } => {
                 BlockBackend::Bgen(BgenBlockSession::open(bgen, sample, options)?)
@@ -146,6 +162,142 @@ impl BlockReader {
             BlockBackend::TextVcf(session) => session.next_block(block_size),
             BlockBackend::Bcf(session) => session.next_block(block_size),
         })
+    }
+}
+
+impl BlockSource {
+    fn format(&self) -> BlockFormat {
+        match self {
+            Self::Vcf { .. } => BlockFormat::Vcf,
+            Self::Bcf { .. } => BlockFormat::Bcf,
+            Self::Plink1 { .. } => BlockFormat::Plink1,
+            Self::Plink2 { .. } => BlockFormat::Plink2,
+            Self::Bgen { .. } => BlockFormat::Bgen,
+        }
+    }
+}
+
+/// Validate the backend-neutral representation matrix without opening a source.
+pub fn validate_block_support(
+    format: BlockFormat,
+    kind: MatrixKind,
+    dosage: DosageSource,
+    sparse: bool,
+) -> Result<()> {
+    match (format, kind, dosage, sparse) {
+        (
+            BlockFormat::Vcf | BlockFormat::Bcf,
+            MatrixKind::Genotype,
+            DosageSource::Hardcall,
+            _,
+        )
+        | (
+            BlockFormat::Vcf | BlockFormat::Bcf,
+            MatrixKind::Haplotype,
+            DosageSource::Hardcall,
+            _,
+        )
+        | (
+            BlockFormat::Vcf | BlockFormat::Bcf,
+            MatrixKind::Genotype,
+            DosageSource::Dosage,
+            false,
+        )
+        | (
+            BlockFormat::Plink1,
+            MatrixKind::Genotype,
+            DosageSource::Hardcall,
+            _,
+        )
+        | (
+            BlockFormat::Plink2,
+            MatrixKind::Genotype,
+            DosageSource::Hardcall,
+            _,
+        )
+        | (
+            BlockFormat::Plink2,
+            MatrixKind::Haplotype,
+            DosageSource::Hardcall,
+            _,
+        )
+        | (
+            BlockFormat::Plink2,
+            MatrixKind::Genotype | MatrixKind::Haplotype,
+            DosageSource::Dosage,
+            false,
+        )
+        | (
+            BlockFormat::Bgen,
+            MatrixKind::Genotype | MatrixKind::Haplotype,
+            DosageSource::Dosage,
+            false,
+        ) => Ok(()),
+        (
+            BlockFormat::Vcf | BlockFormat::Bcf,
+            MatrixKind::Haplotype,
+            DosageSource::Dosage,
+            false,
+        ) => Err(GenoioError::unsupported(
+            "VCF haplotype dosage reads are unsupported because VCF haplotype support is hardcall GT-based",
+        )),
+        (
+            BlockFormat::Vcf | BlockFormat::Bcf | BlockFormat::Plink1 | BlockFormat::Plink2,
+            MatrixKind::Genotype,
+            DosageSource::Dosage,
+            true,
+        ) => Err(GenoioError::unsupported(
+            "sparse dosage-backed genotype reads are intentionally unsupported",
+        )),
+        (
+            BlockFormat::Vcf | BlockFormat::Bcf,
+            MatrixKind::Haplotype,
+            DosageSource::Dosage,
+            true,
+        ) => Err(GenoioError::unsupported(
+            "sparse haplotype reads are intentionally unsupported for dosage-backed sources; use dense haplotype reads with sparse=False",
+        )),
+        (
+            BlockFormat::Plink2,
+            MatrixKind::Haplotype,
+            DosageSource::Dosage,
+            true,
+        ) => Err(GenoioError::unsupported(
+            "plink2 sparse haplotype reads are intentionally unsupported for dosage-backed sources; use dense haplotype reads with sparse=False",
+        )),
+        (
+            BlockFormat::Plink1,
+            MatrixKind::Genotype,
+            DosageSource::Dosage,
+            false,
+        ) => Err(GenoioError::unsupported(
+            "plink1 does not support dosage-backed genotype reads",
+        )),
+        (BlockFormat::Plink1, MatrixKind::Haplotype, _, _) => Err(GenoioError::unsupported(
+            "unsupported haplotype format: plink1",
+        )),
+        (BlockFormat::Bgen, MatrixKind::Genotype, _, true) => Err(GenoioError::unsupported(
+            "bgen sparse genotype reads are not implemented",
+        )),
+        (BlockFormat::Bgen, MatrixKind::Haplotype, _, true) => Err(GenoioError::unsupported(
+            "bgen sparse haplotype reads are not implemented; use dense haplotype reads with sparse=False",
+        )),
+        (
+            BlockFormat::Bgen,
+            MatrixKind::Genotype,
+            DosageSource::Hardcall,
+            false,
+        ) => Err(GenoioError::unsupported(
+            "bgen hardcall genotype reads are not implemented; use dosage=\"dosage\"",
+        )),
+        (
+            BlockFormat::Bgen,
+            MatrixKind::Haplotype,
+            DosageSource::Hardcall,
+            false,
+        ) => Err(GenoioError::unsupported(
+            "bgen hardcall haplotype reads are not implemented; use dosage=\"dosage\" for source-encoded phased haplotype dosage",
+        )),
     }
 }
 

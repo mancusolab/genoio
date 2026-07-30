@@ -60,3 +60,21 @@ fn panic_message(payload: &(dyn PanicPayload + Send)) -> &str {
         "unknown panic payload"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pyo3::Python;
+
+    use super::{catch_internal_panic, RustInternalError};
+
+    #[test]
+    fn pbr_rust_panic_001_catch_internal_panic_maps_to_rust_internal_error() {
+        Python::attach(|py| {
+            let error = catch_internal_panic::<()>(|| panic!("intentional boundary panic"))
+                .expect_err("intentional panic should be translated");
+
+            assert!(error.is_instance_of::<RustInternalError>(py));
+            assert!(error.to_string().contains("intentional boundary panic"));
+        });
+    }
+}
