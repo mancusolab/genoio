@@ -1049,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_bcf_001_002_five_mode_blocks_match_stateless_windows_and_probes() {
+    fn pbr_rust_bcf_001_pbr_rust_bcf_002_five_mode_blocks_match_stateless_windows_and_probes() {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let path = dir.path().join("matrix.bcf");
         write_fixture(
@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_bcf_001_002_missing_policy_and_sparse_rejection_are_delayed() {
+    fn pbr_rust_bcf_001_pbr_rust_bcf_002_missing_policy_and_sparse_rejection_are_delayed() {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let path = dir.path().join("missing.bcf");
         write_fixture(
@@ -1288,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_bcf_001_002_matrix_only_all_filtered_early_drop_and_setup_errors() {
+    fn pbr_rust_bcf_001_pbr_rust_bcf_002_matrix_only_all_filtered_early_drop_and_setup_errors() {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let path = dir.path().join("lifecycle.bcf");
         write_fixture(

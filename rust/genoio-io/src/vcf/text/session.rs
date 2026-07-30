@@ -2209,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_textvcf_001_002_plain_and_compressed_sequential_mode_matrix() {
+    fn pbr_rust_textvcf_001_pbr_rust_textvcf_002_plain_and_compressed_sequential_mode_matrix() {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let plain = dir.path().join("matrix.vcf");
         write_fixture(&plain, PARITY_CORE_RECORDS);
@@ -2332,7 +2332,8 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_textvcf_001_002_dense_missing_policies_have_exact_values_across_routes() {
+    fn pbr_rust_textvcf_001_pbr_rust_textvcf_002_dense_missing_policies_have_exact_values_across_routes(
+    ) {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let plain = dir.path().join("missing.vcf");
         write_fixture(&plain, MISSING_POLICY_RECORDS);
@@ -2431,7 +2432,8 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_textvcf_001_002_raise_is_delayed_terminal_and_does_not_read_tail() {
+    fn pbr_rust_textvcf_001_pbr_rust_textvcf_002_raise_is_delayed_terminal_and_does_not_read_tail()
+    {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let plain = dir.path().join("raise.vcf");
         write_fixture(&plain, MISSING_POLICY_RECORDS);
@@ -2511,7 +2513,8 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_textvcf_001_002_genotype_stat_rejected_missing_records_skip_output_policy() {
+    fn pbr_rust_textvcf_001_pbr_rust_textvcf_002_genotype_stat_rejected_missing_records_skip_output_policy(
+    ) {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let path = dir.path().join("filtered-missing.vcf");
         write_fixture(&path, MISSING_POLICY_RECORDS);
@@ -2566,7 +2569,8 @@ mod tests {
     }
 
     #[test]
-    fn pbr_rust_textvcf_001_002_matrix_only_and_all_filtered_cover_all_modes_and_routes() {
+    fn pbr_rust_textvcf_001_pbr_rust_textvcf_002_matrix_only_and_all_filtered_cover_all_modes_and_routes(
+    ) {
         let dir = tempfile::tempdir().expect("test directory should be created");
         let records = "\
 1\t10\trs10\tA\tG\t.\tPASS\t.\tGT:DS\t0|0:0.1\t0|1:0.9
