@@ -141,6 +141,96 @@ def test_iter_regions_rejects_variants_read_option(tmp_path):
         list(dataset.iter_regions([genoio.region("1:1-25")], variants=genoio.chrom("1")))
 
 
+def test_pbr_py_excluded_001_read_remains_on_stateless_native_route(
+    tmp_path,
+    monkeypatch,
+):
+    import genoio
+    from genoio import _rust
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+    native_read_dense = _rust.read_dense
+    stateless_calls = []
+
+    def fail_if_block_reader_is_constructed(*args, **kwargs):
+        raise AssertionError("Dataset.read() must not construct _BlockReader")
+
+    def recording_read_dense(*args, **kwargs):
+        stateless_calls.append((args, kwargs))
+        return native_read_dense(*args, **kwargs)
+
+    monkeypatch.setattr(_rust, "_BlockReader", fail_if_block_reader_is_constructed)
+    monkeypatch.setattr(_rust, "read_dense", recording_read_dense)
+
+    observed = dataset.read()
+
+    np.testing.assert_array_equal(
+        observed,
+        np.array(
+            [
+                [0.0, 1.0, 2.0, 0.0, 2.0],
+                [1.0, 0.0, 1.0, 0.0, 2.0],
+                [2.0, 2.0, 0.0, 1.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert len(stateless_calls) == 1
+
+
+def test_pbr_py_excluded_001_iter_regions_retains_one_read_per_region(
+    tmp_path,
+    monkeypatch,
+):
+    import genoio
+    from genoio import _rust
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+    regions = [genoio.region("1:1-25"), genoio.region("2:1-35")]
+    original_read = genoio.Dataset.read
+    read_calls = []
+
+    def fail_if_block_reader_is_constructed(*args, **kwargs):
+        raise AssertionError("Dataset.iter_regions() must not construct _BlockReader")
+
+    def recording_read(self, *args, **kwargs):
+        read_calls.append((args, kwargs))
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(_rust, "_BlockReader", fail_if_block_reader_is_constructed)
+    monkeypatch.setattr(genoio.Dataset, "read", recording_read)
+
+    region_reads = list(dataset.iter_regions(regions, return_variants=True))
+
+    assert [region for region, _ in region_reads] == regions
+    assert [variants["id"].to_list() for _, (_, variants) in region_reads] == [["rs1", "rs2"], ["rs3"]]
+    assert len(read_calls) == len(regions)
+    assert all(args == () for args, _ in read_calls)
+    assert all(options["variants"] is region for (_, options), region in zip(read_calls, regions, strict=True))
+
+
+def test_pbr_py_excluded_001_iter_regions_empty_and_validation_remain_lazy(
+    tmp_path,
+    monkeypatch,
+):
+    import genoio
+    from genoio import _rust
+
+    dataset = genoio.vcf(write_blocks_vcf(tmp_path))
+
+    def fail_if_block_reader_is_constructed(*args, **kwargs):
+        raise AssertionError("Dataset.iter_regions() must not construct _BlockReader")
+
+    monkeypatch.setattr(_rust, "_BlockReader", fail_if_block_reader_is_constructed)
+
+    empty = dataset.iter_regions([], sparse=[])
+    invalid = dataset.iter_regions([genoio.region("1:1-25")], sparse=[])
+
+    assert list(empty) == []
+    with pytest.raises(genoio.InvalidOptionError, match="unsupported sparse option"):
+        next(invalid)
+
+
 def test_pbr_py_meta_001_variant_metadata_aligns_with_each_block(tmp_path):
     import genoio
 

@@ -152,10 +152,16 @@ def test_pbr_py_private_001_native_block_reader_is_typed_but_not_public():
     from genoio import _rust
 
     stub_module = ast.parse(Path("src/genoio/_rust.pyi").read_text())
-    stub_classes = {node.name for node in stub_module.body if isinstance(node, ast.ClassDef)}
+    stub_classes = {node.name: node for node in stub_module.body if isinstance(node, ast.ClassDef)}
+    reader_stub = stub_classes["_BlockReader"]
+    reader_methods = {node.name: node for node in reader_stub.body if isinstance(node, ast.FunctionDef)}
 
-    assert "_BlockReader" in stub_classes
     assert hasattr(_rust, "_BlockReader")
+    assert set(reader_methods) == {"__init__", "next_block", "close"}
+    assert all(
+        argument.annotation is not None for method in reader_methods.values() for argument in method.args.args[1:]
+    )
+    assert all(method.returns is not None for method in reader_methods.values())
     assert "_BlockReader" not in genoio.__all__
     assert not hasattr(genoio, "_BlockReader")
 

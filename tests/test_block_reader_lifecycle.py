@@ -1,6 +1,7 @@
 # pattern: Imperative Shell
 
 import gc
+import weakref
 from pathlib import Path
 from typing import Any, cast
 
@@ -490,7 +491,10 @@ def test_pbr_py_lifecycle_001_public_iterator_closes_reader_once(
             next(iterator)
     else:
         next(iterator)
+        iterator_reference = weakref.ref(iterator)
         del iterator
+        gc.collect()
+        assert iterator_reference() is None
         gc.collect()
 
     assert reader.close_calls == 1
