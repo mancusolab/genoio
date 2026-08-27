@@ -89,9 +89,7 @@ def variants_frame(columns: MetadataPayload) -> pl.DataFrame:
 
 
 def _frame_from_arrow_stream(payload: ArrowStreamExportable, columns: list[str]) -> pl.DataFrame:
-    frame = pl.from_arrow(payload)
-    if not isinstance(frame, pl.DataFrame):
-        raise TypeError(f"Arrow metadata payload produced {type(frame).__name__}, expected Polars DataFrame")
+    frame = pl.DataFrame(payload)
     missing = [column for column in columns if column not in frame.columns]
     if missing:
         raise KeyError(f"Arrow metadata payload missing columns: {missing}")

@@ -1,3 +1,9 @@
+# pattern: Functional Core
+
+import warnings
+
+import polars as pl
+
 from genoio._assembly import samples_frame, variants_frame
 
 
@@ -45,3 +51,31 @@ def test_variants_frame_builds_from_column_payload():
         "a0": ["A", "C"],
         "a1": ["G", "T"],
     }
+
+
+def test_arrow_stream_metadata_does_not_emit_dimensionality_future_warning(monkeypatch):
+    payload = pl.DataFrame(
+        {
+            "chrom": ["1"],
+            "pos": [10],
+            "id": ["rs1"],
+            "a0": ["A"],
+            "a1": ["G"],
+        }
+    )
+
+    def ambiguous_arrow_conversion(stream):
+        warnings.warn(
+            "Arrow stream dimensionality will change in Polars 2.0",
+            FutureWarning,
+            stacklevel=2,
+        )
+        return pl.DataFrame(stream)
+
+    monkeypatch.setattr(pl, "from_arrow", ambiguous_arrow_conversion)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        frame = variants_frame(payload)
+
+    assert frame.equals(payload)
