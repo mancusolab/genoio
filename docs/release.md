@@ -1,66 +1,90 @@
 # Release
 
-This page records the local release checks for maintainers. It is intentionally
-short: the public documentation covers usage, while this page keeps packaging
-and documentation deployment steps in one place.
+Publishing a GitHub Release starts two workflows from the release tag:
 
-## Verify the tree
+- **Release** builds and smoke-tests eight wheels and one source distribution,
+  attaches them to the GitHub Release, and publishes them to PyPI with trusted
+  publishing.
+- **Documentation** builds the versioned package API and deploys the site to
+  GitHub Pages.
 
-Run the full local verification suite from a clean worktree:
+Both workflows reject a tag that does not match the package version. A manual
+workflow run requires an explicit release tag and performs the same publishing
+or deployment operation; it is not a dry run.
+
+## Prepare the release commit
+
+Start from a clean `main` branch with passing CI and Build workflows. Update the
+version in these files:
+
+- `pyproject.toml`
+- `rust/Cargo.toml`
+- `src/genoio/__init__.py` (the source-tree fallback)
+
+Refresh both lockfiles and confirm that only the genoio package versions changed:
+
+```bash
+uv lock
+cargo check --manifest-path rust/Cargo.toml --workspace
+git diff -- uv.lock rust/Cargo.lock
+```
+
+Run the complete verification suite:
 
 ```bash
 make verify
 ```
 
 This syncs the locked Python environment, builds the Rust extension, checks Rust
-formatting and lints, runs Rust and Python tests, runs Ty, builds the
-Zensical site with strict checks, and builds Rust docs with warnings treated as
-errors.
+formatting and lints, runs Rust and Python tests, runs Ty, builds the Zensical
+site with strict checks, and builds Rust docs with warnings treated as errors.
 
-CI runs the same checks as separate jobs so failures are easier to locate. It
-also runs `cargo audit` for Rust dependency advisories and builds native Linux
-and macOS wheel artifacts plus an sdist.
+Commit and push the version update. Wait for both CI and Build to pass on that
+commit before creating the release tag.
 
-## Build a wheel
+## Verify a wheel locally
 
-Build a repaired wheel before testing installation:
+Build a repaired wheel:
 
 ```bash
 make build-wheel
 ```
 
-On macOS this uses `--auditwheel=repair` and an explicit `CODESIGN_ALLOCATE`
-path so external dynamic libraries are bundled into the wheel instead of
-pointing at a local environment.
+On macOS, this uses `--auditwheel=repair` and an explicit `CODESIGN_ALLOCATE`
+path so external dynamic libraries are bundled instead of pointing at the local
+environment. GitHub Actions builds Linux wheels against `manylinux_2_28` and
+checks PyPI compatibility for both Linux and macOS wheels.
 
-GitHub Actions also builds distribution artifacts with `PyO3/maturin-action`
-on pull requests and pushes to `main`. Those artifacts are smoke checks for the
-packaging path; publishing is still manual.
-
-## Smoke-test the artifact
-
-Install the repaired wheel into a fresh environment and test each supported
-format with a small fixture:
+Install the repaired wheel into a fresh environment and run the smoke test:
 
 ```bash
 uv venv /tmp/genoio-wheel-test
 uv pip install --python /tmp/genoio-wheel-test/bin/python dist/genoio-*.whl
-/tmp/genoio-wheel-test/bin/python -c "import genoio; print(genoio.__version__)"
+/tmp/genoio-wheel-test/bin/python scripts/wheel_smoke.py
 ```
 
-For beta releases, smoke-test VCF, PLINK1, and PLINK2 reads before publishing.
+## Publish
 
-## Deploy documentation
-
-After GitHub Pages is configured for the repository, deploy the docs from the
-release commit:
+Create and push a tag that points to the verified release commit, then publish
+the GitHub Release:
 
 ```bash
-zensical build --strict
+git tag v0.4.1
+git push origin v0.4.1
+gh release create v0.4.1 --verify-tag --generate-notes
 ```
 
-Publish the generated `site/` directory with the repository's GitHub Pages
-workflow or another static-site deployment step.
+Replace `v0.4.1` with the intended version. Publishing the GitHub Release starts
+the Release and Documentation workflows. The Release workflow publishes to the
+`pypi` GitHub environment, which must remain configured as a trusted publisher
+for the `genoio` PyPI project.
 
-The configured documentation URL is
-`https://mancusolab.github.io/genoio`.
+Monitor both workflows and verify the uploaded version:
+
+```bash
+gh run list --workflow release.yml --limit 1
+gh run list --workflow deploydocs.yml --limit 1
+python -m pip index versions genoio
+```
+
+The documentation site is `https://mancusolab.github.io/genoio`.

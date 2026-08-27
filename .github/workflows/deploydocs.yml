@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release-ref:
+        description: Git release tag to document (for example, v0.4.1)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -11,8 +16,11 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages-${{ github.ref }}
+  group: pages-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release-ref }}
   cancel-in-progress: true
+
+env:
+  RELEASE_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release-ref }}
 
 jobs:
   deploy:
@@ -21,19 +29,36 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6.0.0
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check tag and package version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          tag = os.environ["RELEASE_REF"].removeprefix("refs/tags/")
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          if tag != f"v{version}":
+              raise SystemExit(f"tag {tag!r} does not match package version {version!r}")
+          print(f"validated documentation release {tag}")
+          PY
 
       - name: Build package for API docs
         run: make build-dev
@@ -41,9 +66,9 @@ jobs:
       - name: Build docs
         run: .venv/bin/zensical build --strict --clean
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: site
 
-      - uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v5.0.0
         id: deployment

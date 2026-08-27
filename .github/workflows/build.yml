@@ -24,23 +24,27 @@ jobs:
         include:
           - os: ubuntu-latest
             python-version: "3.11"
+            manylinux: "2_28"
             artifact-name: wheel-linux-py3.11
           - os: macos-latest
             python-version: "3.11"
+            manylinux: "off"
             artifact-name: wheel-macos-py3.11
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Build wheel
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.51.0
         with:
-          args: --release --out dist
+          maturin-version: v1.15.0
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --compatibility pypi -i python${{ matrix.python-version }} --out dist
           sccache: true
 
       - name: Install and smoke-test wheel
@@ -53,7 +57,7 @@ jobs:
           python scripts/wheel_smoke.py
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ matrix.artifact-name }}
           path: dist/*
